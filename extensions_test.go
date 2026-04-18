@@ -43,10 +43,29 @@ func TestAdmonitionCustomTitle(t *testing.T) {
 	assertNotContains(t, html, "<p>Deployment caveat")
 }
 
+func TestAdmonitionCustomTitleRendersEmojiShortcodes(t *testing.T) {
+	html := NewRenderer(WithWrapEmoji(true)).RenderString("> [!NOTE] Taking notes :sweat_smile:\n> Body")
+	assertContains(t, html, `<p class="admonition-title">Taking notes <span class="emoji" role="img" aria-label="sweat_smile">😅</span></p>`)
+	assertContains(t, html, "Body")
+}
+
+func TestAdmonitionCustomTitleRendersInlineCode(t *testing.T) {
+	html := NewRenderer().RenderString("> [!TIP] Use `mdpp` *carefully*\n> Body")
+	assertContains(t, html, `<p class="admonition-title">Use <code>mdpp</code> carefully</p>`)
+	assertContains(t, html, "Body")
+}
+
 func TestAdmonitionCustomTitleEscapesHTML(t *testing.T) {
 	html := NewRenderer().RenderString("> [!NOTE] <script>alert(1)</script>\n> Body")
 	assertContains(t, html, `&lt;script&gt;alert(1)&lt;/script&gt;`)
 	assertNotContains(t, html, `<script>alert(1)</script>`)
+}
+
+func TestAdmonitionCustomTitleEscapesHTMLEvenWhenUnsafeHTMLIsEnabled(t *testing.T) {
+	html := NewRenderer(WithUnsafeHTML(true)).RenderString("> [!NOTE] <script>alert(1)</script>\n> <em>Body</em>")
+	assertContains(t, html, `&lt;script&gt;alert(1)&lt;/script&gt;`)
+	assertContains(t, html, `<em>Body</em>`)
+	assertNotContains(t, html, `<p class="admonition-title"><script>alert(1)</script></p>`)
 }
 
 func TestAdmonitionAllowsUnquotedBody(t *testing.T) {

@@ -226,7 +226,7 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString(`<div class="admonition admonition-`)
 		b.WriteString(adType)
 		b.WriteString(`"><p class="admonition-title">`)
-		b.WriteString(html.EscapeString(title))
+		renderAdmonitionTitleInto(r, b, title)
 		b.WriteString("</p>")
 		renderChildrenInto(r, b, n)
 		b.WriteString("</div>\n")
@@ -306,6 +306,19 @@ func renderChildrenInto(r *Renderer, b *strings.Builder, n *Node) {
 	for _, child := range n.Children {
 		renderNodeInto(r, b, child)
 	}
+}
+
+func renderAdmonitionTitleInto(r *Renderer, b *strings.Builder, title string) {
+	root := newNode(NodeDocument)
+	root.Children = parseInline(title, nil)
+	processInlineMath(root)
+	processSuperscripts(root)
+	processEmojiShortcodes(root)
+
+	titleRenderer := *r
+	titleRenderer.unsafeHTML = false
+	titleRenderer.hardWraps = false
+	renderChildrenInto(&titleRenderer, b, root)
 }
 
 func renderTableInto(r *Renderer, b *strings.Builder, n *Node) {

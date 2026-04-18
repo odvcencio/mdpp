@@ -115,26 +115,69 @@ func processAdmonitions(root *Node) {
 }
 
 func extractAdmonitionCaption(children []*Node) (string, []*Node) {
-	if len(children) == 0 || children[0] == nil || children[0].Type != NodeText {
+	if len(children) == 0 {
 		return "", children
 	}
-	text := strings.TrimLeft(children[0].Literal, " \t")
-	if text == "" || strings.HasPrefix(text, "\n") {
+	var caption strings.Builder
+	var rest []*Node
+	foundBreak := false
+	for i, child := range children {
+		if child == nil {
+			continue
+		}
+		switch child.Type {
+		case NodeSoftBreak, NodeHardBreak:
+			rest = append(rest, children[i+1:]...)
+			foundBreak = true
+		case NodeText:
+			text := child.Literal
+			if caption.Len() == 0 {
+				text = strings.TrimLeft(text, " \t")
+			}
+			if text == "" && caption.Len() == 0 {
+				continue
+			}
+			line, tail, hasBreak := strings.Cut(text, "\n")
+			caption.WriteString(line)
+			if hasBreak {
+				if tail != "" {
+					clone := *child
+					clone.Literal = tail
+					rest = append(rest, &clone)
+				}
+				rest = append(rest, children[i+1:]...)
+				foundBreak = true
+			}
+		default:
+			caption.WriteString(admonitionCaptionSource(child))
+		}
+		if foundBreak {
+			break
+		}
+	}
+	title := strings.TrimSpace(caption.String())
+	if title == "" {
 		return "", children
 	}
-	line, rest, hasRest := strings.Cut(text, "\n")
-	caption := strings.TrimSpace(line)
-	if caption == "" {
-		return "", children
+	return title, rest
+}
+
+func admonitionCaptionSource(n *Node) string {
+	if n == nil {
+		return ""
 	}
-	out := make([]*Node, 0, len(children))
-	if hasRest && rest != "" {
-		clone := *children[0]
-		clone.Literal = rest
-		out = append(out, &clone)
+	switch n.Type {
+	case NodeText, NodeHTMLInline, NodeHTMLBlock, NodeMathInline, NodeMathBlock, NodeSuperscript, NodeSubscript, NodeEmoji:
+		return n.Literal
+	case NodeCodeSpan:
+		return "`" + n.Literal + "`"
+	default:
+		var out strings.Builder
+		for _, child := range n.Children {
+			out.WriteString(admonitionCaptionSource(child))
+		}
+		return out.String()
 	}
-	out = append(out, children[1:]...)
-	return caption, out
 }
 
 func cleanAdmonitionLeadingChildren(children []*Node) []*Node {
