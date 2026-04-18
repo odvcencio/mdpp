@@ -692,6 +692,10 @@ func convertTable(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 
 // parseInline parses inline markdown text using the markdown_inline grammar.
 func parseInline(text string, source []byte) []*Node {
+	return parseInlineWithRecovery(text, source, true)
+}
+
+func parseInlineWithRecovery(text string, source []byte, recoverSuffix bool) []*Node {
 	lang := inlineLang()
 	if lang == nil {
 		return []*Node{textNode(text)}
@@ -722,7 +726,12 @@ func parseInline(text string, source []byte) []*Node {
 			nodes = append([]*Node{textNode(string(src[:start]))}, nodes...)
 		}
 		if end >= 0 && end < len(src) {
-			appendText(&nodes, string(src[end:]))
+			suffix := string(src[end:])
+			if recoverSuffix {
+				nodes = append(nodes, parseInlineWithRecovery(suffix, source, false)...)
+			} else {
+				appendText(&nodes, suffix)
+			}
 		}
 	}
 	return splitTextNewlines(nodes)

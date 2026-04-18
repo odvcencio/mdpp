@@ -39,7 +39,7 @@ func TestRenderParagraphPreservesTailAfterQuotedText(t *testing.T) {
 
 	for _, want := range []string{
 		`real &#34;superstitious&#34; or &#34;magical&#34; attribution`,
-		`they&#39;re not well understood so they&#39;re feared`,
+		`<strong>they&#39;re not well understood so they&#39;re feared.</strong>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected rendered paragraph to contain %q, got %s", want, out)
@@ -66,7 +66,7 @@ func TestRenderDocumentPreservesParagraphAfterOrderedListWithFootnotes(t *testin
 
 	for _, want := range []string{
 		`real &#34;superstitious&#34; or &#34;magical&#34; attribution`,
-		`they&#39;re not well understood so they&#39;re feared`,
+		`<strong>they&#39;re not well understood so they&#39;re feared.</strong>`,
 		`<a href="https://github.com/odvcencio/gotreesitter">gotreesitter</a>`,
 	} {
 		if !strings.Contains(out, want) {
