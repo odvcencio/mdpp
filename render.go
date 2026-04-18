@@ -96,6 +96,11 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		}
 		b.WriteByte('<')
 		b.WriteString(tag)
+		if tag == "ol" && n.Attrs != nil && n.Attrs["start"] != "" {
+			b.WriteString(` start="`)
+			b.WriteString(html.EscapeString(n.Attrs["start"]))
+			b.WriteByte('"')
+		}
 		b.WriteString(">\n")
 		renderChildrenInto(r, b, n)
 		b.WriteString("</")

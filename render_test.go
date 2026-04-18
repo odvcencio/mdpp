@@ -105,6 +105,25 @@ func TestRenderList(t *testing.T) {
 	}
 }
 
+func TestRenderOrderedList(t *testing.T) {
+	for _, src := range []string{"1. one\n2. two", "1) one\n2) two"} {
+		out := NewRenderer().RenderString(src)
+		if !strings.Contains(out, "<ol>") {
+			t.Errorf("%q: expected <ol>, got %q", src, out)
+		}
+		if strings.Contains(out, "<ul>") {
+			t.Errorf("%q: did not expect <ul>, got %q", src, out)
+		}
+	}
+}
+
+func TestRenderOrderedListStart(t *testing.T) {
+	out := NewRenderer().RenderString("3) three\n4) four")
+	if !strings.Contains(out, `<ol start="3">`) {
+		t.Errorf("expected ordered list start, got %q", out)
+	}
+}
+
 func TestRenderLink(t *testing.T) {
 	out := NewRenderer().RenderString("[click me](https://example.com)")
 	if !strings.Contains(out, `<a href="https://example.com">click me</a>`) {

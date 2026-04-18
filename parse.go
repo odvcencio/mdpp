@@ -2,6 +2,7 @@ package mdpp
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -458,10 +459,10 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 
 	case "list":
 		list := newNode(NodeList)
-		// Detect ordered vs unordered by checking first list item marker
 		for i := 0; i < n.ChildCount(); i++ {
 			child := n.Child(i)
 			if bt.NodeType(child) == "list_item" {
+				applyListMarkerAttrs(bt, list, child)
 				if converted := convertListItem(bt, child, source); converted != nil {
 					list.Children = append(list.Children, converted)
 				}
@@ -616,6 +617,65 @@ func convertListItem(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 		}
 	}
 	return item
+}
+
+func applyListMarkerAttrs(bt *gotreesitter.BoundTree, list *Node, item *gotreesitter.Node) {
+	if list.Attrs != nil && list.Attrs["ordered"] != "" {
+		return
+	}
+	marker := listItemMarker(bt, item)
+	if marker == nil {
+		return
+	}
+	if !isOrderedListMarker(bt.NodeType(marker)) {
+		return
+	}
+	if list.Attrs == nil {
+		list.Attrs = make(map[string]string)
+	}
+	list.Attrs["ordered"] = "true"
+	if start := orderedListStart(bt.NodeText(marker)); start != "" && start != "1" {
+		list.Attrs["start"] = start
+	}
+}
+
+func listItemMarker(bt *gotreesitter.BoundTree, item *gotreesitter.Node) *gotreesitter.Node {
+	for i := 0; i < item.ChildCount(); i++ {
+		child := item.Child(i)
+		if strings.HasPrefix(bt.NodeType(child), "list_marker") {
+			return child
+		}
+	}
+	return nil
+}
+
+func isOrderedListMarker(markerType string) bool {
+	switch markerType {
+	case "list_marker_dot", "list_marker_parenthesis",
+		"list_marker_decimal_period", "list_marker_decimal_paren", "list_marker_decimal_parens",
+		"list_marker_lower_alpha_period", "list_marker_lower_alpha_paren", "list_marker_lower_alpha_parens",
+		"list_marker_upper_alpha_period", "list_marker_upper_alpha_paren", "list_marker_upper_alpha_parens",
+		"list_marker_lower_roman_period", "list_marker_lower_roman_paren", "list_marker_lower_roman_parens",
+		"list_marker_upper_roman_period", "list_marker_upper_roman_paren", "list_marker_upper_roman_parens":
+		return true
+	default:
+		return false
+	}
+}
+
+func orderedListStart(marker string) string {
+	marker = strings.TrimSpace(marker)
+	start := 0
+	for i := 0; i < len(marker); i++ {
+		if marker[i] < '0' || marker[i] > '9' {
+			break
+		}
+		start = start*10 + int(marker[i]-'0')
+	}
+	if start == 0 {
+		return ""
+	}
+	return strconv.Itoa(start)
 }
 
 // convertTable converts a pipe_table node into a NodeTable with rows and cells.
@@ -977,6 +1037,7 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 		for i := 0; i < n.ChildCount(); i++ {
 			child := n.Child(i)
 			if bt.NodeType(child) == "list_item" {
+				applyListMarkerAttrs(bt, list, child)
 				if converted := convertListItem(bt, child, source); converted != nil {
 					list.Children = append(list.Children, converted)
 				}

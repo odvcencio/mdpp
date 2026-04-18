@@ -220,6 +220,33 @@ func TestParseList(t *testing.T) {
 	}
 }
 
+func TestParseOrderedListMarkers(t *testing.T) {
+	for _, src := range []string{"1. one\n2. two", "1) one\n2) two"} {
+		doc := Parse([]byte(src))
+		if len(doc.Root.Children) == 0 {
+			t.Fatalf("%q: expected at least one child", src)
+		}
+		list := doc.Root.Children[0]
+		if list.Type != NodeList {
+			t.Fatalf("%q: expected NodeList, got %d", src, list.Type)
+		}
+		if list.Attrs["ordered"] != "true" {
+			t.Fatalf("%q: expected ordered list attrs, got %#v", src, list.Attrs)
+		}
+	}
+}
+
+func TestParseOrderedListStart(t *testing.T) {
+	doc := Parse([]byte("3) three\n4) four"))
+	list := doc.Root.Children[0]
+	if list.Attrs["ordered"] != "true" {
+		t.Fatalf("expected ordered list attrs, got %#v", list.Attrs)
+	}
+	if list.Attrs["start"] != "3" {
+		t.Fatalf("expected start=3, got %#v", list.Attrs)
+	}
+}
+
 func TestParseBlockquote(t *testing.T) {
 	doc := Parse([]byte("> quote"))
 	if len(doc.Root.Children) == 0 {
