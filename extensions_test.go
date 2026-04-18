@@ -35,11 +35,32 @@ func TestAdmonitionWarning(t *testing.T) {
 	assertContains(t, html, "Be careful")
 }
 
+func TestAdmonitionCustomTitle(t *testing.T) {
+	html := NewRenderer().RenderString("> [!WARNING] Deployment caveat\n> Be careful")
+	assertContains(t, html, `admonition-warning`)
+	assertContains(t, html, `<p class="admonition-title">Deployment caveat</p>`)
+	assertContains(t, html, "Be careful")
+	assertNotContains(t, html, "<p>Deployment caveat")
+}
+
+func TestAdmonitionCustomTitleEscapesHTML(t *testing.T) {
+	html := NewRenderer().RenderString("> [!NOTE] <script>alert(1)</script>\n> Body")
+	assertContains(t, html, `&lt;script&gt;alert(1)&lt;/script&gt;`)
+	assertNotContains(t, html, `<script>alert(1)</script>`)
+}
+
 func TestAdmonitionAllowsUnquotedBody(t *testing.T) {
 	html := NewRenderer().RenderString("> [!NOTE]\nThis belongs to the note.\n\nOutside.")
 	assertContains(t, html, `class="admonition admonition-note"`)
 	assertContains(t, html, "This belongs to the note.")
 	assertNotContains(t, html, "&gt; This belongs")
+	assertContains(t, html, "<p>Outside.</p>")
+}
+
+func TestAdmonitionCustomTitleAllowsUnquotedBody(t *testing.T) {
+	html := NewRenderer().RenderString("> [!TIP] Shortcut\nThis belongs to the tip.\n\nOutside.")
+	assertContains(t, html, `<p class="admonition-title">Shortcut</p>`)
+	assertContains(t, html, "This belongs to the tip.")
 	assertContains(t, html, "<p>Outside.</p>")
 }
 

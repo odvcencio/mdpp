@@ -220,10 +220,13 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 	case NodeAdmonition:
 		adType := n.Attrs["type"]
 		title := strings.ToUpper(adType)
+		if n.Attrs["title"] != "" {
+			title = n.Attrs["title"]
+		}
 		b.WriteString(`<div class="admonition admonition-`)
 		b.WriteString(adType)
 		b.WriteString(`"><p class="admonition-title">`)
-		b.WriteString(title)
+		b.WriteString(html.EscapeString(title))
 		b.WriteString("</p>")
 		renderChildrenInto(r, b, n)
 		b.WriteString("</div>\n")

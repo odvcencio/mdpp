@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	admonitionMarkerLineRe    = regexp.MustCompile(`^(\s*>\s*)\[!(NOTE|WARNING|TIP|IMPORTANT|CAUTION)\]\s*$`)
+	admonitionMarkerLineRe    = regexp.MustCompile(`^(\s*>\s*)\[!(NOTE|WARNING|TIP|IMPORTANT|CAUTION)\](?:\s+.*)?$`)
 	footnoteDefinitionRawRe   = regexp.MustCompile(`^ {0,3}\[\^([A-Za-z0-9_-]+)\]:[ \t]*(.*)$`)
 	footnoteDefinitionLabelRe = regexp.MustCompile(`^\[\^([A-Za-z0-9_-]+)\]$`)
 	inlineMarkdownLinkRe      = regexp.MustCompile(`\[([^\]\n]+)\]\(([^)\s][^)]*)\)`)

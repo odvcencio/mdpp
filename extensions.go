@@ -90,6 +90,10 @@ func processAdmonitions(root *Node) {
 		// Remove the Link node from the first paragraph's children
 		firstChild.Children = firstChild.Children[1:]
 
+		if caption, rest := extractAdmonitionCaption(firstChild.Children); caption != "" {
+			adm.Attrs["title"] = caption
+			firstChild.Children = rest
+		}
 		firstChild.Children = cleanAdmonitionLeadingChildren(firstChild.Children)
 
 		// If first paragraph still has content, include it
@@ -108,6 +112,29 @@ func processAdmonitions(root *Node) {
 
 		return true
 	})
+}
+
+func extractAdmonitionCaption(children []*Node) (string, []*Node) {
+	if len(children) == 0 || children[0] == nil || children[0].Type != NodeText {
+		return "", children
+	}
+	text := strings.TrimLeft(children[0].Literal, " \t")
+	if text == "" || strings.HasPrefix(text, "\n") {
+		return "", children
+	}
+	line, rest, hasRest := strings.Cut(text, "\n")
+	caption := strings.TrimSpace(line)
+	if caption == "" {
+		return "", children
+	}
+	out := make([]*Node, 0, len(children))
+	if hasRest && rest != "" {
+		clone := *children[0]
+		clone.Literal = rest
+		out = append(out, &clone)
+	}
+	out = append(out, children[1:]...)
+	return caption, out
 }
 
 func cleanAdmonitionLeadingChildren(children []*Node) []*Node {
