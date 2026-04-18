@@ -33,6 +33,48 @@ func TestRenderParagraph(t *testing.T) {
 	}
 }
 
+func TestRenderParagraphPreservesTailAfterQuotedText(t *testing.T) {
+	source := `There's a definitive stigma on using AI to help you do things. It was almost last year when I was myself a convert to the AI-assisted workflow and it was almost difficult for me to do so. I had stigmatized the LLMs "wasteful", or "too good at producing everything I ask for and nothing I want.". Adapting to them and adopting them is continuous struggle- it was until I realized that this is a software system like any other that I realized there is a real "superstitious" or "magical" attribution or sentiment applied towards these technologies. In other words, **they're not well understood so they're feared.**`
+	out := NewRenderer().RenderString(source)
+
+	for _, want := range []string{
+		`real &#34;superstitious&#34; or &#34;magical&#34; attribution`,
+		`they&#39;re not well understood so they&#39;re feared`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected rendered paragraph to contain %q, got %s", want, out)
+		}
+	}
+}
+
+func TestRenderDocumentPreservesParagraphAfterOrderedListWithFootnotes(t *testing.T) {
+	source := strings.Join([]string{
+		"As a matter of origin, this didn't exist before February 19th, 2026. That was the evening I would conceive of gotreesitter[^1]. Less than a week or so later, I would foolishly declare it ported and solved to HackerNews[^2] to mixed-ish reviews.",
+		"",
+		"It was an alerting to several signals:",
+		"",
+		"1. **Even when confronted with mounting evidence to the contrary, many folks are still firmly head-in-sand about LLM-assisted approaches to software**",
+		"",
+		"There's a definitive stigma on using AI to help you do things. It was almost last year when I was myself a convert to the AI-assisted workflow and it was almost difficult for me to do so. I had stigmatized the LLMs \"wasteful\", or \"too good at producing everything I ask for and nothing I want.\". Adapting to them and adopting them is continuous struggle- it was until I realized that this is a software system like any other that I realized there is a real \"superstitious\" or \"magical\" attribution or sentiment applied towards these technologies. In other words, **they're not well understood so they're feared.**",
+		"",
+		"2. **Those who",
+		"",
+		"[^1]: [gotreesitter](https://github.com/odvcencio/gotreesitter)",
+		"[^2]: [Disaster, but lucky still](https://link-to-article)",
+	}, "\n")
+	out := NewRenderer().RenderString(source)
+
+	for _, want := range []string{
+		`real &#34;superstitious&#34; or &#34;magical&#34; attribution`,
+		`they&#39;re not well understood so they&#39;re feared`,
+		`<a href="https://github.com/odvcencio/gotreesitter">gotreesitter</a>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected rendered document to contain %q, got %s", want, out)
+		}
+	}
+}
+
 func TestRenderBoldItalic(t *testing.T) {
 	out := NewRenderer().RenderString("**bold** and *italic*")
 	if !strings.Contains(out, "<strong>bold</strong>") {

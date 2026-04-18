@@ -334,18 +334,7 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 	switch typ {
 	case "document":
 		doc := newNode(NodeDocument)
-		for i := 0; i < n.ChildCount(); i++ {
-			child := convertBlock(bt, n.Child(i), source)
-			if child == nil {
-				continue
-			}
-			// Flatten pseudo-document wrappers from section nodes
-			if child.Type == NodeDocument {
-				doc.Children = append(doc.Children, child.Children...)
-			} else {
-				doc.Children = append(doc.Children, child)
-			}
-		}
+		doc.Children = convertBlockChildren(bt, n, source)
 		return doc
 
 	case "section":
@@ -356,12 +345,7 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 		if synth := synthesiseSectionContent(bt, n, source); synth != nil {
 			return synth
 		}
-		var nodes []*Node
-		for i := 0; i < n.ChildCount(); i++ {
-			if child := convertBlock(bt, n.Child(i), source); child != nil {
-				nodes = append(nodes, child)
-			}
-		}
+		nodes := convertBlockChildren(bt, n, source)
 		if len(nodes) == 1 {
 			return nodes[0]
 		}
@@ -729,8 +713,192 @@ func parseInline(text string, source []byte) []*Node {
 	defer tree.Release()
 
 	bt := gotreesitter.Bind(tree)
-	nodes := convertInlineChildren(bt, bt.RootNode(), src)
+	root := bt.RootNode()
+	nodes := convertInlineChildren(bt, root, src)
+	if root != nil {
+		start := int(root.StartByte())
+		end := int(root.EndByte())
+		if start > 0 && start <= len(src) {
+			nodes = append([]*Node{textNode(string(src[:start]))}, nodes...)
+		}
+		if end >= 0 && end < len(src) {
+			appendText(&nodes, string(src[end:]))
+		}
+	}
 	return splitTextNewlines(nodes)
+}
+
+func convertBlockChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byte) []*Node {
+	var nodes []*Node
+	var loose strings.Builder
+	looseAttach := false
+	separatedByBlankLine := false
+
+	flushLoose := func() {
+		if loose.Len() == 0 {
+			return
+		}
+		appendLooseBlockText(&nodes, loose.String(), looseAttach, source)
+		loose.Reset()
+		looseAttach = false
+		separatedByBlankLine = false
+	}
+
+	appendLooseRaw := func(raw string) {
+		if raw == "" {
+			return
+		}
+		if containsBlankLine(raw) {
+			if loose.Len() > 0 {
+				loose.WriteString(raw)
+				flushLoose()
+			}
+			separatedByBlankLine = true
+			return
+		}
+		if loose.Len() == 0 {
+			looseAttach = canAttachLooseText(nodes, separatedByBlankLine)
+		}
+		loose.WriteString(raw)
+	}
+
+	nodeStart := int(n.StartByte())
+	nodeEnd := int(n.EndByte())
+	if bt.NodeType(n) == "document" {
+		nodeEnd = len(source)
+	}
+	if nodeStart < 0 {
+		nodeStart = 0
+	}
+	if nodeEnd > len(source) {
+		nodeEnd = len(source)
+	}
+	if nodeEnd < nodeStart {
+		nodeEnd = nodeStart
+	}
+	cursor := nodeStart
+
+	for i := 0; i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		childStart := int(child.StartByte())
+		childEnd := int(child.EndByte())
+		if childStart < nodeStart {
+			childStart = nodeStart
+		}
+		if childStart > nodeEnd {
+			childStart = nodeEnd
+		}
+		if childEnd < childStart {
+			childEnd = childStart
+		}
+		if childEnd > nodeEnd {
+			childEnd = nodeEnd
+		}
+		if childStart > cursor {
+			appendLooseRaw(string(source[cursor:childStart]))
+		}
+
+		if converted := convertBlock(bt, child, source); converted != nil {
+			flushLoose()
+			appendBlockNode(&nodes, converted)
+			separatedByBlankLine = false
+		} else if childEnd > childStart {
+			appendLooseRaw(string(source[childStart:childEnd]))
+		}
+		if childEnd > cursor {
+			cursor = childEnd
+		}
+	}
+	if cursor < nodeEnd {
+		appendLooseRaw(string(source[cursor:nodeEnd]))
+	}
+	flushLoose()
+
+	return nodes
+}
+
+func appendBlockNode(nodes *[]*Node, n *Node) {
+	if n == nil {
+		return
+	}
+	if n.Type == NodeDocument {
+		*nodes = append(*nodes, n.Children...)
+		return
+	}
+	*nodes = append(*nodes, n)
+}
+
+func canAttachLooseText(nodes []*Node, separatedByBlankLine bool) bool {
+	if separatedByBlankLine || len(nodes) == 0 {
+		return false
+	}
+	return nodes[len(nodes)-1].Type == NodeParagraph
+}
+
+func appendLooseBlockText(nodes *[]*Node, text string, attach bool, source []byte) {
+	segments := looseParagraphSegments(text)
+	for i, segment := range segments {
+		trimmed := strings.TrimSpace(segment)
+		if trimmed == "" {
+			continue
+		}
+		if def := convertFootnoteDefinitionParagraph(trimmed, source); def != nil {
+			appendBlockNode(nodes, def)
+			continue
+		}
+		if attach && i == 0 && len(*nodes) > 0 && (*nodes)[len(*nodes)-1].Type == NodeParagraph {
+			last := (*nodes)[len(*nodes)-1]
+			last.Children = append(last.Children, parseInline(segment, source)...)
+			last.Children = splitTextNewlines(last.Children)
+			continue
+		}
+		para := newNode(NodeParagraph)
+		para.Children = append(para.Children, parseInline(trimmed, source)...)
+		para.Children = splitTextNewlines(para.Children)
+		*nodes = append(*nodes, para)
+	}
+}
+
+func looseParagraphSegments(text string) []string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	segments := make([]string, 0, 1)
+	var current strings.Builder
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			if current.Len() > 0 {
+				segments = append(segments, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		if current.Len() > 0 {
+			current.WriteByte('\n')
+		}
+		current.WriteString(line)
+	}
+	if current.Len() > 0 {
+		segments = append(segments, current.String())
+	}
+	return segments
+}
+
+func containsBlankLine(text string) bool {
+	for i := 0; i < len(text); i++ {
+		if text[i] != '\n' {
+			continue
+		}
+		for j := i + 1; j < len(text); j++ {
+			switch text[j] {
+			case ' ', '\t', '\r':
+				continue
+			case '\n':
+				return true
+			default:
+				j = len(text)
+			}
+		}
+	}
+	return false
 }
 
 // convertInlineChildren walks an inline tree-sitter node and converts
