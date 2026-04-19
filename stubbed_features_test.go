@@ -168,10 +168,30 @@ func TestIndentedCodeBlock(t *testing.T) {
 	assertNotContains(t, html, "    fmt.Println")
 }
 
-func TestStubbed_IndentedCodeBlockStandalone(t *testing.T) {
-	t.Skip("tree-sitter-markdown requires a blank line before an indented code block to recognize it. A document consisting solely of `    code` is parsed as a paragraph per CommonMark spec.")
+func TestIndentedCodeBlockStandalone(t *testing.T) {
+	// Wired: parseAllIndentedDocument synthesizes a NodeCodeBlock when every
+	// non-blank source line is indented 4+ spaces or a leading tab.
 	html := NewRenderer().RenderString("    fmt.Println(\"hi\")\n")
 	assertContains(t, html, "<pre><code>")
+	assertContains(t, html, "fmt.Println")
+	assertNotContains(t, html, "    fmt.Println")
+}
+
+func TestIndentedCodeBlockStandaloneMultiLineWithBlank(t *testing.T) {
+	src := "    line one\n    line two\n\n    line three\n"
+	html := NewRenderer().RenderString(src)
+	assertContains(t, html, "<pre><code>")
+	assertContains(t, html, "line one")
+	assertContains(t, html, "line two")
+	assertContains(t, html, "line three")
+	assertNotContains(t, html, "    line one")
+}
+
+func TestIndentedCodeBlockStandaloneTabs(t *testing.T) {
+	src := "\tcode with tab\n"
+	html := NewRenderer().RenderString(src)
+	assertContains(t, html, "<pre><code>")
+	assertContains(t, html, "code with tab")
 }
 
 func TestInlineMarkdownInLinkText(t *testing.T) {
@@ -196,14 +216,33 @@ func TestCRLFNormalization(t *testing.T) {
 	assertContains(t, html, "<h1>T</h1>")
 }
 
-func TestStubbed_DeepListNestingBeyond4Levels(t *testing.T) {
-	t.Skip("tree-sitter-markdown folds list items beyond 4 levels of nesting into parent text. A deeper parser config or a post-process tree-walk would be needed to support 5+ level nesting.")
+func TestDeepListNestingBeyond4Levels(t *testing.T) {
+	// Wired: parseDeepNestedListDocument reconstructs the list tree from
+	// indent levels when the document is pure list and any item is at
+	// depth 5 or deeper.
 	var buf strings.Builder
 	for i := 0; i < 6; i++ {
 		buf.WriteString(strings.Repeat("  ", i) + "- level " + string(rune('0'+i)) + "\n")
 	}
 	html := NewRenderer().RenderString(buf.String())
 	if strings.Count(html, "<ul>") < 6 {
-		t.Fatalf("expected 6 <ul> levels, got %d", strings.Count(html, "<ul>"))
+		t.Fatalf("expected 6 <ul> levels, got %d\n%s", strings.Count(html, "<ul>"), html)
+	}
+	for i := 0; i < 6; i++ {
+		needle := "level " + string(rune('0'+i))
+		if !strings.Contains(html, needle) {
+			t.Fatalf("missing %q in:\n%s", needle, html)
+		}
+	}
+}
+
+func TestDeepListNestingEightLevels(t *testing.T) {
+	var buf strings.Builder
+	for i := 0; i < 8; i++ {
+		buf.WriteString(strings.Repeat("  ", i) + "- item " + string(rune('0'+i)) + "\n")
+	}
+	html := NewRenderer().RenderString(buf.String())
+	if strings.Count(html, "<ul>") < 8 {
+		t.Fatalf("expected 8 <ul> levels, got %d\n%s", strings.Count(html, "<ul>"), html)
 	}
 }

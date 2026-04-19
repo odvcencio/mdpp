@@ -58,6 +58,21 @@ func Parse(source []byte) *Document {
 	if len(source) > 0 && source[len(source)-1] != '\n' {
 		source = append(source, '\n')
 	}
+
+	// Pure all-indented documents are mis-parsed by tree-sitter-markdown
+	// (punctuation leaves instead of an indented_code_block). Fall back to
+	// a synthetic NodeCodeBlock when every non-blank line in the source is
+	// indented 4+ spaces or a leading tab.
+	if doc := parseAllIndentedDocument(source); doc != nil {
+		return doc
+	}
+
+	// tree-sitter-markdown caps list nesting at 4 levels and emits an ERROR
+	// wrapping the whole document beyond that. Detect pure-list documents
+	// with deeper nesting and reconstruct the tree from indent levels.
+	if doc := parseDeepNestedListDocument(source); doc != nil {
+		return doc
+	}
 	if doc := parseSimpleBlockquoteDocument(source); doc != nil {
 		return doc
 	}
@@ -308,6 +323,143 @@ func slowATXHeadingPunctuation(line []byte) (string, int, bool) {
 
 func isMarkdownFenceLine(line string) bool {
 	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
+}
+
+// parseAllIndentedDocument returns a Document containing a single
+// NodeCodeBlock when every non-blank line in source is indented 4+ spaces
+// or a leading tab. tree-sitter-markdown does not emit indented_code_block
+// for this shape; CommonMark spec does (§ 4.4 allows them at document
+// start).
+func parseAllIndentedDocument(source []byte) *Document {
+	text := strings.TrimRight(string(source), "\n")
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+	sawContent := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "\t") {
+			return nil
+		}
+		sawContent = true
+	}
+	if !sawContent {
+		return nil
+	}
+	stripped := make([]string, len(lines))
+	for i, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "    "):
+			stripped[i] = line[4:]
+		case strings.HasPrefix(line, "\t"):
+			stripped[i] = line[1:]
+		default:
+			stripped[i] = line
+		}
+	}
+	code := &Node{
+		Type:    NodeCodeBlock,
+		Literal: strings.TrimRight(strings.Join(stripped, "\n"), "\n") + "\n",
+		Attrs:   map[string]string{},
+	}
+	doc := &Document{Root: newNode(NodeDocument, code), Source: source}
+	doc.extractFrontmatter()
+	return doc
+}
+
+// parseDeepNestedListDocument handles pure-list documents whose nesting
+// depth exceeds tree-sitter-markdown's supported limit (4 levels). When
+// every non-blank source line is a list item and at least one item is at
+// depth 5 or deeper, rebuild the list tree from indentation levels.
+func parseDeepNestedListDocument(source []byte) *Document {
+	text := strings.TrimRight(string(source), "\n")
+	if text == "" {
+		return nil
+	}
+	type listLine struct {
+		level  int
+		marker byte
+		text   string
+	}
+	lines := strings.Split(text, "\n")
+	items := make([]listLine, 0, len(lines))
+	maxLevel := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		level := 0
+		rest := line
+		for strings.HasPrefix(rest, "  ") {
+			level++
+			rest = rest[2:]
+		}
+		// Reject if the "level" prefix mixed with other whitespace or a non-list line.
+		if len(rest) < 2 {
+			return nil
+		}
+		marker := rest[0]
+		if marker != '-' && marker != '*' && marker != '+' {
+			return nil
+		}
+		if rest[1] != ' ' {
+			return nil
+		}
+		items = append(items, listLine{level: level, marker: marker, text: rest[2:]})
+		if level > maxLevel {
+			maxLevel = level
+		}
+	}
+	if len(items) == 0 || maxLevel < 5 {
+		// Let tree-sitter handle everything else it's equipped to handle.
+		return nil
+	}
+
+	// Build nested list tree using a stack keyed by indent level.
+	type listFrame struct {
+		level int
+		list  *Node
+		last  *Node // last list item at this level
+	}
+	rootList := &Node{Type: NodeList, Attrs: map[string]string{}}
+	stack := []listFrame{{level: -1, list: rootList}}
+	for _, it := range items {
+		// Pop frames deeper than current level.
+		for len(stack) > 1 && stack[len(stack)-1].level >= it.level {
+			stack = stack[:len(stack)-1]
+		}
+		target := stack[len(stack)-1]
+		// If current level is strictly deeper than the parent's, nest a
+		// new list under the parent's last item.
+		for target.level < it.level-1 {
+			// Fill intermediate levels with a pass-through item.
+			panic("unreachable: items are validated to have level <= top stack level + 1")
+		}
+		if target.level < it.level {
+			if target.last == nil {
+				// No parent item to nest under — treat as root list.
+				target = stack[0]
+			} else {
+				sub := &Node{Type: NodeList, Attrs: map[string]string{}}
+				target.last.Children = append(target.last.Children, sub)
+				target = listFrame{level: it.level - 1, list: sub}
+			}
+		}
+		para := &Node{Type: NodeParagraph, Children: parseInline(it.text, source)}
+		item := &Node{Type: NodeListItem, Children: []*Node{para}}
+		target.list.Children = append(target.list.Children, item)
+		if target.level == it.level-1 || target.list == rootList {
+			stack = append(stack, listFrame{level: it.level, list: target.list, last: item})
+		} else {
+			stack[len(stack)-1].last = item
+		}
+	}
+	doc := &Document{Root: newNode(NodeDocument, rootList), Source: source}
+	postProcess(doc)
+	return doc
 }
 
 // normalizeLineEndings converts CRLF and lone CR to LF so downstream
