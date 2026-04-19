@@ -296,10 +296,17 @@ func processBlockquoteHeadings(root *Node) {
 		if !bracketedQuoteHeadingRe.MatchString(raw) {
 			return true
 		}
-		firstChild.Children[0] = newNode(NodeStrong, firstNode.Children...)
+		firstChild.Children[0] = newNode(NodeStrong, parseInline(bracketedQuoteHeadingText(raw), nil)...)
 		firstChild.Children = cleanBlockquoteHeadingContinuation(firstChild.Children)
 		return true
 	})
+}
+
+func bracketedQuoteHeadingText(raw string) string {
+	if len(raw) < 2 || raw[0] != '[' || raw[len(raw)-1] != ']' {
+		return raw
+	}
+	return raw[1 : len(raw)-1]
 }
 
 func cleanBlockquoteHeadingContinuation(children []*Node) []*Node {

@@ -123,6 +123,15 @@ func TestBlockquoteBracketHeadingStripsQuotedContinuationMarkers(t *testing.T) {
 	assertNotContains(t, html, `<a href="">`)
 }
 
+func TestBlockquoteBracketHeadingKeepsApostrophes(t *testing.T) {
+	html := NewRenderer().RenderString("> [Why I'm writing this at all]\n> Not to re-litigate the thread.")
+	assertContains(t, html, "<blockquote>")
+	assertContains(t, html, "<strong>Why I&#39;m writing this at all</strong>")
+	assertContains(t, html, "Not to re-litigate the thread.")
+	assertNotContains(t, html, "<strong>&#39;</strong>")
+	assertNotContains(t, html, `[Why I&#39;m writing this at all]`)
+}
+
 func TestAdmonitionTypesEmitSemanticClasses(t *testing.T) {
 	for _, tc := range []struct {
 		source string
