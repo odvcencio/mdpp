@@ -24,6 +24,16 @@ func TestHighlightGoFenceInfoStringUsesLanguageToken(t *testing.T) {
 	assertContains(t, html, `<span class="hl-function">main</span>`)
 }
 
+func TestHighlightGoTypeConversionDoesNotSwallowString(t *testing.T) {
+	r := NewRenderer(WithHighlightCode(true))
+	html := r.RenderString("```go\nsrc := []byte(\"package main\\nfunc main() {}\\n\")\nlang := grammars.GoLanguage()\ntree, _ := gotreesitter.NewParser(lang).Parse(src)\n```")
+	assertContains(t, html, `<span class="hl-string">&#34;package main\nfunc main() {}\n&#34;</span>`)
+	assertContains(t, html, `<span class="hl-function">GoLanguage</span>`)
+	assertContains(t, html, `<span class="hl-function">NewParser</span>`)
+	assertContains(t, html, `<span class="hl-function">Parse</span>`)
+	assertNotContains(t, html, `<span class="hl-type">[]byte(&#34;`)
+}
+
 func TestHighlightUnknownLanguage(t *testing.T) {
 	r := NewRenderer(WithHighlightCode(true))
 	html := r.RenderString("```unknownlang\nhello\n```")

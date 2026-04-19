@@ -107,7 +107,7 @@ func classifyNode(bt *gotreesitter.BoundTree, n *gotreesitter.Node) string {
 
 	// Types
 	switch nodeType {
-	case "type_identifier", "type_conversion_expression":
+	case "type_identifier":
 		return "hl-type"
 	}
 
@@ -117,6 +117,13 @@ func classifyNode(bt *gotreesitter.BoundTree, n *gotreesitter.Node) string {
 			parentType := bt.NodeType(parent)
 			if parentType == "call_expression" {
 				if parent.Child(0) == n {
+					return "hl-function"
+				}
+			}
+			if parentType == "selector_expression" {
+				if grandparent := parent.Parent(); grandparent != nil &&
+					bt.NodeType(grandparent) == "call_expression" &&
+					grandparent.Child(0) == parent {
 					return "hl-function"
 				}
 			}
