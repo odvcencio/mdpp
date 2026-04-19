@@ -116,6 +116,54 @@ func TestHardening_TableEmojiInCell(t *testing.T) {
 	assertContains(t, html, "🚀")
 }
 
+func TestHardening_TableAlignment(t *testing.T) {
+	src := "| L | C | R | N |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |\n"
+	html := NewRenderer().RenderString(src)
+	// colgroup emitted when any column has alignment.
+	assertContains(t, html, "<colgroup>")
+	assertContains(t, html, `<col style="text-align:left"`)
+	assertContains(t, html, `<col style="text-align:center"`)
+	assertContains(t, html, `<col style="text-align:right"`)
+	// Unaligned column still emits a bare <col />.
+	assertContains(t, html, `<col />`)
+	// Per-cell style is applied.
+	assertContains(t, html, `<th scope="col" style="text-align:left">L</th>`)
+	assertContains(t, html, `<th scope="col" style="text-align:center">C</th>`)
+	assertContains(t, html, `<th scope="col" style="text-align:right">R</th>`)
+	assertContains(t, html, `<td style="text-align:left">1</td>`)
+}
+
+func TestHardening_TableNoAlignmentDoesNotEmitColgroup(t *testing.T) {
+	src := "| A | B |\n|---|---|\n| 1 | 2 |\n"
+	html := NewRenderer().RenderString(src)
+	assertNotContains(t, html, "<colgroup>")
+	assertNotContains(t, html, "style=\"text-align")
+}
+
+func TestHardening_TableWrappedInResponsiveDiv(t *testing.T) {
+	src := "| A |\n|---|\n| 1 |\n"
+	html := NewRenderer().RenderString(src)
+	assertContains(t, html, `<div class="mdpp-table">`)
+	// The wrapper must open before <table> and close after </table>.
+	openIdx := strings.Index(html, `<div class="mdpp-table">`)
+	tableIdx := strings.Index(html, "<table>")
+	closeTableIdx := strings.Index(html, "</table>")
+	closeDivIdx := strings.Index(html, "</div>")
+	if !(openIdx < tableIdx && closeTableIdx < closeDivIdx) {
+		t.Fatalf("wrapper order wrong: open=%d table=%d /table=%d /div=%d\n%s",
+			openIdx, tableIdx, closeTableIdx, closeDivIdx, html)
+	}
+}
+
+func TestHardening_TableHeaderHasColScope(t *testing.T) {
+	src := "| A | B |\n|---|---|\n| 1 | 2 |\n"
+	html := NewRenderer().RenderString(src)
+	// Every <th> in a pipe_table is a column header.
+	if strings.Count(html, `<th scope="col">`) != 2 {
+		t.Fatalf("expected 2 scoped headers, got:\n%s", html)
+	}
+}
+
 // --- Blockquotes ---
 
 func TestHardening_BlockquoteContainingCode(t *testing.T) {

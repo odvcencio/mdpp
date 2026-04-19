@@ -373,30 +373,95 @@ func renderAdmonitionTitleInto(r *Renderer, b *strings.Builder, title string) {
 }
 
 func renderTableInto(r *Renderer, b *strings.Builder, n *Node) {
+	aligns := parseTableAligns(n.Attrs["align"])
+	hasAlign := false
+	for _, a := range aligns {
+		if a != "" {
+			hasAlign = true
+			break
+		}
+	}
+
+	// Responsive wrapper: a <div> with overflow-x:auto via CSS class.
+	b.WriteString(`<div class="mdpp-table">` + "\n")
 	b.WriteString("<table>\n")
+
+	// Emit <colgroup> when any column has alignment so CSS can target
+	// columns and screen readers see semantic structure.
+	if hasAlign {
+		b.WriteString("<colgroup>\n")
+		for _, a := range aligns {
+			if a == "" {
+				b.WriteString("<col />\n")
+				continue
+			}
+			b.WriteString(`<col style="text-align:`)
+			b.WriteString(a)
+			b.WriteString(`" />` + "\n")
+		}
+		b.WriteString("</colgroup>\n")
+	}
+
+	hasBody := false
 	for i, row := range n.Children {
 		if row.Type != NodeTableRow {
 			continue
 		}
 		if i == 0 {
 			b.WriteString("<thead>\n<tr>")
-			for _, cell := range row.Children {
-				b.WriteString("<th>")
+			for ci, cell := range row.Children {
+				b.WriteString("<th scope=\"col\"")
+				writeTableAlignAttr(b, aligns, ci)
+				b.WriteByte('>')
 				renderChildrenInto(r, b, cell)
 				b.WriteString("</th>")
 			}
-			b.WriteString("</tr>\n</thead>\n<tbody>\n")
-		} else {
-			b.WriteString("<tr>")
-			for _, cell := range row.Children {
-				b.WriteString("<td>")
-				renderChildrenInto(r, b, cell)
-				b.WriteString("</td>")
-			}
-			b.WriteString("</tr>\n")
+			b.WriteString("</tr>\n</thead>\n")
+			continue
 		}
+		if !hasBody {
+			b.WriteString("<tbody>\n")
+			hasBody = true
+		}
+		b.WriteString("<tr>")
+		for ci, cell := range row.Children {
+			b.WriteString("<td")
+			writeTableAlignAttr(b, aligns, ci)
+			b.WriteByte('>')
+			renderChildrenInto(r, b, cell)
+			b.WriteString("</td>")
+		}
+		b.WriteString("</tr>\n")
 	}
-	b.WriteString("</tbody>\n</table>\n")
+	if hasBody {
+		b.WriteString("</tbody>\n")
+	}
+	b.WriteString("</table>\n")
+	b.WriteString("</div>\n")
+}
+
+// parseTableAligns splits the NodeTable `align` attribute ("left,center,,right")
+// into its per-column slice. Unset columns render as empty strings.
+func parseTableAligns(attr string) []string {
+	if attr == "" {
+		return nil
+	}
+	return strings.Split(attr, ",")
+}
+
+// writeTableAlignAttr emits ` style="text-align:<value>"` on a cell when
+// the corresponding column declares an alignment. Noop otherwise.
+func writeTableAlignAttr(b *strings.Builder, aligns []string, idx int) {
+	if idx >= len(aligns) {
+		return
+	}
+	a := aligns[idx]
+	if a == "" {
+		return
+	}
+	b.WriteString(` style="text-align:`)
+	b.WriteString(a)
+	b.WriteByte('"')
 }
 
 func renderDiagramInto(b *strings.Builder, n *Node) {

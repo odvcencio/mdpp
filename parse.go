@@ -962,9 +962,14 @@ func orderedListStart(marker string) string {
 	return strconv.Itoa(start)
 }
 
-// convertTable converts a pipe_table node into a NodeTable with rows and cells.
+// convertTable converts a pipe_table node into a NodeTable with rows,
+// cells, and per-column alignment. Alignment is read from the delimiter
+// row (`:---`, `:---:`, `---:`) and stored on the NodeTable as a
+// comma-separated `align` attribute (values: "", "left", "center",
+// "right"). The renderer applies per-cell text-align from this list.
 func convertTable(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byte) *Node {
 	table := newNode(NodeTable)
+	var aligns []string
 	for i := 0; i < n.ChildCount(); i++ {
 		child := n.Child(i)
 		childType := bt.NodeType(child)
@@ -984,10 +989,49 @@ func convertTable(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 			}
 			table.Children = append(table.Children, row)
 		case "pipe_table_delimiter_row":
-			// skip delimiter row
+			aligns = readDelimiterRowAligns(bt, child)
 		}
 	}
+	if table.Attrs == nil {
+		table.Attrs = map[string]string{}
+	}
+	if len(aligns) > 0 {
+		table.Attrs["align"] = strings.Join(aligns, ",")
+	}
 	return table
+}
+
+// readDelimiterRowAligns extracts per-column alignment from a
+// pipe_table_delimiter_row. Returns a slice whose entries are "left",
+// "center", "right", or "" (no alignment specified).
+func readDelimiterRowAligns(bt *gotreesitter.BoundTree, delim *gotreesitter.Node) []string {
+	var aligns []string
+	for j := 0; j < delim.ChildCount(); j++ {
+		cell := delim.Child(j)
+		if bt.NodeType(cell) != "pipe_table_delimiter_cell" {
+			continue
+		}
+		left, right := false, false
+		for k := 0; k < cell.ChildCount(); k++ {
+			switch bt.NodeType(cell.Child(k)) {
+			case "pipe_table_align_left":
+				left = true
+			case "pipe_table_align_right":
+				right = true
+			}
+		}
+		switch {
+		case left && right:
+			aligns = append(aligns, "center")
+		case right:
+			aligns = append(aligns, "right")
+		case left:
+			aligns = append(aligns, "left")
+		default:
+			aligns = append(aligns, "")
+		}
+	}
+	return aligns
 }
 
 // parseInline parses inline markdown text using the markdown_inline grammar.
@@ -1647,6 +1691,7 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 	}
 	if hasPipeTableHeader {
 		table := newNode(NodeTable)
+		var aligns []string
 		for i := 0; i < n.ChildCount(); i++ {
 			child := n.Child(i)
 			ct := childTypes[i]
@@ -1666,8 +1711,14 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 				}
 				table.Children = append(table.Children, row)
 			case "pipe_table_delimiter_row":
-				// skip
+				aligns = readDelimiterRowAligns(bt, child)
 			}
+		}
+		if table.Attrs == nil {
+			table.Attrs = map[string]string{}
+		}
+		if len(aligns) > 0 {
+			table.Attrs["align"] = strings.Join(aligns, ",")
 		}
 		return table
 	}

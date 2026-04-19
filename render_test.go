@@ -217,21 +217,12 @@ func TestRenderImageWithoutTitle(t *testing.T) {
 func TestRenderTable(t *testing.T) {
 	src := "| A | B |\n|---|---|\n| 1 | 2 |"
 	out := NewRenderer().RenderString(src)
-	if !strings.Contains(out, "<table>") {
-		t.Errorf("expected <table>, got %q", out)
-	}
-	if !strings.Contains(out, "<thead>") {
-		t.Errorf("expected <thead>, got %q", out)
-	}
-	if !strings.Contains(out, "<th>A</th>") {
-		t.Errorf("expected <th>A</th>, got %q", out)
-	}
-	if !strings.Contains(out, "<tbody>") {
-		t.Errorf("expected <tbody>, got %q", out)
-	}
-	if !strings.Contains(out, "<td>1</td>") {
-		t.Errorf("expected <td>1</td>, got %q", out)
-	}
+	assertContains(t, out, `<div class="mdpp-table">`)
+	assertContains(t, out, "<table>")
+	assertContains(t, out, "<thead>")
+	assertContains(t, out, `<th scope="col">A</th>`)
+	assertContains(t, out, "<tbody>")
+	assertContains(t, out, "<td>1</td>")
 }
 
 func TestRenderTableParsesInlineCellMarkdown(t *testing.T) {
@@ -244,7 +235,7 @@ func TestRenderTableParsesInlineCellMarkdown(t *testing.T) {
 	out := NewRenderer().RenderString(src)
 
 	assertContains(t, out, "<table>")
-	assertContains(t, out, "<th>Feature</th>")
+	assertContains(t, out, `<th scope="col">Feature</th>`)
 	assertContains(t, out, "<strong>Bold</strong>")
 	assertContains(t, out, `<a href="https://example.com">docs</a>`)
 	assertContains(t, out, "<code>code</code>")
