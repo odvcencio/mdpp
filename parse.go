@@ -1,6 +1,7 @@
 package mdpp
 
 import (
+	"bytes"
 	"regexp"
 	"strconv"
 	"strings"
@@ -51,10 +52,14 @@ func inlineLang() *gotreesitter.Language {
 
 // Parse parses Markdown source into a Document AST.
 func Parse(source []byte) *Document {
+	source = normalizeLineEndings(source)
 	source = lowerMarkdownPlusSource(source)
 	// tree-sitter markdown requires a trailing newline for correct parsing.
 	if len(source) > 0 && source[len(source)-1] != '\n' {
 		source = append(source, '\n')
+	}
+	if doc := parseSimpleBlockquoteDocument(source); doc != nil {
+		return doc
 	}
 	parseSource, headingRepairs := protectSlowATXHeadingPunctuation(source)
 
@@ -63,15 +68,7 @@ func Parse(source []byte) *Document {
 		return &Document{Root: newNode(NodeDocument), Source: source}
 	}
 
-	parser := gotreesitter.NewParser(lang)
-	var tree *gotreesitter.Tree
-	var err error
-	if mdEntry != nil && mdEntry.TokenSourceFactory != nil {
-		ts := mdEntry.TokenSourceFactory(parseSource, lang)
-		tree, err = parser.ParseWithTokenSource(parseSource, ts)
-	} else {
-		tree, err = parser.Parse(parseSource)
-	}
+	tree, err := parsePooled(lang, mdEntry, parseSource)
 	if err != nil || tree == nil {
 		return &Document{Root: newNode(NodeDocument), Source: source}
 	}
@@ -84,9 +81,66 @@ func Parse(source []byte) *Document {
 	}
 	repairProtectedHeadings(root, headingRepairs)
 	doc := &Document{Root: root, Source: source}
+	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode())
 	doc.extractFrontmatter()
 	postProcess(doc)
 	return doc
+}
+
+// collectLinkRefDefs walks the tree-sitter AST gathering every
+// link_reference_definition that is not a footnote definition. Keys are
+// lowercased, whitespace-normalized labels per CommonMark.
+func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node) map[string]linkRefDef {
+	out := make(map[string]linkRefDef)
+	var walk func(n *gotreesitter.Node)
+	walk = func(n *gotreesitter.Node) {
+		if n == nil {
+			return
+		}
+		if bt.NodeType(n) == "link_reference_definition" {
+			raw := strings.TrimRight(bt.NodeText(n), "\n")
+			// Skip footnote defs.
+			if footnoteDefinitionRawRe.MatchString(raw) {
+				return
+			}
+			var label, dest, title string
+			for i := 0; i < n.ChildCount(); i++ {
+				c := n.Child(i)
+				switch bt.NodeType(c) {
+				case "link_label":
+					label = bt.NodeText(c)
+				case "link_destination":
+					dest = bt.NodeText(c)
+				case "link_title":
+					title = stripQuotes(bt.NodeText(c))
+				}
+			}
+			if footnoteDefinitionLabelRe.MatchString(label) {
+				return
+			}
+			label = normalizeLinkLabel(label)
+			if label != "" && dest != "" {
+				out[label] = linkRefDef{href: dest, title: title}
+			}
+			return
+		}
+		for i := 0; i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// normalizeLinkLabel lower-cases the label and collapses whitespace,
+// matching CommonMark's link label matching rules. Input may include
+// surrounding brackets ("[Foo]" or "Foo") — both are handled.
+func normalizeLinkLabel(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	s = strings.ToLower(s)
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func lowerMarkdownPlusSource(source []byte) []byte {
@@ -127,6 +181,62 @@ func lowerMarkdownPlusSource(source []byte) []byte {
 		out = append(out, line)
 	}
 	return []byte(strings.Join(out, "\n"))
+}
+
+func parseSimpleBlockquoteDocument(source []byte) *Document {
+	text := strings.TrimRight(strings.ReplaceAll(string(source), "\r\n", "\n"), "\n")
+	if text == "" || !strings.Contains(text, ">") {
+		return nil
+	}
+
+	lines := strings.Split(text, "\n")
+	contentLines := make([]string, 0, len(lines))
+	sawQuote := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			contentLines = append(contentLines, "")
+			continue
+		}
+		content, ok := stripBlockquoteMarker(line)
+		if !ok {
+			return nil
+		}
+		if strings.HasPrefix(strings.TrimSpace(content), "[") {
+			// Defer admonitions and bracketed blockquote headings to the
+			// slow path which has dedicated post-processors.
+			return nil
+		}
+		contentLines = append(contentLines, content)
+		sawQuote = true
+	}
+	if !sawQuote {
+		return nil
+	}
+
+	// Recursively parse the stripped content so nested block structures
+	// (nested blockquotes, lists, code fences, headings) survive. The
+	// recursive Parse runs its own postProcess; wrapping here must not
+	// re-run it or footnote / emoji processors would double-fire.
+	inner := Parse([]byte(strings.Join(contentLines, "\n") + "\n"))
+	quote := newNode(NodeBlockquote)
+	if inner != nil && inner.Root != nil {
+		quote.Children = inner.Root.Children
+	}
+	doc := &Document{Root: newNode(NodeDocument, quote), Source: source}
+	doc.extractFrontmatter()
+	return doc
+}
+
+func stripBlockquoteMarker(line string) (string, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmed, ">") {
+		return "", false
+	}
+	content := strings.TrimPrefix(trimmed, ">")
+	if strings.HasPrefix(content, " ") || strings.HasPrefix(content, "\t") {
+		content = content[1:]
+	}
+	return content, true
 }
 
 func protectSlowATXHeadingPunctuation(source []byte) ([]byte, []headingTextRepair) {
@@ -200,6 +310,27 @@ func isMarkdownFenceLine(line string) bool {
 	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
 }
 
+// normalizeLineEndings converts CRLF and lone CR to LF so downstream
+// processing (tree-sitter parse, postProcess regexes, render output)
+// does not leak carriage returns into the rendered HTML.
+func normalizeLineEndings(source []byte) []byte {
+	if bytes.IndexByte(source, '\r') < 0 {
+		return source
+	}
+	out := make([]byte, 0, len(source))
+	for i := 0; i < len(source); i++ {
+		if source[i] == '\r' {
+			if i+1 < len(source) && source[i+1] == '\n' {
+				continue
+			}
+			out = append(out, '\n')
+			continue
+		}
+		out = append(out, source[i])
+	}
+	return out
+}
+
 func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ string) *Node {
 	cb := newNode(NodeCodeBlock)
 	cb.Attrs = make(map[string]string)
@@ -218,9 +349,26 @@ func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ stri
 		}
 	}
 	if typ == "indented_code_block" {
-		cb.Literal = bt.NodeText(n)
+		cb.Literal = stripIndentedCodeBlock(bt.NodeText(n))
 	}
 	return codeBlockToDiagram(cb)
+}
+
+// stripIndentedCodeBlock removes the 4-space (or tab) indent from each line
+// of an indented code block and trims the trailing blank line tree-sitter
+// includes in the node text.
+func stripIndentedCodeBlock(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "    "):
+			lines[i] = line[4:]
+		case strings.HasPrefix(line, "\t"):
+			lines[i] = line[1:]
+		}
+	}
+	out := strings.Join(lines, "\n")
+	return strings.TrimRight(out, "\n") + "\n"
 }
 
 func isATXHeadingLine(line []byte) bool {
@@ -677,7 +825,7 @@ func convertTable(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 					c := newNode(NodeTableCell)
 					text := strings.TrimSpace(bt.NodeText(cell))
 					if text != "" {
-						c.Children = append(c.Children, textNode(text))
+						c.Children = append(c.Children, parseInline(text, source)...)
 					}
 					row.Children = append(row.Children, c)
 				}
@@ -692,7 +840,102 @@ func convertTable(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 
 // parseInline parses inline markdown text using the markdown_inline grammar.
 func parseInline(text string, source []byte) []*Node {
+	if len(text) > maxInlineParseChunk {
+		chunks := splitInlineParseChunks(text, maxInlineParseChunk)
+		if len(chunks) > 1 {
+			nodes := make([]*Node, 0, len(chunks))
+			for _, chunk := range chunks {
+				nodes = append(nodes, parseInlineWithRecovery(chunk, source, true)...)
+			}
+			return nodes
+		}
+	}
 	return parseInlineWithRecovery(text, source, true)
+}
+
+const maxInlineParseChunk = 320
+
+func splitInlineParseChunks(text string, max int) []string {
+	if max < 80 || len(text) <= max {
+		return nil
+	}
+	chunks := make([]string, 0, len(text)/max+1)
+	start := 0
+	for len(text)-start > max {
+		cut := inlineParseChunkCut(text, start, max)
+		if cut <= start {
+			return nil
+		}
+		chunks = append(chunks, text[start:cut])
+		start = cut
+	}
+	if start < len(text) {
+		chunks = append(chunks, text[start:])
+	}
+	return chunks
+}
+
+func inlineParseChunkCut(text string, start int, max int) int {
+	limit := start + max
+	if limit >= len(text) {
+		return len(text)
+	}
+	floor := start + max/2
+	for i := limit; i > floor; i-- {
+		if text[i-1] == ' ' && isPreferredInlineChunkBoundary(text, start, i) {
+			return i
+		}
+	}
+	for i := limit; i > floor; i-- {
+		if text[i-1] == ' ' && isSafeInlineChunk(text[start:i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+func isPreferredInlineChunkBoundary(text string, start int, cut int) bool {
+	if cut <= start || !isSafeInlineChunk(text[start:cut]) {
+		return false
+	}
+	i := cut - 2
+	for i >= start && (text[i] == ' ' || text[i] == '\t') {
+		i--
+	}
+	if i < start {
+		return false
+	}
+	switch text[i] {
+	case '.', '!', '?', ';', ':', ',':
+		return true
+	default:
+		return false
+	}
+}
+
+func isSafeInlineChunk(chunk string) bool {
+	return countUnescaped(chunk, '`')%2 == 0 &&
+		countUnescaped(chunk, '[') == countUnescaped(chunk, ']') &&
+		countUnescaped(chunk, '(') == countUnescaped(chunk, ')')
+}
+
+func countUnescaped(text string, marker byte) int {
+	count := 0
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if text[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if text[i] == marker {
+			count++
+		}
+	}
+	return count
 }
 
 func parseInlineWithRecovery(text string, source []byte, recoverSuffix bool) []*Node {
@@ -701,16 +944,8 @@ func parseInlineWithRecovery(text string, source []byte, recoverSuffix bool) []*
 		return []*Node{textNode(text)}
 	}
 
-	parser := gotreesitter.NewParser(lang)
 	src := []byte(text)
-	var tree *gotreesitter.Tree
-	var err error
-	if mdInlineEntry != nil && mdInlineEntry.TokenSourceFactory != nil {
-		ts := mdInlineEntry.TokenSourceFactory(src, lang)
-		tree, err = parser.ParseWithTokenSource(src, ts)
-	} else {
-		tree, err = parser.Parse(src)
-	}
+	tree, err := parsePooled(lang, mdInlineEntry, src)
 	if err != nil || tree == nil {
 		return []*Node{textNode(text)}
 	}
@@ -962,7 +1197,9 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 			ct := bt.NodeType(child)
 			switch ct {
 			case "link_text":
-				link.Children = append(link.Children, textNode(bt.NodeText(child)))
+				// Re-parse the link text through the inline grammar so emphasis,
+				// code spans, emoji, etc. inside link text survive as structure.
+				link.Children = append(link.Children, parseInline(bt.NodeText(child), source)...)
 			case "link_destination":
 				link.Attrs["href"] = bt.NodeText(child)
 			case "link_title":
@@ -986,7 +1223,7 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 			ct := bt.NodeType(child)
 			switch ct {
 			case "link_text":
-				link.Children = append(link.Children, textNode(bt.NodeText(child)))
+				link.Children = append(link.Children, parseInline(bt.NodeText(child), source)...)
 			case "link_label":
 				link.Attrs["ref"] = bt.NodeText(child)
 			}
@@ -1017,6 +1254,19 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 		// Extract text between delimiters
 		cs.Literal = extractCodeSpanText(bt, n)
 		nodes = append(nodes, cs)
+
+	case "uri_autolink", "email_autolink":
+		// tree-sitter-markdown wraps the URL in angle brackets: <https://x>.
+		raw := bt.NodeText(n)
+		url := strings.TrimPrefix(strings.TrimSuffix(raw, ">"), "<")
+		href := url
+		if typ == "email_autolink" {
+			href = "mailto:" + url
+		}
+		link := newNode(NodeLink)
+		link.Attrs = map[string]string{"href": href}
+		link.Children = []*Node{textNode(url)}
+		nodes = append(nodes, link)
 
 	case "hard_line_break":
 		nodes = append(nodes, newNode(NodeHardBreak))
@@ -1257,7 +1507,7 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 						c := newNode(NodeTableCell)
 						text := strings.TrimSpace(bt.NodeText(cell))
 						if text != "" {
-							c.Children = append(c.Children, textNode(text))
+							c.Children = append(c.Children, parseInline(text, source)...)
 						}
 						row.Children = append(row.Children, c)
 					}
@@ -1299,6 +1549,7 @@ func isInlineStructural(nodeType string) bool {
 	switch nodeType {
 	case "strong_emphasis", "emphasis", "strikethrough",
 		"inline_link", "full_reference_link", "collapsed_reference_link", "shortcut_link",
+		"uri_autolink", "email_autolink",
 		"image", "code_span", "hard_line_break", "html_tag", "backslash_escape":
 		return true
 	default:

@@ -27,8 +27,64 @@ func postProcess(doc *Document) {
 		}
 	}
 
+	// Resolve [text][ref] / [ref][] / [ref] references against the
+	// link_reference_definition map captured during Parse. Must run
+	// before processTOC (TOC consumers do not depend on it) but after
+	// admonition + footnote processing so footnote shortcut links are
+	// not mis-resolved as link refs.
+	processReferenceLinks(doc)
+
+	// Definition lists: recognize `Term\n: Def` paragraphs and merge
+	// adjacent term/description pairs into a single <dl>.
+	processDefinitionLists(doc.Root)
+
+	// Auto-embeds: `[[embed:url]]` on its own line → NodeAutoEmbed.
+	processAutoEmbeds(doc.Root)
+
 	// TOC runs last so every heading in the final AST is accounted for.
 	processTOC(doc)
+}
+
+// processReferenceLinks walks the AST and, for every NodeLink that has a
+// `ref` attribute but no resolved `href`, looks up the corresponding
+// link_reference_definition and fills in href + title. Collapsed and
+// shortcut links fall back to using the link text as the lookup key
+// when no explicit label is present.
+func processReferenceLinks(doc *Document) {
+	if doc == nil || doc.Root == nil || len(doc.linkRefDefs) == 0 {
+		return
+	}
+	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
+		if n.Type != NodeLink || n.Attrs == nil {
+			return true
+		}
+		if n.Attrs["href"] != "" {
+			return true
+		}
+		// Ignore shortcut links that carry the [!TYPE] / [^id] raw marker —
+		// those have already been consumed by admonition/footnote processors
+		// or remain as literal text. Only reference-style links we care about
+		// either have a `ref` attr or are collapsed/shortcut over plain text.
+		raw := n.Attrs["raw"]
+		if strings.HasPrefix(raw, "[!") || strings.HasPrefix(raw, "[^") {
+			return true
+		}
+		label := n.Attrs["ref"]
+		if label == "" {
+			// Collapsed / shortcut form: the link text IS the label.
+			label = collectNodeText(n)
+		}
+		label = normalizeLinkLabel(label)
+		if def, ok := doc.linkRefDefs[label]; ok {
+			n.Attrs["href"] = def.href
+			if def.title != "" {
+				n.Attrs["title"] = def.title
+			}
+			delete(n.Attrs, "ref")
+			delete(n.Attrs, "raw")
+		}
+		return true
+	})
 }
 
 func flattenDocumentNodes(root *Node) {
@@ -462,6 +518,178 @@ func processSuperscripts(root *Node) {
 	})
 }
 
+// --- Auto-embeds ---
+
+var autoEmbedDirectiveRe = regexp.MustCompile(`^\[\[embed:\s*(\S.*?)\s*\]\]$`)
+
+// processAutoEmbeds replaces a top-level paragraph whose trimmed surface
+// text matches `[[embed:<url>]]` with a NodeAutoEmbed carrying the url as
+// the `src` attribute and the provider name (if recognizable) as `provider`.
+// Inline occurrences remain literal.
+func processAutoEmbeds(root *Node) {
+	if root == nil {
+		return
+	}
+	for i, child := range root.Children {
+		if child == nil || child.Type != NodeParagraph {
+			continue
+		}
+		text := strings.TrimSpace(collectSurfaceText(child))
+		match := autoEmbedDirectiveRe.FindStringSubmatch(text)
+		if match == nil {
+			continue
+		}
+		url := match[1]
+		embed := &Node{
+			Type:  NodeAutoEmbed,
+			Attrs: map[string]string{"src": url, "provider": detectEmbedProvider(url)},
+		}
+		root.Children[i] = embed
+	}
+}
+
+// detectEmbedProvider returns a short provider hint for the given URL.
+// Used as a rendering hook for themes; returns "" when unknown.
+func detectEmbedProvider(url string) string {
+	lower := strings.ToLower(url)
+	switch {
+	case strings.Contains(lower, "youtube.com/"), strings.Contains(lower, "youtu.be/"):
+		return "youtube"
+	case strings.Contains(lower, "vimeo.com/"):
+		return "vimeo"
+	case strings.Contains(lower, "github.com/"):
+		return "github"
+	case strings.Contains(lower, "twitter.com/"), strings.Contains(lower, "x.com/"):
+		return "twitter"
+	case strings.Contains(lower, "spotify.com/"), strings.Contains(lower, "open.spotify.com/"):
+		return "spotify"
+	case strings.Contains(lower, "soundcloud.com/"):
+		return "soundcloud"
+	case strings.Contains(lower, "codepen.io/"):
+		return "codepen"
+	case strings.Contains(lower, "codesandbox.io/"):
+		return "codesandbox"
+	}
+	return ""
+}
+
+// --- Definition Lists ---
+
+// processDefinitionLists detects paragraphs of the form
+//
+//	Term
+//	: Definition
+//	[: Another def]
+//
+// and replaces them with a NodeDefinitionList. Adjacent matching
+// paragraphs in the same block coalesce into one <dl>.
+//
+// tree-sitter-markdown does not recognize this PHP-Markdown-Extra /
+// pandoc-style syntax; it emits a single paragraph with soft breaks.
+// We re-split the paragraph's surface text on newlines to recover the
+// structure.
+func processDefinitionLists(root *Node) {
+	if root == nil {
+		return
+	}
+	out := make([]*Node, 0, len(root.Children))
+	var currentList *Node
+	for _, child := range root.Children {
+		if child == nil {
+			continue
+		}
+		if child.Type != NodeParagraph {
+			if currentList != nil {
+				out = append(out, currentList)
+				currentList = nil
+			}
+			out = append(out, child)
+			continue
+		}
+		term, descs, ok := splitDefinitionParagraph(child)
+		if !ok {
+			if currentList != nil {
+				out = append(out, currentList)
+				currentList = nil
+			}
+			out = append(out, child)
+			continue
+		}
+		if currentList == nil {
+			currentList = &Node{Type: NodeDefinitionList}
+		}
+		currentList.Children = append(currentList.Children, term)
+		currentList.Children = append(currentList.Children, descs...)
+	}
+	if currentList != nil {
+		out = append(out, currentList)
+	}
+	root.Children = out
+}
+
+// splitDefinitionParagraph inspects a paragraph's inline children and
+// returns a DefinitionTerm + DefinitionDesc chain if the paragraph matches
+// `Term\n: Def [\n: Def ...]`. Works on AST children directly so inline
+// formatting (emphasis, code, links, emoji) is preserved instead of
+// flattened to text.
+func splitDefinitionParagraph(para *Node) (*Node, []*Node, bool) {
+	// Partition children at soft/hard break boundaries.
+	segments := [][]*Node{{}}
+	for _, c := range para.Children {
+		if c == nil {
+			continue
+		}
+		if c.Type == NodeSoftBreak || c.Type == NodeHardBreak {
+			segments = append(segments, nil)
+			continue
+		}
+		segments[len(segments)-1] = append(segments[len(segments)-1], c)
+	}
+	if len(segments) < 2 {
+		return nil, nil, false
+	}
+	termChildren := segments[0]
+	if len(termChildren) == 0 {
+		return nil, nil, false
+	}
+	var descs []*Node
+	for _, seg := range segments[1:] {
+		if len(seg) == 0 {
+			return nil, nil, false
+		}
+		head := seg[0]
+		if head.Type != NodeText {
+			return nil, nil, false
+		}
+		lit := strings.TrimLeft(head.Literal, " \t")
+		switch {
+		case lit == ":":
+			// The colon is its own text node — drop it and left-trim the
+			// next text child so the description starts cleanly.
+			seg = seg[1:]
+			if len(seg) > 0 && seg[0] != nil && seg[0].Type == NodeText {
+				clone := *seg[0]
+				clone.Literal = strings.TrimLeft(clone.Literal, " \t")
+				seg[0] = &clone
+			}
+		case lit == ": ":
+			seg = seg[1:]
+		case strings.HasPrefix(lit, ": "):
+			clone := *head
+			clone.Literal = strings.TrimLeft(lit[2:], " \t")
+			seg = append([]*Node{&clone}, seg[1:]...)
+		default:
+			return nil, nil, false
+		}
+		descs = append(descs, &Node{Type: NodeDefinitionDesc, Children: seg})
+	}
+	if len(descs) == 0 {
+		return nil, nil, false
+	}
+	term := &Node{Type: NodeDefinitionTerm, Children: termChildren}
+	return term, descs, true
+}
+
 // --- Table of Contents ---
 
 var tocDirectiveRe = regexp.MustCompile(`^\[\[[Tt][Oo][Cc]\]\]$`)
@@ -509,6 +737,9 @@ func collectSurfaceTextInto(n *Node, sb *strings.Builder) {
 	switch n.Type {
 	case NodeText, NodeCodeSpan:
 		sb.WriteString(n.Literal)
+		return
+	case NodeSoftBreak, NodeHardBreak:
+		sb.WriteByte('\n')
 		return
 	case NodeLink:
 		if raw := n.Attrs["raw"]; raw != "" {

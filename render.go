@@ -232,15 +232,7 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString("</div>\n")
 
 	case NodeTaskListItem:
-		b.WriteString(`<li class="task-list-item"><input type="checkbox" disabled`)
-		if n.Attrs["checked"] == "true" {
-			b.WriteString(" checked")
-		}
-		b.WriteString(" />")
-		var inner strings.Builder
-		renderChildrenInto(r, &inner, n)
-		b.WriteString(strings.TrimRight(inner.String(), "\n"))
-		b.WriteString("</li>\n")
+		renderTaskListItemInto(r, b, n)
 
 	case NodeFootnoteRef:
 		id := html.EscapeString(n.Attrs["id"])
@@ -300,6 +292,43 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		renderChildrenInto(r, b, n)
 		b.WriteString("</nav>\n")
 
+	case NodeDefinitionList:
+		b.WriteString("<dl>\n")
+		renderChildrenInto(r, b, n)
+		b.WriteString("</dl>\n")
+
+	case NodeDefinitionTerm:
+		b.WriteString("<dt>")
+		renderChildrenInto(r, b, n)
+		b.WriteString("</dt>\n")
+
+	case NodeDefinitionDesc:
+		b.WriteString("<dd>")
+		renderChildrenInto(r, b, n)
+		b.WriteString("</dd>\n")
+
+	case NodeAutoEmbed:
+		src := html.EscapeString(n.Attrs["src"])
+		provider := html.EscapeString(n.Attrs["provider"])
+		b.WriteString(`<div class="mdpp-embed`)
+		if provider != "" {
+			b.WriteString(" mdpp-embed-")
+			b.WriteString(provider)
+		}
+		b.WriteString(`" data-src="`)
+		b.WriteString(src)
+		b.WriteByte('"')
+		if provider != "" {
+			b.WriteString(` data-provider="`)
+			b.WriteString(provider)
+			b.WriteByte('"')
+		}
+		b.WriteString(`><a href="`)
+		b.WriteString(src)
+		b.WriteString(`">`)
+		b.WriteString(src)
+		b.WriteString("</a></div>\n")
+
 	default:
 		renderChildrenInto(r, b, n)
 	}
@@ -311,6 +340,23 @@ func renderChildrenInto(r *Renderer, b *strings.Builder, n *Node) {
 	for _, child := range n.Children {
 		renderNodeInto(r, b, child)
 	}
+}
+
+func renderTaskListItemInto(r *Renderer, b *strings.Builder, n *Node) {
+	b.WriteString(`<li class="task-list-item"><input type="checkbox" disabled`)
+	if n.Attrs["checked"] == "true" {
+		b.WriteString(" checked")
+	}
+	b.WriteString(" />")
+	if len(n.Children) == 1 && n.Children[0].Type == NodeParagraph {
+		renderChildrenInto(r, b, n.Children[0])
+		b.WriteString("</li>\n")
+		return
+	}
+	var inner strings.Builder
+	renderChildrenInto(r, &inner, n)
+	b.WriteString(strings.TrimRight(inner.String(), "\n"))
+	b.WriteString("</li>\n")
 }
 
 func renderAdmonitionTitleInto(r *Renderer, b *strings.Builder, title string) {

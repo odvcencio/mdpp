@@ -40,6 +40,22 @@ func diagramFenceInfo(language, source string) (syntax, kind string, ok bool) {
 		return "mermaid", lang, true
 	case "gitgraph":
 		return "mermaid", "gitgraph", true
+	case "requirement", "requirementdiagram":
+		return "mermaid", "requirement", true
+	case "c4", "c4context":
+		return "mermaid", "c4", true
+	case "quadrant", "quadrantchart":
+		return "mermaid", "quadrant", true
+	case "xychart", "xychart-beta":
+		return "mermaid", "xychart", true
+	case "block", "block-beta":
+		return "mermaid", "block", true
+	case "sankey", "sankey-beta":
+		return "mermaid", "sankey", true
+	case "packet", "packet-beta":
+		return "mermaid", "packet", true
+	case "architecture", "architecture-beta":
+		return "mermaid", "architecture", true
 	}
 	return "", "", false
 }

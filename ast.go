@@ -54,11 +54,18 @@ type Node struct {
 	Attrs    map[string]string
 }
 
+// linkRefDef is a parsed [label]: href "title" definition.
+type linkRefDef struct {
+	href  string
+	title string
+}
+
 // Document is the top-level result of parsing a Markdown source.
 type Document struct {
 	Root            *Node
 	Source          []byte
 	frontmatterData map[string]any
+	linkRefDefs     map[string]linkRefDef
 }
 
 // Frontmatter returns the parsed frontmatter metadata, if any.
