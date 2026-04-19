@@ -241,15 +241,14 @@ func renderLatexCommand(node *gotreesitter.Node, lang *gotreesitter.Language, sr
 	}
 	name := latexNodeText(nameNode, src)
 
-	arg1Node := node.ChildByFieldName("arg1", lang)
-	arg2Node := node.ChildByFieldName("arg2", lang)
+	return renderLatexCommandWithArgs(name, node.ChildByFieldName("arg1", lang), node.ChildByFieldName("arg2", lang), lang, src)
+}
 
-	// Zero-arg: symbol lookup
+func renderLatexCommandWithArgs(name string, arg1Node, arg2Node *gotreesitter.Node, lang *gotreesitter.Language, src string) string {
 	if arg1Node == nil {
 		if sym, ok := latexSymbols[name]; ok {
 			return sym
 		}
-		// Unknown command: render as-is
 		return html.EscapeString(name)
 	}
 
@@ -318,6 +317,25 @@ func renderLatexCommand(node *gotreesitter.Node, lang *gotreesitter.Language, sr
 	}
 }
 
+func latexCommandArity(name string) int {
+	switch name {
+	case `\frac`:
+		return 2
+	case `\sqrt`,
+		`\text`, `\mathrm`, `\textrm`,
+		`\textbf`, `\mathbf`,
+		`\textit`, `\mathit`, `\emph`,
+		`\hat`, `\bar`, `\tilde`, `\vec`, `\dot`, `\ddot`,
+		`\overline`, `\underline`,
+		`\xrightarrow`, `\xleftarrow`,
+		`\underbrace`, `\overbrace`,
+		`\mathbb`, `\mathcal`:
+		return 1
+	default:
+		return 0
+	}
+}
+
 func renderLatexChildren(node *gotreesitter.Node, lang *gotreesitter.Language, src string) string {
 	var b strings.Builder
 	for i := 0; i < node.ChildCount(); i++ {
@@ -325,6 +343,30 @@ func renderLatexChildren(node *gotreesitter.Node, lang *gotreesitter.Language, s
 		t := child.Type(lang)
 		if t == "{" || t == "}" || t == "^" || t == "_" {
 			continue
+		}
+		if t == "command" && child.ChildByFieldName("arg1", lang) == nil {
+			nameNode := child.ChildByFieldName("name", lang)
+			if nameNode != nil {
+				name := latexNodeText(nameNode, src)
+				arity := latexCommandArity(name)
+				if arity > 0 {
+					var arg1Node, arg2Node *gotreesitter.Node
+					consumed := 0
+					if i+1 < node.ChildCount() && node.Child(i+1).Type(lang) == "group" {
+						arg1Node = node.Child(i + 1)
+						consumed = 1
+					}
+					if arity > 1 && i+2 < node.ChildCount() && node.Child(i+2).Type(lang) == "group" {
+						arg2Node = node.Child(i + 2)
+						consumed = 2
+					}
+					if arg1Node != nil {
+						b.WriteString(renderLatexCommandWithArgs(name, arg1Node, arg2Node, lang, src))
+						i += consumed
+						continue
+					}
+				}
+			}
 		}
 		b.WriteString(renderLatexNode(child, lang, src))
 	}

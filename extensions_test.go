@@ -235,6 +235,14 @@ func TestMathFraction(t *testing.T) {
 	assertContains(t, html, `math-frac-den`)
 }
 
+func TestMathNumericFraction(t *testing.T) {
+	html := NewRenderer().RenderString(`Cold drops by $\frac{574}{245} \approx 2.34$.`)
+	assertContains(t, html, `<span class="math-frac-num">574</span>`)
+	assertContains(t, html, `<span class="math-frac-den">245</span>`)
+	assertContains(t, html, `≈`)
+	assertNotContains(t, html, `\frac574245`)
+}
+
 func TestMathGreekLetters(t *testing.T) {
 	html := NewRenderer().RenderString(`$\alpha + \beta$`)
 	assertContains(t, html, "α")
