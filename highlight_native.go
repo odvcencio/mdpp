@@ -28,17 +28,9 @@ func highlightCodeImpl(language, source string) (string, bool) {
 		return "", false
 	}
 
-	parser := gotreesitter.NewParser(lang)
 	src := []byte(source)
 
-	var tree *gotreesitter.Tree
-	var err error
-	if entry.TokenSourceFactory != nil {
-		ts := entry.TokenSourceFactory(src, lang)
-		tree, err = parser.ParseWithTokenSource(src, ts)
-	} else {
-		tree, err = parser.Parse(src)
-	}
+	tree, err := parsePooled(lang, entry, src)
 	if err != nil || tree == nil {
 		return "", false
 	}
@@ -123,12 +115,13 @@ func classifyNode(bt *gotreesitter.BoundTree, n *gotreesitter.Node) string {
 	if nodeType == "identifier" || nodeType == "field_identifier" || nodeType == "property_identifier" {
 		if parent := n.Parent(); parent != nil {
 			parentType := bt.NodeType(parent)
-			if parentType == "call_expression" || parentType == "function_declaration" ||
-				parentType == "method_declaration" {
-				// First child of call_expression is typically the function name
+			if parentType == "call_expression" {
 				if parent.Child(0) == n {
 					return "hl-function"
 				}
+			}
+			if parentType == "function_declaration" || parentType == "method_declaration" {
+				return "hl-function"
 			}
 		}
 	}

@@ -7,14 +7,21 @@ import (
 
 func TestHighlightGoCode(t *testing.T) {
 	r := NewRenderer(WithHighlightCode(true))
-	html := r.RenderString("```go\nfunc main() {}\n```")
-	// Should contain highlighted spans
-	if !strings.Contains(html, "<span") {
-		t.Fatalf("expected highlighted spans, got: %s", html)
-	}
-	if !strings.Contains(html, "func") {
-		t.Fatalf("expected 'func' in output")
-	}
+	html := r.RenderString("```go\npackage main\n\nfunc main() {\n\tfmt.Println(\"hi\")\n}\n```")
+	assertContains(t, html, `<pre><code class="language-go">`)
+	assertContains(t, html, `<span class="hl-keyword">package</span>`)
+	assertContains(t, html, `<span class="hl-keyword">func</span>`)
+	assertContains(t, html, `<span class="hl-function">main</span>`)
+	assertContains(t, html, `<span class="hl-string">&#34;hi&#34;</span>`)
+	assertContains(t, html, "</code></pre>")
+}
+
+func TestHighlightGoFenceInfoStringUsesLanguageToken(t *testing.T) {
+	r := NewRenderer(WithHighlightCode(true))
+	html := r.RenderString("```go title=\"example.go\"\nfunc main() {}\n```")
+	assertContains(t, html, `<pre><code class="language-go">`)
+	assertContains(t, html, `<span class="hl-keyword">func</span>`)
+	assertContains(t, html, `<span class="hl-function">main</span>`)
 }
 
 func TestHighlightUnknownLanguage(t *testing.T) {

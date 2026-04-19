@@ -150,6 +150,9 @@ func TestTaskListChecked(t *testing.T) {
 	assertContains(t, html, `class="task-list-item"`)
 	assertContains(t, html, "Done")
 	assertContains(t, html, "Todo")
+	assertContains(t, html, `<li class="task-list-item"><input type="checkbox" disabled checked />Done</li>`)
+	assertContains(t, html, `<li class="task-list-item"><input type="checkbox" disabled />Todo</li>`)
+	assertNotContains(t, html, `<input type="checkbox" disabled checked /><p>`)
 }
 
 func TestTaskListUnchecked(t *testing.T) {
@@ -157,6 +160,7 @@ func TestTaskListUnchecked(t *testing.T) {
 	assertContains(t, html, `class="task-list-item"`)
 	assertContains(t, html, `disabled`)
 	assertContains(t, html, "Not done")
+	assertContains(t, html, `<li class="task-list-item"><input type="checkbox" disabled />Not done</li>`)
 }
 
 func TestNormalListNotTask(t *testing.T) {

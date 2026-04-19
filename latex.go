@@ -181,8 +181,7 @@ func renderLatexMath(src string) string {
 		return html.EscapeString(src)
 	}
 
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse([]byte(src))
+	tree, err := parsePooled(lang, nil, []byte(src))
 	if err != nil || tree == nil {
 		return html.EscapeString(src)
 	}

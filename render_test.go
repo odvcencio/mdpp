@@ -114,6 +114,14 @@ func TestRenderMermaidDiagramFence(t *testing.T) {
 	assertContains(t, out, `A[Start] --&gt; B{Ship?}`)
 }
 
+func TestRenderDiagramFenceDoesNotSyntaxHighlightDiagramSource(t *testing.T) {
+	src := "```mermaid\nflowchart TD\n  A[Start] --> B{Ship?}\n```"
+	out := NewRenderer(WithHighlightCode(true)).RenderString(src)
+	assertContains(t, out, `<figure class="mdpp-diagram`)
+	assertContains(t, out, `<code class="language-mermaid">`)
+	assertNotContains(t, out, `class="hl-`)
+}
+
 func TestRenderDiagramAliasFence(t *testing.T) {
 	out := NewRenderer().RenderString("```erd\nUser ||--o{ Post : writes\n```")
 	assertContains(t, out, `mdpp-diagram-erd`)
@@ -224,6 +232,26 @@ func TestRenderTable(t *testing.T) {
 	if !strings.Contains(out, "<td>1</td>") {
 		t.Errorf("expected <td>1</td>, got %q", out)
 	}
+}
+
+func TestRenderTableParsesInlineCellMarkdown(t *testing.T) {
+	src := strings.Join([]string{
+		"| Feature | Notes |",
+		"|---|---|",
+		"| **Bold** | [docs](https://example.com) and `code` |",
+		"| Math | $x^{2}$ |",
+	}, "\n")
+	out := NewRenderer().RenderString(src)
+
+	assertContains(t, out, "<table>")
+	assertContains(t, out, "<th>Feature</th>")
+	assertContains(t, out, "<strong>Bold</strong>")
+	assertContains(t, out, `<a href="https://example.com">docs</a>`)
+	assertContains(t, out, "<code>code</code>")
+	assertContains(t, out, `class="math-inline"`)
+	assertContains(t, out, "<sup>2</sup>")
+	assertNotContains(t, out, "**Bold**")
+	assertNotContains(t, out, "[docs](https://example.com)")
 }
 
 func TestRenderHeadingIDs(t *testing.T) {

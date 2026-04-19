@@ -262,6 +262,16 @@ func TestParseBlockquote(t *testing.T) {
 	}
 }
 
+func TestRenderLongSimpleBlockquote(t *testing.T) {
+	source := `> At the time of this writing, gotreesitter[^1] has 457 stars and counting in 2 months of life and has a serious infrastructure shape. It is parity harness and benchmark comparisons keep it honest and steered towards a north star. There is no way to one-shot gotreesitter[^1] with a prompt.`
+	html := NewRenderer().RenderString(source)
+
+	assertContains(t, html, "<blockquote>")
+	assertContains(t, html, "gotreesitter")
+	assertContains(t, html, `class="footnote-ref"`)
+	assertNotContains(t, html, "&gt; At the time")
+}
+
 func TestParseLink(t *testing.T) {
 	doc := Parse([]byte("[text](https://example.com)"))
 	if len(doc.Root.Children) == 0 {
