@@ -34,6 +34,13 @@ func postProcess(doc *Document) {
 	// not mis-resolved as link refs.
 	processReferenceLinks(doc)
 
+	// Stitch interrupted lists: tree-sitter-markdown (per CommonMark) treats
+	// a blank-line-separated, non-indented paragraph between two list items
+	// as a list-terminating paragraph, emitting two separate <ol>/<ul>s with
+	// an orphan <p> in between. Restore the ergonomic "continuation belongs
+	// to the preceding item" behavior authors expect.
+	mergeInterruptedLists(doc.Root)
+
 	// Definition lists: recognize `Term\n: Def` paragraphs and merge
 	// adjacent term/description pairs into a single <dl>.
 	processDefinitionLists(doc.Root)
@@ -523,6 +530,89 @@ func processSuperscripts(root *Node) {
 			Literal: match[1],
 		}
 	})
+}
+
+// --- List stitching ---
+
+// mergeInterruptedLists walks top-level children looking for the pattern
+//
+//	List₁  →  Paragraph (one or more)  →  List₂
+//
+// where both lists have the same marker type (both ordered or both
+// unordered). The paragraphs are folded into List₁'s last item as
+// continuation children and List₂'s items are appended to List₁. This
+// makes multi-paragraph list items "just work" without the 3-space
+// continuation indent CommonMark requires, and without forcing authors
+// to use the trailing-space soft-break hack.
+//
+// Merging stops at any other block type (heading, code block, blockquote,
+// admonition, table, etc.) so non-list content still properly breaks the
+// list context.
+func mergeInterruptedLists(root *Node) {
+	if root == nil {
+		return
+	}
+	for i := 0; i < len(root.Children); i++ {
+		list := root.Children[i]
+		if list == nil || list.Type != NodeList {
+			continue
+		}
+		// Scan forward through a run of paragraphs until we find the next
+		// block. If that block is a compatible NodeList, merge.
+		j := i + 1
+		for j < len(root.Children) && root.Children[j] != nil &&
+			root.Children[j].Type == NodeParagraph {
+			j++
+		}
+		if j == i+1 || j >= len(root.Children) {
+			continue
+		}
+		next := root.Children[j]
+		if next == nil || next.Type != NodeList {
+			continue
+		}
+		if !sameListKind(list, next) {
+			continue
+		}
+
+		// Attach paragraphs to the last item of `list`.
+		lastItem := lastListItem(list)
+		if lastItem == nil {
+			continue
+		}
+		for k := i + 1; k < j; k++ {
+			lastItem.Children = append(lastItem.Children, root.Children[k])
+		}
+		// Append `next`'s items to `list`.
+		list.Children = append(list.Children, next.Children...)
+		// Drop the paragraphs and the second list from root.
+		root.Children = append(root.Children[:i+1], root.Children[j+1:]...)
+		// Re-check at same index in case another list follows (chain merging).
+		i--
+	}
+}
+
+// sameListKind returns true when both lists are both ordered (or both
+// unordered). A list is ordered if its `ordered` attribute is "true".
+func sameListKind(a, b *Node) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	aOrdered := a.Attrs != nil && a.Attrs["ordered"] == "true"
+	bOrdered := b.Attrs != nil && b.Attrs["ordered"] == "true"
+	return aOrdered == bOrdered
+}
+
+// lastListItem returns the last NodeListItem (or NodeTaskListItem) child
+// of a NodeList, or nil if none exists.
+func lastListItem(list *Node) *Node {
+	for i := len(list.Children) - 1; i >= 0; i-- {
+		c := list.Children[i]
+		if c != nil && (c.Type == NodeListItem || c.Type == NodeTaskListItem) {
+			return c
+		}
+	}
+	return nil
 }
 
 // --- Auto-embeds ---

@@ -90,6 +90,52 @@ func TestHardening_TaskListVariants(t *testing.T) {
 	}
 }
 
+// --- List continuation merging ---
+
+func TestHardening_OrderedListBlankLineContinuation(t *testing.T) {
+	src := "1. First.\n\nContinuation paragraph.\n\n2. Second.\n"
+	html := NewRenderer().RenderString(src)
+	// The middle paragraph must end up inside list item 1, not between lists.
+	if strings.Count(html, "<ol>") != 1 {
+		t.Fatalf("expected a single <ol>, got %d in:\n%s", strings.Count(html, "<ol>"), html)
+	}
+	assertContains(t, html, "Continuation paragraph.")
+	assertNotContains(t, html, "start=\"2\"")
+}
+
+func TestHardening_UnorderedListBlankLineContinuation(t *testing.T) {
+	src := "- First.\n\nContinuation.\n\n- Second.\n"
+	html := NewRenderer().RenderString(src)
+	if strings.Count(html, "<ul>") != 1 {
+		t.Fatalf("expected a single <ul>, got %d in:\n%s", strings.Count(html, "<ul>"), html)
+	}
+}
+
+func TestHardening_HeadingBetweenListsDoesNotMerge(t *testing.T) {
+	src := "1. Item A.\n\n## Not a continuation\n\n2. Item B.\n"
+	html := NewRenderer().RenderString(src)
+	// Heading terminates the list — two <ol>s is correct.
+	if strings.Count(html, "<ol") != 2 {
+		t.Fatalf("expected 2 <ol> openings, got %d in:\n%s", strings.Count(html, "<ol"), html)
+	}
+	assertContains(t, html, "<h2>Not a continuation</h2>")
+}
+
+func TestHardening_MismatchedListTypesDoNotMerge(t *testing.T) {
+	src := "1. Ordered.\n\nMiddle text.\n\n- Unordered.\n"
+	html := NewRenderer().RenderString(src)
+	// Ordered and unordered lists are different kinds — must not merge.
+	assertContains(t, html, "<ol>")
+	assertContains(t, html, "<ul>")
+	// Middle paragraph is between the lists at document level.
+	olClose := strings.Index(html, "</ol>")
+	pIdx := strings.Index(html, "<p>Middle text.</p>")
+	ulIdx := strings.Index(html, "<ul>")
+	if !(olClose < pIdx && pIdx < ulIdx) {
+		t.Fatalf("expected </ol> < <p> < <ul>, got:\n%s", html)
+	}
+}
+
 // --- Tables ---
 
 func TestHardening_TableInlineCodeInCell(t *testing.T) {
