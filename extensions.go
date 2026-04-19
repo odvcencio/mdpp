@@ -26,6 +26,9 @@ func postProcess(doc *Document) {
 			doc.Root.Children = append(doc.Root.Children, def)
 		}
 	}
+
+	// TOC runs last so every heading in the final AST is accounted for.
+	processTOC(doc)
 }
 
 func flattenDocumentNodes(root *Node) {
@@ -457,6 +460,123 @@ func processSuperscripts(root *Node) {
 			Literal: match[1],
 		}
 	})
+}
+
+// --- Table of Contents ---
+
+var tocDirectiveRe = regexp.MustCompile(`^\[\[[Tt][Oo][Cc]\]\]$`)
+
+// processTOC replaces any top-level paragraph whose trimmed text is exactly
+// [[toc]] (case-insensitive) with a NodeTableOfContents populated from the
+// document's headings. The directive must sit on a line by itself; inline
+// occurrences are left as literal text.
+//
+// tree-sitter-markdown parses "[[toc]]" as Text("[") + Link(raw="[toc]") +
+// Text("]"), so we reconstruct the paragraph's surface text using link raw
+// attributes rather than relying on collectNodeText (which descends into
+// link children and loses the brackets).
+func processTOC(doc *Document) {
+	if doc == nil || doc.Root == nil {
+		return
+	}
+	var headings []Heading
+	collectHeadings(doc.Root, &headings)
+	for i, child := range doc.Root.Children {
+		if child == nil || child.Type != NodeParagraph {
+			continue
+		}
+		text := strings.TrimSpace(collectSurfaceText(child))
+		if !tocDirectiveRe.MatchString(text) {
+			continue
+		}
+		doc.Root.Children[i] = buildTOCNode(headings)
+	}
+}
+
+// collectSurfaceText reconstructs the raw-ish surface text of a node subtree,
+// preferring a link's raw attribute over its rendered children so shortcut-link
+// brackets survive round-trip for directive matching.
+func collectSurfaceText(n *Node) string {
+	var sb strings.Builder
+	collectSurfaceTextInto(n, &sb)
+	return sb.String()
+}
+
+func collectSurfaceTextInto(n *Node, sb *strings.Builder) {
+	if n == nil {
+		return
+	}
+	switch n.Type {
+	case NodeText, NodeCodeSpan:
+		sb.WriteString(n.Literal)
+		return
+	case NodeLink:
+		if raw := n.Attrs["raw"]; raw != "" {
+			sb.WriteString(raw)
+			return
+		}
+	}
+	for _, c := range n.Children {
+		collectSurfaceTextInto(c, sb)
+	}
+}
+
+// buildTOCNode builds a NodeTableOfContents containing a nested NodeList that
+// mirrors the heading hierarchy. Empty heading sets produce an empty TOC node
+// so the renderer can still emit a <nav> wrapper if desired.
+func buildTOCNode(headings []Heading) *Node {
+	toc := &Node{Type: NodeTableOfContents}
+	if len(headings) == 0 {
+		return toc
+	}
+	minLevel := headings[0].Level
+	for _, h := range headings[1:] {
+		if h.Level < minLevel {
+			minLevel = h.Level
+		}
+	}
+	rootList := &Node{Type: NodeList}
+	listAtLevel := map[int]*Node{minLevel: rootList}
+	lastItemAtLevel := map[int]*Node{}
+	for _, h := range headings {
+		lvl := h.Level
+		list := listAtLevel[lvl]
+		if list == nil {
+			for p := lvl - 1; p >= minLevel; p-- {
+				if parent, ok := lastItemAtLevel[p]; ok {
+					sub := &Node{Type: NodeList}
+					parent.Children = append(parent.Children, sub)
+					list = sub
+					listAtLevel[lvl] = sub
+					break
+				}
+			}
+			if list == nil {
+				list = rootList
+				listAtLevel[lvl] = rootList
+			}
+		}
+		item := tocListItem(h)
+		list.Children = append(list.Children, item)
+		lastItemAtLevel[lvl] = item
+		for k := range listAtLevel {
+			if k > lvl {
+				delete(listAtLevel, k)
+				delete(lastItemAtLevel, k)
+			}
+		}
+	}
+	toc.Children = []*Node{rootList}
+	return toc
+}
+
+func tocListItem(h Heading) *Node {
+	link := &Node{
+		Type:     NodeLink,
+		Attrs:    map[string]string{"href": "#" + h.ID},
+		Children: []*Node{textNode(h.Text)},
+	}
+	return &Node{Type: NodeListItem, Children: []*Node{link}}
 }
 
 // --- Helpers ---

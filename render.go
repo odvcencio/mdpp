@@ -295,6 +295,11 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 			b.WriteString(n.Literal)
 		}
 
+	case NodeTableOfContents:
+		b.WriteString(`<nav class="mdpp-toc" aria-label="Table of contents">` + "\n")
+		renderChildrenInto(r, b, n)
+		b.WriteString("</nav>\n")
+
 	default:
 		renderChildrenInto(r, b, n)
 	}

@@ -285,3 +285,56 @@ func TestStrikethrough(t *testing.T) {
 	assertContains(t, html, "<del>")
 	assertContains(t, html, "deleted")
 }
+
+// --- Table of Contents ---
+
+func TestTOCDirectiveEmitsNav(t *testing.T) {
+	src := "[[toc]]\n\n## Alpha\n\n## Beta\n"
+	html := NewRenderer().RenderString(src)
+	assertContains(t, html, `<nav class="mdpp-toc"`)
+	assertContains(t, html, `href="#alpha"`)
+	assertContains(t, html, `href="#beta"`)
+	assertContains(t, html, "Alpha")
+	assertContains(t, html, "Beta")
+}
+
+func TestTOCDirectiveCaseInsensitive(t *testing.T) {
+	html := NewRenderer().RenderString("[[TOC]]\n\n## Alpha\n")
+	assertContains(t, html, `<nav class="mdpp-toc"`)
+	assertContains(t, html, `href="#alpha"`)
+}
+
+func TestTOCDirectiveNestsByHeadingLevel(t *testing.T) {
+	src := "[[toc]]\n\n## Alpha\n\n### Alpha One\n\n### Alpha Two\n\n## Beta\n"
+	html := NewRenderer().RenderString(src)
+	assertContains(t, html, `<nav class="mdpp-toc"`)
+	// Alpha and Beta are both H2, so each should appear in the root list;
+	// the two H3s should nest inside Alpha's <li>.
+	idxAlpha := strings.Index(html, `href="#alpha"`)
+	idxAlphaOne := strings.Index(html, `href="#alpha-one"`)
+	idxBeta := strings.Index(html, `href="#beta"`)
+	if !(idxAlpha < idxAlphaOne && idxAlphaOne < idxBeta) {
+		t.Fatalf("expected alpha < alpha-one < beta in TOC, got:\n%s", html)
+	}
+	// There should be a nested <ul> for the H3s.
+	assertContains(t, html, "<ul>")
+}
+
+func TestTOCDirectiveEmptyWithNoHeadings(t *testing.T) {
+	html := NewRenderer().RenderString("[[toc]]\n\nJust prose.\n")
+	assertContains(t, html, `<nav class="mdpp-toc"`)
+	assertNotContains(t, html, "<ul>")
+}
+
+func TestTOCDirectiveInlineIsLiteral(t *testing.T) {
+	// An inline occurrence (not on its own line) must remain literal text.
+	html := NewRenderer().RenderString("See [[toc]] below.\n\n## Alpha\n")
+	assertNotContains(t, html, `<nav class="mdpp-toc"`)
+}
+
+func TestTOCDirectiveIgnoredInCodeFence(t *testing.T) {
+	src := "```\n[[toc]]\n```\n\n## Alpha\n"
+	html := NewRenderer().RenderString(src)
+	assertNotContains(t, html, `<nav class="mdpp-toc"`)
+	assertContains(t, html, "[[toc]]")
+}
