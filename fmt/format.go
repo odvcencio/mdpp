@@ -15,6 +15,7 @@ import (
 var (
 	tocDirectiveLineRe   = regexp.MustCompile(`^\s*\[\[\s*([Tt][Oo][Cc])\s*\]\]\s*$`)
 	embedDirectiveLineRe = regexp.MustCompile(`^\s*\[\[\s*([Ee][Mm][Bb][Ee][Dd])\s*:\s*(.*?)\s*\]\]\s*$`)
+	admonitionLineRe     = regexp.MustCompile(`^([ \t]*>)([ \t]*)\[!([A-Za-z][A-Za-z0-9_-]*)\](?:[ \t]+(.*))?$`)
 	setextH1Re           = regexp.MustCompile(`^\s*=+\s*$`)
 	setextH2Re           = regexp.MustCompile(`^\s*-+\s*$`)
 	footnoteDefLineRe    = regexp.MustCompile(`^ {0,3}\[\^([A-Za-z0-9_-]+)\]:[ \t]*(.+)$`)
@@ -43,6 +44,17 @@ func Format(src []byte) ([]byte, error) {
 	}
 	src = bytes.TrimPrefix(normalizeLineEndings(src), []byte{0xEF, 0xBB, 0xBF})
 	lines := scanLines(src)
+	containerStarts := map[int]*mdpp.Node{}
+	containerEnds := map[int]struct{}{}
+	if doc != nil && doc.Root != nil {
+		doc.Root.Walk(func(n *mdpp.Node) bool {
+			if n.Type == mdpp.NodeContainerDirective && n.Range.StartLine > 0 && n.Range.EndLine > 0 {
+				containerStarts[n.Range.StartLine] = n
+				containerEnds[n.Range.EndLine] = struct{}{}
+			}
+			return true
+		})
+	}
 	out := make([]formattedLine, 0, len(lines))
 	var refs, footnotes []collectedDef
 	inFence := false
@@ -50,6 +62,7 @@ func Format(src []byte) ([]byte, error) {
 	fenceMarkerLen := 0
 	inFrontmatter := false
 	inMathBlock := false
+	inAdmonitionBlock := false
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
@@ -105,6 +118,33 @@ func Format(src []byte) ([]byte, error) {
 			continue
 		}
 
+		if node := containerStarts[i+1]; node != nil {
+			if line, ok := canonicalContainerOpenLine(line, node); ok {
+				out = append(out, formattedLine{text: line, sourceLine: i + 1})
+				continue
+			}
+		}
+		if _, ok := containerEnds[i+1]; ok {
+			if line, ok := canonicalContainerCloseLineText(line); ok {
+				out = append(out, formattedLine{text: line, sourceLine: i + 1})
+				continue
+			}
+		}
+
+		if inAdmonitionBlock {
+			if line, ok := canonicalAdmonitionBodyLine(line); ok {
+				out = append(out, formattedLine{text: line, sourceLine: i + 1})
+				continue
+			}
+			inAdmonitionBlock = false
+		}
+
+		if line, ok := canonicalAdmonitionLine(line); ok {
+			inAdmonitionBlock = true
+			out = append(out, formattedLine{text: line, sourceLine: i + 1})
+			continue
+		}
+
 		if i+1 < len(lines) && strings.TrimSpace(line) != "" {
 			next := strings.TrimSpace(lines[i+1])
 			switch {
@@ -142,8 +182,9 @@ func Format(src []byte) ([]byte, error) {
 		out = append(out, formattedLine{text: line, sourceLine: i + 1})
 	}
 
-	out = rewriteOrderedListNumbers(doc.Root, out)
 	out = unwrapSimpleParagraphs(doc.Root, out, lines)
+	out = rewriteOrderedListNumbers(doc.Root, out)
+	out = rewriteCanonicalBlocks(doc.Root, out, lines, src)
 	out = normalizeBlankLineEntries(out)
 	out = appendDefinitions(out, refs, footnotes)
 	return []byte(joinFormattedLines(out)), nil
@@ -236,9 +277,60 @@ func canonicalFenceLineWithMarker(line string, chosenMarker string) string {
 	}
 	parts := strings.Fields(info)
 	if len(parts) > 0 {
-		parts[0] = strings.ToLower(parts[0])
+		parts[0] = canonicalFenceInfoToken(parts[0])
+		for i := 1; i < len(parts); i++ {
+			parts[i] = canonicalFenceAttrToken(parts[i])
+		}
 	}
 	return indent + marker + " " + strings.Join(parts, " ")
+}
+
+func canonicalFenceInfoToken(token string) string {
+	if token == "" {
+		return token
+	}
+	if strings.Contains(token, "=") {
+		return canonicalFenceAttrToken(token)
+	}
+	return strings.ToLower(token)
+}
+
+func canonicalFenceAttrToken(token string) string {
+	if token == "" || !strings.Contains(token, "=") {
+		return token
+	}
+	start := 0
+	for start < len(token) && strings.ContainsRune("{[(", rune(token[start])) {
+		start++
+	}
+	end := len(token)
+	for end > start && strings.ContainsRune("}]),", rune(token[end-1])) {
+		end--
+	}
+	core := token[start:end]
+	key, value, ok := strings.Cut(core, "=")
+	if !ok || !isSimpleFenceAttrKey(key) {
+		return token
+	}
+	return token[:start] + strings.ToLower(key) + "=" + value + token[end:]
+}
+
+func isSimpleFenceAttrKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9' && i > 0:
+		case c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalTildeFenceBlock(lines []string, start int) ([]formattedLine, int) {
@@ -325,6 +417,40 @@ func canonicalTaskMarker(line string) string {
 	return line
 }
 
+func canonicalAdmonitionLine(line string) (string, bool) {
+	match := admonitionLineRe.FindStringSubmatch(line)
+	if match == nil {
+		return line, false
+	}
+	typ := strings.ToUpper(match[3])
+	switch typ {
+	case "NOTE", "WARNING", "TIP", "IMPORTANT", "CAUTION":
+	default:
+		return line, false
+	}
+	out := match[1] + " [!" + typ + "]"
+	if tail := strings.TrimSpace(match[4]); tail != "" {
+		out += " " + tail
+	}
+	return out, true
+}
+
+func canonicalAdmonitionBodyLine(line string) (string, bool) {
+	i := 0
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	if i >= len(line) || line[i] != '>' {
+		return "", false
+	}
+	prefix := line[:i+1]
+	rest := strings.TrimLeft(line[i+1:], " \t")
+	if rest == "" {
+		return prefix, true
+	}
+	return prefix + " " + rest, true
+}
+
 func canonicalHardBreakLine(line string, hadTrailingWhitespace bool, nextNonBlank bool) string {
 	if !hadTrailingWhitespace || !nextNonBlank {
 		return line
@@ -342,6 +468,331 @@ func canonicalEmphasis(line string) string {
 	line = strongUnderscoreRe.ReplaceAllString(line, "$1**$2**$3")
 	line = emUnderscoreRe.ReplaceAllString(line, "$1*$2*$3")
 	return line
+}
+
+func rewriteCanonicalBlocks(root *mdpp.Node, lines []formattedLine, source []string, src []byte) []formattedLine {
+	lines = rewriteSimplePipeTables(root, lines, src)
+	lines = rewriteContainerFences(lines, root)
+	lines = rewriteNestedListIndentation(root, lines, source)
+	return lines
+}
+
+func rewriteSimplePipeTables(root *mdpp.Node, lines []formattedLine, source []byte) []formattedLine {
+	if root == nil {
+		return lines
+	}
+	var tables []*mdpp.Node
+	root.Walk(func(n *mdpp.Node) bool {
+		if n.Type == mdpp.NodeTable {
+			tables = append(tables, n)
+		}
+		return true
+	})
+	sort.SliceStable(tables, func(i, j int) bool {
+		return tables[i].Range.StartLine < tables[j].Range.StartLine
+	})
+	for _, table := range tables {
+		lines = rewriteSimplePipeTable(lines, table, source)
+	}
+	return lines
+}
+
+func rewriteSimplePipeTable(lines []formattedLine, table *mdpp.Node, source []byte) []formattedLine {
+	if table == nil || len(table.Children) == 0 {
+		return lines
+	}
+	for _, row := range table.Children {
+		if row == nil || row.Type != mdpp.NodeTableRow {
+			return lines
+		}
+		if row.Range.StartLine == 0 || row.Range.StartLine != row.Range.EndLine {
+			return lines
+		}
+		if len(row.Children) == 0 {
+			return lines
+		}
+	}
+	headerLine := table.Children[0].Range.StartLine
+	if headerLine == 0 {
+		return lines
+	}
+	headerIdx := sourceLineIndex(lines, headerLine)
+	if headerIdx < 0 {
+		return lines
+	}
+	headerText, headerPrefix, ok := canonicalSimplePipeTableRow(table.Children[0], source, lines[headerIdx].text)
+	if !ok {
+		return lines
+	}
+	indent := headerPrefix
+	delimiterLine := headerLine + 1
+	if len(table.Children) > 1 && table.Children[1].Range.StartLine != delimiterLine+1 {
+		return lines
+	}
+	for _, row := range table.Children {
+		rowLine := row.Range.StartLine
+		rowIdx := sourceLineIndex(lines, rowLine)
+		if rowIdx < 0 {
+			return lines
+		}
+		rowText, rowPrefix, ok := canonicalSimplePipeTableRow(row, source, lines[rowIdx].text)
+		if !ok || rowPrefix != indent {
+			return lines
+		}
+		lines[rowIdx].text = rowText
+	}
+	delimIdx := sourceLineIndex(lines, delimiterLine)
+	if delimIdx < 0 {
+		return lines
+	}
+	delimiterText, ok := canonicalSimplePipeTableDelimiter(table, indent)
+	if !ok {
+		return lines
+	}
+	lines[headerIdx].text = headerText
+	lines[delimIdx].text = delimiterText
+	return lines
+}
+
+func canonicalSimplePipeTableRow(row *mdpp.Node, source []byte, lineText string) (string, string, bool) {
+	indent, ok := simplePipeTableIndent(lineText)
+	if !ok {
+		return "", "", false
+	}
+	cells := make([]string, 0, len(row.Children))
+	for _, cell := range row.Children {
+		if cell == nil || cell.Type != mdpp.NodeTableCell || cell.Range.StartLine == 0 || cell.Range.StartLine != cell.Range.EndLine {
+			return "", "", false
+		}
+		raw := sourceNodeText(source, cell.Range.StartByte, cell.Range.EndByte)
+		cells = append(cells, strings.TrimSpace(raw))
+	}
+	if len(cells) == 0 {
+		return "", "", false
+	}
+	return indent + "| " + strings.Join(cells, " | ") + " |", indent, true
+}
+
+func canonicalSimplePipeTableDelimiter(table *mdpp.Node, indent string) (string, bool) {
+	if table == nil || len(table.Children) == 0 {
+		return "", false
+	}
+	cols := len(table.Children[0].Children)
+	if cols == 0 {
+		return "", false
+	}
+	aligns := strings.Split(table.Attr("align"), ",")
+	parts := make([]string, cols)
+	for i := 0; i < cols; i++ {
+		align := ""
+		if i < len(aligns) {
+			align = aligns[i]
+		}
+		switch align {
+		case "left":
+			parts[i] = ":---"
+		case "center":
+			parts[i] = ":---:"
+		case "right":
+			parts[i] = "---:"
+		default:
+			parts[i] = "---"
+		}
+	}
+	return indent + "|" + strings.Join(parts, "|") + "|", true
+}
+
+func simplePipeTableIndent(line string) (string, bool) {
+	i := 0
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	if i >= len(line) || line[i] != '|' {
+		return "", false
+	}
+	return line[:i], true
+}
+
+func sourceNodeText(source []byte, start, end int) string {
+	if start < 0 || end < start || start >= len(source) {
+		return ""
+	}
+	if end > len(source) {
+		end = len(source)
+	}
+	return string(source[start:end])
+}
+
+func rewriteContainerFences(lines []formattedLine, root *mdpp.Node) []formattedLine {
+	if root == nil {
+		return lines
+	}
+	root.Walk(func(n *mdpp.Node) bool {
+		if n.Type != mdpp.NodeContainerDirective || n.Range.StartLine == 0 || n.Range.EndLine == 0 {
+			return true
+		}
+		openIdx := sourceLineIndex(lines, n.Range.StartLine)
+		closeIdx := sourceLineIndex(lines, n.Range.EndLine)
+		if openIdx < 0 || closeIdx < 0 {
+			return true
+		}
+		open, ok := canonicalContainerOpenLine(lines[openIdx].text, n)
+		if ok {
+			lines[openIdx].text = open
+		}
+		if close, ok := canonicalContainerCloseLine(lines[closeIdx].text, n); ok {
+			lines[closeIdx].text = close
+		}
+		return true
+	})
+	return lines
+}
+
+func canonicalContainerOpenLine(line string, n *mdpp.Node) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	i := 0
+	for i < len(line) && line[i] == ':' {
+		i++
+	}
+	if i < 3 {
+		return "", false
+	}
+	prefix := strings.Repeat(":", i)
+	name := strings.ToLower(strings.TrimSpace(n.Attr("name")))
+	if name == "" {
+		return "", false
+	}
+	if extra := strings.TrimSpace(n.Attr("attrs")); extra != "" {
+		return "", false
+	}
+	var parts []string
+	if title := strings.TrimSpace(n.Attr("title")); title != "" {
+		parts = append(parts, strconv.Quote(title))
+	}
+	var attrs []string
+	if id := strings.TrimSpace(n.Attr("id")); id != "" {
+		attrs = append(attrs, "#"+id)
+	}
+	if class := strings.TrimSpace(n.Attr("class")); class != "" {
+		for _, c := range strings.Fields(class) {
+			attrs = append(attrs, "."+c)
+		}
+	}
+	if len(attrs) > 0 {
+		parts = append(parts, "{"+strings.Join(attrs, " ")+"}")
+	}
+	out := prefix + name
+	if len(parts) > 0 {
+		out += " " + strings.Join(parts, " ")
+	}
+	return out, true
+}
+
+func canonicalContainerCloseLine(line string, n *mdpp.Node) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	i := 0
+	for i < len(line) && line[i] == ':' {
+		i++
+	}
+	if i < 3 {
+		return "", false
+	}
+	return strings.Repeat(":", i), true
+}
+
+func canonicalContainerCloseLineText(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return "", false
+	}
+	i := 0
+	for i < len(trimmed) && trimmed[i] == ':' {
+		i++
+	}
+	if i < 3 || i != len(trimmed) {
+		return "", false
+	}
+	return strings.Repeat(":", i), true
+}
+
+func rewriteNestedListIndentation(root *mdpp.Node, lines []formattedLine, source []string) []formattedLine {
+	if root == nil {
+		return lines
+	}
+	var walk func(n *mdpp.Node, depth int, inItem bool)
+	walk = func(n *mdpp.Node, depth int, inItem bool) {
+		if n == nil {
+			return
+		}
+		if n.Type == mdpp.NodeList {
+			for _, child := range n.Children {
+				if child == nil || (child.Type != mdpp.NodeListItem && child.Type != mdpp.NodeTaskListItem) {
+					continue
+				}
+				rewriteListItemIndentation(lines, source, child, depth)
+				for _, grand := range child.Children {
+					if grand == nil {
+						continue
+					}
+					if grand.Type == mdpp.NodeList {
+						walk(grand, depth+1, true)
+					} else {
+						walk(grand, depth, true)
+					}
+				}
+			}
+			return
+		}
+		for _, child := range n.Children {
+			if child == nil {
+				continue
+			}
+			if child.Type == mdpp.NodeList {
+				if inItem {
+					walk(child, depth+1, true)
+				} else {
+					walk(child, depth, false)
+				}
+				continue
+			}
+			walk(child, depth, inItem)
+		}
+	}
+	walk(root, 0, false)
+	return lines
+}
+
+func rewriteListItemIndentation(lines []formattedLine, source []string, item *mdpp.Node, depth int) {
+	if item == nil || item.Range.StartLine == 0 {
+		return
+	}
+	idx := sourceLineIndex(lines, item.Range.StartLine)
+	if idx < 0 {
+		return
+	}
+	line := lines[idx].text
+	if !linePrefixIsPlainWhitespace(line) {
+		return
+	}
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" {
+		return
+	}
+	lines[idx].text = strings.Repeat("  ", depth) + trimmed
+}
+
+func linePrefixIsPlainWhitespace(line string) bool {
+	for i := 0; i < len(line); i++ {
+		if line[i] == ' ' || line[i] == '\t' {
+			continue
+		}
+		return line[i] != '>'
+	}
+	return true
 }
 
 func normalizeBlankLineEntries(lines []formattedLine) []formattedLine {

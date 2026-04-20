@@ -131,6 +131,9 @@ func (i *LineIndex) PositionToOffset(pos Position) (int, bool) {
 	}
 	start := i.lineStarts[pos.Line]
 	end := i.lineContentEnd(int(pos.Line))
+	if end < start {
+		end = start
+	}
 	rel, ok := utf16ColumnToByte(i.source[start:end], int(pos.Character))
 	if !ok {
 		return end, false

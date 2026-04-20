@@ -126,3 +126,93 @@ func TestFormatCanonicalizesTildeFenceWithSingleBacktick(t *testing.T) {
 		t.Fatalf("Format() = %q, want %q", got, want)
 	}
 }
+
+func TestFormatCanonicalizesSimplePipeTables(t *testing.T) {
+	src := []byte("|  Name  |  Value  |\n| :---: | ---: |\n|  **a**  |  [b](https://example.com)  |\n")
+	got, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "| Name | Value |\n|:---:|---:|\n| **a** | [b](https://example.com) |\n"
+	if string(got) != want {
+		t.Fatalf("Format() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatNormalizesNestedListIndentation(t *testing.T) {
+	src := []byte("- one\n   - two\n      - three\n")
+	got, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "- one\n  - two\n    - three\n"
+	if string(got) != want {
+		t.Fatalf("Format() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatCanonicalizesAdmonitionMarkers(t *testing.T) {
+	src := []byte("> [!note]   Heads up\n>    body\n")
+	got, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "> [!NOTE] Heads up\n> body\n"
+	if string(got) != want {
+		t.Fatalf("Format() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatCanonicalizesContainerFences(t *testing.T) {
+	src := []byte("::::DETAILS   \"Trace\"\nBody\n::::\n")
+	got, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "::::details \"Trace\"\nBody\n::::\n"
+	if string(got) != want {
+		t.Fatalf("Format() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatCanonicalizesFenceAttrs(t *testing.T) {
+	src := []byte("```Go Key=VALUE Foo=Bar\nx\n```\n")
+	got, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "``` go key=VALUE foo=Bar\nx\n```\n"
+	if string(got) != want {
+		t.Fatalf("Format() = %q, want %q", got, want)
+	}
+}
+
+func FuzzFormat(f *testing.F) {
+	for _, seed := range [][]byte{
+		[]byte("# Title #\n\nText  \n"),
+		[]byte("|  A  |  B  |\n|---|---|\n| x | y |\n"),
+		[]byte("- one\n   - two\n"),
+		[]byte("> [!WARNING]  Heads up\n>  body\n"),
+		[]byte(":::DETAILS \"Trace\"\nBody\n:::\n"),
+		[]byte("```Go Key=VALUE\nx\n```\n"),
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, src []byte) {
+		if len(src) > 8192 {
+			return
+		}
+		got, err := Format(src)
+		if err != nil {
+			t.Fatalf("Format(%q) returned error: %v", src, err)
+		}
+		got2, err := Format(got)
+		if err != nil {
+			t.Fatalf("Format(idempotence pass) returned error: %v", err)
+		}
+		if !bytes.Equal(got, got2) {
+			t.Fatalf("Format not idempotent:\nfirst:  %q\nsecond: %q", got, got2)
+		}
+	})
+}

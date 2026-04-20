@@ -281,7 +281,7 @@ func (s *Server) handleInitialize() InitializeResult {
 			DocumentSymbolProvider:     true,
 			DocumentFormattingProvider: true,
 			CompletionProvider: CompletionOptions{
-				TriggerCharacters: []string{"[", "]", "^", ":", "!"},
+				TriggerCharacters: []string{"[", "]", "^", ":", "!", "#"},
 			},
 			SemanticTokensProvider: SemanticTokensOptions{
 				Legend: SemanticTokensLegend{TokenTypes: semanticTokenTypes, TokenModifiers: semanticTokenModifiers},

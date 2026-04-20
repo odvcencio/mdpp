@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -219,6 +220,10 @@ func (s *Server) codeActions(params CodeActionParams) ([]CodeAction, error) {
 	var actions []CodeAction
 	if quickfixAllowed {
 		for _, d := range lint.Lint(doc) {
+			if action, ok := quickfixCodeActionForDiagnostic(params.TextDocument.URI, source, index, d, params.Range); ok {
+				actions = append(actions, action)
+				continue
+			}
 			if d.Fix == nil {
 				continue
 			}
@@ -246,6 +251,7 @@ func (s *Server) codeActions(params CodeActionParams) ([]CodeAction, error) {
 				}},
 			})
 		}
+		actions = append(actions, codeActionsForConversions(params.TextDocument.URI, doc, source, index, params.Range)...)
 	}
 	if fixAllAllowed {
 		formatted, err := mdppfmt.Format(source)
@@ -268,7 +274,164 @@ func (s *Server) codeActions(params CodeActionParams) ([]CodeAction, error) {
 			})
 		}
 	}
-	return actions, nil
+	return dedupeCodeActions(actions), nil
+}
+
+func quickfixCodeActionForDiagnostic(uri DocumentURI, source []byte, index *LineIndex, d lint.Diagnostic, want Range) (CodeAction, bool) {
+	diagRange := index.RangeToLSP(d.Range)
+	if !rangesOverlap(want, diagRange) {
+		return CodeAction{}, false
+	}
+	switch d.Code {
+	case "MDPP100":
+		if id, ok := footnoteIDAtOffset(source, rangeStartOffset(index, diagRange)); ok {
+			return placeholderDefinitionCodeAction(uri, index, source, "Create missing footnote definition", "[^"+id+"]: "), true
+		}
+	case "MDPP106":
+		if label, ok := linkReferenceLabelAtOffset(source, rangeStartOffset(index, diagRange)); ok {
+			return placeholderDefinitionCodeAction(uri, index, source, "Create missing reference definition", "["+label+"]: "), true
+		}
+	}
+	return CodeAction{}, false
+}
+
+func codeActionsForConversions(uri DocumentURI, doc *mdpp.Document, source []byte, index *LineIndex, want Range) []CodeAction {
+	if doc == nil || doc.Root == nil || index == nil {
+		return nil
+	}
+	var actions []CodeAction
+	doc.Root.Walk(func(n *mdpp.Node) bool {
+		if n == nil || !rangesOverlap(want, index.RangeToLSP(n.Range)) {
+			return true
+		}
+		switch n.Type {
+		case mdpp.NodeLink:
+			if action, ok := convertReferenceLinkCodeAction(uri, index, source, n); ok {
+				actions = append(actions, action)
+				return true
+			}
+		case mdpp.NodeFootnoteRef:
+		}
+		return true
+	})
+	return actions
+}
+
+func convertReferenceLinkCodeAction(uri DocumentURI, index *LineIndex, source []byte, n *mdpp.Node) (CodeAction, bool) {
+	label := referenceLabelForNode(source, n)
+	if label == "" {
+		return CodeAction{}, false
+	}
+	def, ok := linkDefinitionTargetForLabel(source, label)
+	if !ok {
+		return CodeAction{}, false
+	}
+	rawStart, rawEnd, ok := rangeBounds(source, n.Range)
+	if !ok {
+		return CodeAction{}, false
+	}
+	raw := source[rawStart:rawEnd]
+	textEnd := referenceLinkTextEnd(raw)
+	if textEnd < 0 {
+		return CodeAction{}, false
+	}
+	replacement := append([]byte(nil), raw[:textEnd+1]...)
+	replacement = append(replacement, '(')
+	replacement = append(replacement, markdownLinkDestination(def.href)...)
+	if title := strings.TrimSpace(def.title); title != "" {
+		replacement = append(replacement, ' ')
+		replacement = append(replacement, markdownLinkTitle(title)...)
+	}
+	replacement = append(replacement, ')')
+	return CodeAction{
+		Title: "Convert reference link to inline link",
+		Kind:  "quickfix",
+		Edit: &WorkspaceEdit{Changes: map[DocumentURI][]TextEdit{
+			uri: {{
+				Range:   index.RangeToLSP(n.Range),
+				NewText: string(replacement),
+			}},
+		}},
+	}, true
+}
+
+func placeholderDefinitionCodeAction(uri DocumentURI, index *LineIndex, source []byte, title string, placeholder string) CodeAction {
+	insert := placeholderInsertionText(source) + placeholder
+	return CodeAction{
+		Title: title,
+		Kind:  "quickfix",
+		Edit: &WorkspaceEdit{Changes: map[DocumentURI][]TextEdit{
+			uri: {{
+				Range: Range{
+					Start: index.OffsetToPosition(len(source)),
+					End:   index.OffsetToPosition(len(source)),
+				},
+				NewText: insert,
+			}},
+		}},
+	}
+}
+
+func placeholderInsertionText(source []byte) string {
+	if len(source) == 0 {
+		return ""
+	}
+	switch {
+	case bytes.HasSuffix(source, []byte("\n\n")):
+		return ""
+	case bytes.HasSuffix(source, []byte("\n")):
+		return "\n"
+	default:
+		return "\n\n"
+	}
+}
+
+func rangeStartOffset(index *LineIndex, r Range) int {
+	if index == nil {
+		return 0
+	}
+	offset, ok := index.PositionToOffset(r.Start)
+	if !ok {
+		return len(index.source)
+	}
+	return offset
+}
+
+func dedupeCodeActions(actions []CodeAction) []CodeAction {
+	out := make([]CodeAction, 0, len(actions))
+	seen := map[string]struct{}{}
+	for _, action := range actions {
+		key := action.Title + "|" + action.Kind + "|" + codeActionEditKey(action.Edit)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, action)
+	}
+	return out
+}
+
+func codeActionEditKey(edit *WorkspaceEdit) string {
+	if edit == nil {
+		return ""
+	}
+	var b strings.Builder
+	for uri, changes := range edit.Changes {
+		b.WriteString(string(uri))
+		for _, change := range changes {
+			b.WriteString("|")
+			b.WriteString(strconvItoa(int(change.Range.Start.Line)))
+			b.WriteString(":")
+			b.WriteString(strconvItoa(int(change.Range.Start.Character)))
+			b.WriteString(":")
+			b.WriteString(strconvItoa(int(change.Range.End.Line)))
+			b.WriteString(":")
+			b.WriteString(strconvItoa(int(change.Range.End.Character)))
+			b.WriteString(":")
+			b.WriteString(change.NewText)
+		}
+	}
+	return b.String()
 }
 
 func codeActionKindAllowed(only []string, kind string) bool {

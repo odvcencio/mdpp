@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -68,6 +69,20 @@ func loadEmojiTable() map[string]string {
 		emoji.ApplyAliases(emojiTable)
 	})
 	return emojiTable
+}
+
+// EmojiShortcodes returns the known emoji shortcode names in stable order.
+func EmojiShortcodes() []string {
+	table := loadEmojiTable()
+	if len(table) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(table))
+	for shortcode := range table {
+		out = append(out, shortcode)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // emojiCompressed is a gzip+base64 encoded TSV of shortcode→emoji mappings.

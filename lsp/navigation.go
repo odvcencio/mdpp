@@ -10,9 +10,10 @@ import (
 )
 
 var (
-	lspFootnoteDefRe = regexp.MustCompile(`(?m)^ {0,3}\[\^([A-Za-z0-9_-]+)\]:`)
-	lspFootnoteRefRe = regexp.MustCompile(`\[\^([A-Za-z0-9_-]+)\]`)
-	lspLinkDefRe     = regexp.MustCompile(`(?m)^ {0,3}\[([^\]\^][^\]]*)\]:`)
+	lspFootnoteDefRe   = regexp.MustCompile(`(?m)^ {0,3}\[\^([A-Za-z0-9_-]+)\]:`)
+	lspFootnoteRefRe   = regexp.MustCompile(`\[\^([A-Za-z0-9_-]+)\]`)
+	lspLinkDefRe       = regexp.MustCompile(`(?m)^ {0,3}\[([^\]\^][^\]]*)\]:[ \t]*(.*)$`)
+	lspReferenceLinkRe = regexp.MustCompile(`\[[^\]\n]+\]\[([^\]\n]*)\]|\[([^\]\n]+)\]`)
 )
 
 func (s *Server) definition(params DefinitionParams) ([]Location, error) {
@@ -344,9 +345,12 @@ func referenceLabelForNode(source []byte, n *mdpp.Node) string {
 	if strings.Contains(raw, "](") || strings.HasPrefix(raw, "<") {
 		return ""
 	}
-	if loc := regexp.MustCompile(`^\[[^\]\n]+\]\[([^\]\n]*)\]`).FindStringSubmatch(raw); loc != nil {
-		if loc[1] != "" {
+	if loc := lspReferenceLinkRe.FindStringSubmatch(raw); loc != nil {
+		if len(loc) > 1 && loc[1] != "" {
 			return loc[1]
+		}
+		if len(loc) > 2 && loc[2] != "" {
+			return loc[2]
 		}
 		return n.Text()
 	}
@@ -366,6 +370,65 @@ func linkDefinitionRanges(source []byte) map[string]mdpp.Range {
 		out[label] = lspSourceRange(source, loc[0], loc[1])
 	}
 	return out
+}
+
+type linkDefinitionTarget struct {
+	href  string
+	title string
+}
+
+func linkDefinitionTargetForLabel(source []byte, label string) (linkDefinitionTarget, bool) {
+	key := normalizeLSPLabel(label)
+	for _, loc := range lspLinkDefRe.FindAllSubmatchIndex(source, -1) {
+		if len(loc) < 6 || loc[2] < 0 || normalizeLSPLabel(string(source[loc[2]:loc[3]])) != key {
+			continue
+		}
+		href, title := parseLinkDefinitionTarget(string(source[loc[4]:loc[5]]))
+		if href == "" {
+			return linkDefinitionTarget{}, false
+		}
+		return linkDefinitionTarget{href: href, title: title}, true
+	}
+	return linkDefinitionTarget{}, false
+}
+
+func parseLinkDefinitionTarget(rest string) (href, title string) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", ""
+	}
+	if rest[0] == '<' {
+		if end := strings.IndexByte(rest, '>'); end > 0 {
+			href = rest[1:end]
+			rest = strings.TrimSpace(rest[end+1:])
+		}
+	} else {
+		i := 0
+		for i < len(rest) {
+			if rest[i] == ' ' || rest[i] == '\t' {
+				break
+			}
+			i++
+		}
+		href = rest[:i]
+		rest = strings.TrimSpace(rest[i:])
+	}
+	if rest == "" {
+		return href, ""
+	}
+	if len(rest) >= 2 {
+		switch rest[0] {
+		case '"', '\'':
+			if end := strings.IndexByte(rest[1:], rest[0]); end >= 0 {
+				title = rest[1 : 1+end]
+			}
+		case '(':
+			if end := strings.IndexByte(rest[1:], ')'); end >= 0 {
+				title = rest[1 : 1+end]
+			}
+		}
+	}
+	return href, strings.TrimSpace(title)
 }
 
 func anchorReferenceLocations(uri DocumentURI, source []byte, index *LineIndex, id string) []Location {
@@ -532,6 +595,80 @@ func linkDefinitionLabelRangeAtOffset(source []byte, offset int) mdpp.Range {
 		}
 	}
 	return mdpp.Range{}
+}
+
+func linkReferenceLabelAtOffset(source []byte, offset int) (string, bool) {
+	for _, loc := range lspReferenceLinkRe.FindAllSubmatchIndex(source, -1) {
+		if len(loc) < 6 || offset < loc[0] || offset > loc[1] {
+			continue
+		}
+		if loc[2] >= 0 {
+			label := string(source[loc[2]:loc[3]])
+			if label != "" {
+				return label, true
+			}
+			if loc[4] >= 0 && loc[5] >= loc[4] {
+				return string(source[loc[4]:loc[5]]), true
+			}
+			raw := source[loc[0]:loc[1]]
+			if textEnd := referenceLinkTextEnd(raw); textEnd > 0 {
+				return string(raw[1:textEnd]), true
+			}
+			return "", false
+		}
+		if loc[4] >= 0 {
+			return string(source[loc[4]:loc[5]]), true
+		}
+	}
+	return "", false
+}
+
+func referenceLinkTextEnd(raw []byte) int {
+	if len(raw) == 0 || raw[0] != '[' {
+		return -1
+	}
+	depth := 0
+	escaped := false
+	for i, b := range raw {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if b == '\\' {
+			escaped = true
+			continue
+		}
+		switch b {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func markdownLinkDestination(href string) string {
+	if href == "" {
+		return "<>"
+	}
+	if strings.ContainsRune(href, '>') {
+		href = strings.ReplaceAll(href, ">", "%3E")
+	}
+	return "<" + href + ">"
+}
+
+func markdownLinkTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "\"\""
+	}
+	title = strings.ReplaceAll(title, `\`, `\\`)
+	title = strings.ReplaceAll(title, `"`, `\"`)
+	return `"` + title + `"`
 }
 
 func dedupeTextEdits(in []TextEdit) []TextEdit {

@@ -26,28 +26,6 @@ var commonFrontmatterKeys = []string{
 	"updated",
 }
 
-var commonEmojiShortcodes = []string{
-	"rocket",
-	"sparkles",
-	"smile",
-	"sweat_smile",
-	"wave",
-	"heart",
-	"fire",
-	"tada",
-	"eyes",
-	"thinking_face",
-	"thumbsup",
-	"thumbsdown",
-	"warning",
-	"bulb",
-	"memo",
-	"link",
-	"pushpin",
-	"speech_balloon",
-	"check_mark",
-}
-
 func completionItems(doc *mdpp.Document, source []byte, prefix string) []CompletionItem {
 	trimmed := strings.TrimLeft(prefix, " \t")
 	token := completionToken(prefix)
@@ -63,6 +41,10 @@ func completionItems(doc *mdpp.Document, source []byte, prefix string) []Complet
 		}
 	case isReferenceCompletionContext(token):
 		if items := referenceCompletionItems(source, referenceCompletionPrefix(token)); len(items) > 0 {
+			return items
+		}
+	case isHeadingAnchorCompletionContext(token):
+		if items := headingAnchorCompletionItems(doc, headingAnchorCompletionPrefix(token)); len(items) > 0 {
 			return items
 		}
 	case isEmojiCompletionContext(token):
@@ -156,10 +138,44 @@ func referenceCompletionItems(source []byte, prefix string) []CompletionItem {
 	return completionItemsFromStrings(values, completionItemKindValue, "]", "Reference label")
 }
 
+func headingAnchorCompletionItems(doc *mdpp.Document, prefix string) []CompletionItem {
+	if doc == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	values := make([]string, 0, len(doc.Headings()))
+	filter := strings.ToLower(prefix)
+	for _, heading := range doc.Headings() {
+		if heading.ID == "" {
+			continue
+		}
+		if _, ok := seen[heading.ID]; ok {
+			continue
+		}
+		if filter != "" && !strings.HasPrefix(strings.ToLower(heading.ID), filter) {
+			continue
+		}
+		seen[heading.ID] = struct{}{}
+		values = append(values, heading.ID)
+	}
+	sort.Strings(values)
+	items := make([]CompletionItem, 0, len(values))
+	for _, value := range values {
+		items = append(items, CompletionItem{
+			Label:      "#" + value,
+			Kind:       completionItemKindValue,
+			Detail:     "Heading anchor",
+			InsertText: value,
+		})
+	}
+	return items
+}
+
 func emojiCompletionItems(prefix string) []CompletionItem {
 	prefix = strings.ToLower(prefix)
-	values := make([]string, 0, len(commonEmojiShortcodes))
-	for _, code := range commonEmojiShortcodes {
+	codes := emojiShortcodes()
+	values := make([]string, 0, len(codes))
+	for _, code := range codes {
 		if prefix != "" && !strings.HasPrefix(strings.ToLower(code), prefix) {
 			continue
 		}
@@ -207,12 +223,23 @@ func isReferenceCompletionContext(prefix string) bool {
 	}
 }
 
+func isHeadingAnchorCompletionContext(prefix string) bool {
+	return strings.Contains(prefix, "(#")
+}
+
 func referenceCompletionPrefix(prefix string) string {
 	if idx := strings.LastIndex(prefix, "]["); idx >= 0 {
 		return prefix[idx+2:]
 	}
 	if strings.HasPrefix(prefix, "[") && !strings.HasPrefix(prefix, "[[") && !strings.HasPrefix(prefix, "[^") {
 		return prefix[1:]
+	}
+	return ""
+}
+
+func headingAnchorCompletionPrefix(prefix string) string {
+	if idx := strings.LastIndex(prefix, "(#"); idx >= 0 {
+		return prefix[idx+2:]
 	}
 	return ""
 }
