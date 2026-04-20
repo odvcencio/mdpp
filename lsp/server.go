@@ -276,12 +276,12 @@ func (s *Server) handleInitialize() InitializeResult {
 			DefinitionProvider:         true,
 			ReferencesProvider:         true,
 			RenameProvider:             true,
-			CodeActionProvider:         true,
+			CodeActionProvider:         CodeActionOptions{CodeActionKinds: []string{"quickfix", "source.fixAll", "source.fixAll.mdpp"}},
 			FoldingRangeProvider:       true,
 			DocumentSymbolProvider:     true,
 			DocumentFormattingProvider: true,
 			CompletionProvider: CompletionOptions{
-				TriggerCharacters: []string{"[", ":", "!"},
+				TriggerCharacters: []string{"[", "]", "^", ":", "!"},
 			},
 			SemanticTokensProvider: SemanticTokensOptions{
 				Legend: SemanticTokensLegend{TokenTypes: semanticTokenTypes, TokenModifiers: semanticTokenModifiers},

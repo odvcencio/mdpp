@@ -176,22 +176,31 @@ func (s *Server) completion(params CompletionParams) (*CompletionList, error) {
 	if !ok {
 		return &CompletionList{Items: nil}, nil
 	}
-	_, _, index, _ := open.Snapshot()
+	doc, source, index, _, offset, _, err := documentPositionContext(open, params.Position)
+	if err != nil {
+		return nil, err
+	}
 	prefix, ok := index.LinePrefix(params.Position)
 	if !ok {
 		return nil, errors.New("completion position is outside the document")
 	}
 	trimmedPrefix := strings.TrimLeft(prefix, " \t")
+	if offsetInFrontmatter(source, offset) {
+		if items := frontmatterCompletionItems(doc, trimmedPrefix); len(items) > 0 {
+			return &CompletionList{Items: items}, nil
+		}
+	}
 	switch {
 	case strings.Contains(trimmedPrefix, "[[embed:"):
 		return &CompletionList{Items: nil}, nil
-	case strings.HasPrefix(trimmedPrefix, "[[") || strings.HasSuffix(prefix, "[["):
-		return &CompletionList{Items: directiveCompletions()}, nil
 	case strings.HasPrefix(trimmedPrefix, ":::"):
 		return &CompletionList{Items: containerCompletions()}, nil
 	case strings.Contains(prefix, "[!"):
 		return &CompletionList{Items: admonitionCompletions()}, nil
 	default:
+		if items := completionItems(doc, source, trimmedPrefix); len(items) > 0 {
+			return &CompletionList{Items: items}, nil
+		}
 		return &CompletionList{Items: nil}, nil
 	}
 }

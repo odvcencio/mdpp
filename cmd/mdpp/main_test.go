@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,6 +40,28 @@ func TestRenderWritesOutputFile(t *testing.T) {
 	}
 	if !bytes.Contains(got, []byte(`<h1 id="hello">Hello</h1>`)) {
 		t.Fatalf("output file missing rendered heading: %s", got)
+	}
+}
+
+func TestRenderWritesPDF(t *testing.T) {
+	skipIfNoLocalChrome(t)
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.pdf")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"render", "--format=pdf", "--timeout=15s", "-o", out}, strings.NewReader("# PDF\n\nBody.\n"), &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(got, []byte("%PDF-")) {
+		t.Fatalf("PDF header = %q", got[:minInt(len(got), 16)])
 	}
 }
 
@@ -167,4 +190,21 @@ func TestVersion(t *testing.T) {
 	if !strings.Contains(stdout.String(), mdpp.Version) || !strings.Contains(stdout.String(), mdpp.SpecVersion) {
 		t.Fatalf("version output = %q", stdout.String())
 	}
+}
+
+func skipIfNoLocalChrome(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return
+		}
+	}
+	t.Skip("local Chrome/Chromium not available")
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

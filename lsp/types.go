@@ -86,7 +86,7 @@ type ServerCapabilities struct {
 	DefinitionProvider         bool                    `json:"definitionProvider"`
 	ReferencesProvider         bool                    `json:"referencesProvider"`
 	RenameProvider             bool                    `json:"renameProvider"`
-	CodeActionProvider         bool                    `json:"codeActionProvider"`
+	CodeActionProvider         CodeActionOptions       `json:"codeActionProvider"`
 	FoldingRangeProvider       bool                    `json:"foldingRangeProvider"`
 	DocumentSymbolProvider     bool                    `json:"documentSymbolProvider"`
 	DocumentFormattingProvider bool                    `json:"documentFormattingProvider"`
@@ -167,6 +167,10 @@ type RenameParams struct {
 
 type WorkspaceEdit struct {
 	Changes map[DocumentURI][]TextEdit `json:"changes,omitempty"`
+}
+
+type CodeActionOptions struct {
+	CodeActionKinds []string `json:"codeActionKinds,omitempty"`
 }
 
 type CodeActionParams struct {

@@ -16,9 +16,13 @@ type semanticToken struct {
 }
 
 var (
-	containerOpenRe = regexp.MustCompile(`(?m)^([ \t]*:{3,}[ \t]*)([A-Za-z][A-Za-z0-9_-]*)`)
-	admonitionRe    = regexp.MustCompile(`\[!([A-Za-z][A-Za-z0-9_-]*)\]`)
-	frontmatterRe   = regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_-]*)(\s*:)`)
+	containerOpenRe    = regexp.MustCompile(`(?m)^([ \t]*:{3,}[ \t]*)([A-Za-z][A-Za-z0-9_-]*)`)
+	admonitionRe       = regexp.MustCompile(`\[!([A-Za-z][A-Za-z0-9_-]*)\]`)
+	frontmatterRe      = regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_-]*)(\s*:)`)
+	frontmatterValueRe = regexp.MustCompile(`(?m)^([ \t]*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:\s*)([^\n#]+)`)
+	blockquoteMarkerRe = regexp.MustCompile(`(?m)^([ \t]*>+[ \t]*)`)
+	listMarkerRe       = regexp.MustCompile(`(?m)^([ \t]*(?:[-+*]|\d+[.)]|[A-Za-z][.)]|[ivxlcdmIVXLCDM]+[.)])([ \t]+))`)
+	tableSeparatorRe   = regexp.MustCompile(`(?m)^([ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*)$`)
 )
 
 func (s *Server) semanticTokensFull(params SemanticTokensParams) (*SemanticTokens, error) {
@@ -132,6 +136,16 @@ func collectSemanticTokens(doc *mdpp.Document, source []byte, index *LineIndex, 
 			if start, end, ok := admonitionTypeRange(source, n.Range); ok {
 				add(start, end, tokenAdmonitionType, 0)
 			}
+		case mdpp.NodeCodeSpan:
+			add(n.Range.StartByte, n.Range.EndByte, tokenString, modifierBit(tokenModInline))
+			return
+		case mdpp.NodeCodeBlock:
+			add(n.Range.StartByte, n.Range.EndByte, tokenString, modifierBit(tokenModDisplay))
+			return
+		case mdpp.NodeBlockquote:
+			emitBlockquoteMarkers(source, n.Range, add)
+		case mdpp.NodeListItem:
+			emitListMarker(source, n.Range, add)
 		case mdpp.NodeFootnoteRef:
 			add(n.Range.StartByte, n.Range.EndByte, tokenFootnote, modifierBit(tokenModReference))
 			return
@@ -183,6 +197,9 @@ func collectSemanticTokens(doc *mdpp.Document, source []byte, index *LineIndex, 
 			}
 		case mdpp.NodeDefinitionTerm:
 			add(n.Range.StartByte, n.Range.EndByte, tokenDefinitionTerm, 0)
+			return
+		case mdpp.NodeTable:
+			emitTableSemanticTokens(n, source, add)
 			return
 		case mdpp.NodeFrontmatter:
 			emitFrontmatter(source, n.Range, add)
@@ -344,6 +361,80 @@ func emitFrontmatter(source []byte, r mdpp.Range, add func(int, int, int, uint32
 		}
 		add(start+loc[2], start+loc[3], tokenFrontmatterKey, 0)
 	}
+	for _, loc := range frontmatterValueRe.FindAllSubmatchIndex(source[start:end], -1) {
+		if len(loc) < 10 || loc[8] < 0 {
+			continue
+		}
+		add(start+loc[8], start+loc[9], tokenFrontmatterValue, 0)
+	}
+}
+
+func emitBlockquoteMarkers(source []byte, r mdpp.Range, add func(int, int, int, uint32)) {
+	start, end, ok := rangeBounds(source, r)
+	if !ok {
+		return
+	}
+	for _, loc := range blockquoteMarkerRe.FindAllSubmatchIndex(source[start:end], -1) {
+		if len(loc) < 4 || loc[2] < 0 {
+			continue
+		}
+		add(start+loc[2], start+loc[3], tokenComment, 0)
+	}
+}
+
+func emitListMarker(source []byte, r mdpp.Range, add func(int, int, int, uint32)) {
+	start, end, ok := rangeBounds(source, r)
+	if !ok {
+		return
+	}
+	lineEnd := start
+	for lineEnd < end && source[lineEnd] != '\n' {
+		lineEnd++
+	}
+	for _, loc := range listMarkerRe.FindAllSubmatchIndex(source[start:lineEnd], -1) {
+		if len(loc) < 4 || loc[2] < 0 {
+			continue
+		}
+		add(start+loc[2], start+loc[3], tokenOperator, 0)
+	}
+}
+
+func emitTableSemanticTokens(n *mdpp.Node, source []byte, add func(int, int, int, uint32)) {
+	if n == nil {
+		return
+	}
+	for rowIndex, row := range n.Children {
+		if row == nil || row.Type != mdpp.NodeTableRow {
+			continue
+		}
+		for _, cell := range row.Children {
+			if cell == nil || cell.Type != mdpp.NodeTableCell {
+				continue
+			}
+			typ := tokenString
+			if rowIndex == 0 {
+				typ = tokenTableHeader
+			}
+			add(cell.Range.StartByte, cell.Range.EndByte, typ, 0)
+		}
+	}
+	if start, end, ok := tableSeparatorRange(source, n.Range); ok {
+		add(start, end, tokenTableSeparator, 0)
+	}
+}
+
+func tableSeparatorRange(source []byte, r mdpp.Range) (int, int, bool) {
+	start, end, ok := rangeBounds(source, r)
+	if !ok {
+		return 0, 0, false
+	}
+	for _, loc := range tableSeparatorRe.FindAllSubmatchIndex(source[start:end], -1) {
+		if len(loc) < 4 || loc[2] < 0 {
+			continue
+		}
+		return start + loc[2], start + loc[3], true
+	}
+	return 0, 0, false
 }
 
 func rangeBounds(source []byte, r mdpp.Range) (int, int, bool) {

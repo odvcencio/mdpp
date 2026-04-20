@@ -136,6 +136,7 @@ type lintContext struct {
 	source            []byte
 	headings          map[string]*mdpp.Node
 	headingCounts     map[string]int
+	tableRanges       []mdpp.Range
 	footnoteDefs      map[string]*mdpp.Node
 	footnoteRefs      map[string][]*mdpp.Node
 	linkRefDefs       map[string]mdpp.Range
@@ -151,6 +152,7 @@ func collectContext(d *mdpp.Document) *lintContext {
 		source:            d.Source,
 		headings:          map[string]*mdpp.Node{},
 		headingCounts:     map[string]int{},
+		tableRanges:       []mdpp.Range{},
 		footnoteDefs:      map[string]*mdpp.Node{},
 		footnoteRefs:      map[string][]*mdpp.Node{},
 		linkRefDefs:       collectReferenceDefinitions(d.Source),
@@ -171,6 +173,8 @@ func collectContext(d *mdpp.Document) *lintContext {
 			if ctx.headings[id] == nil {
 				ctx.headings[id] = n
 			}
+		case mdpp.NodeTable:
+			ctx.tableRanges = append(ctx.tableRanges, n.Range)
 		case mdpp.NodeFootnoteDef:
 			ctx.footnoteDefs[n.Attr("id")] = n
 		case mdpp.NodeFootnoteRef:
@@ -182,12 +186,6 @@ func collectContext(d *mdpp.Document) *lintContext {
 		case mdpp.NodeLink:
 			if ref := normalizeLabel(n.Attr("ref")); ref != "" {
 				ctx.linkRefUses[ref] = append(ctx.linkRefUses[ref], n.Range)
-			}
-			if raw := n.Attr("raw"); raw != "" && strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
-				label := normalizeLabel(strings.Trim(raw, "[]"))
-				if _, ok := ctx.linkRefDefs[label]; ok {
-					ctx.linkRefUses[label] = append(ctx.linkRefUses[label], n.Range)
-				}
 			}
 		}
 		return true
@@ -288,9 +286,6 @@ func lintSource(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 	listMarkers := map[string]bool{}
 	emStar := false
 	emUnderscore := false
-	emStarRe := regexp.MustCompile(`(^|[^*])\*[^*\s][^*]*\*`)
-	emUnderscoreRe := regexp.MustCompile(`(^|[^_])_[^_\s][^_]*_`)
-	bareURLRe := regexp.MustCompile(`https?://[^\s<>()]+`)
 	fenceLangs := map[string]string{}
 	lineStart := 0
 	for i, line := range lines {
@@ -340,15 +335,29 @@ func lintSource(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 			continue
 		}
 		blankRun = 0
-		if emStarRe.MatchString(line) {
-			emStar = true
+		if isTableDelimiterRow(line) && !ctx.inTable(lineWholeRange) {
+			if next := nextNonBlankLine(lines, i+1); next > 0 && looksLikeTableRow(lines[next-1]) {
+				emitDiag(emit, lineRange(d.Source, lineNo, 0, len(line)), SeverityWarning, "MDPP203", "table without header row")
+			}
 		}
-		if emUnderscoreRe.MatchString(line) {
-			emUnderscore = true
+		if strings.ContainsAny(line, "*_") {
+			if strings.Contains(line, "*") && emStarRe.MatchString(line) {
+				emStar = true
+			}
+			if strings.Contains(line, "_") && emUnderscoreRe.MatchString(line) {
+				emUnderscore = true
+			}
 		}
 		trimmed := strings.TrimLeft(line, " ")
 		if len(trimmed) > 1 && strings.Contains("-*+", trimmed[:1]) && trimmed[1] == ' ' {
 			listMarkers[trimmed[:1]] = true
+		}
+		if !strings.Contains(line, "http://") && !strings.Contains(line, "https://") {
+			lineStart += len(line)
+			if i < len(lines)-1 {
+				lineStart++
+			}
+			continue
 		}
 		for _, match := range bareURLRe.FindAllStringIndex(line, -1) {
 			before := ""
@@ -395,6 +404,18 @@ func (ctx *lintContext) ignored(r mdpp.Range) bool {
 	return false
 }
 
+func (ctx *lintContext) inTable(r mdpp.Range) bool {
+	if ctx == nil || len(ctx.tableRanges) == 0 || r.StartLine == 0 {
+		return false
+	}
+	for _, table := range ctx.tableRanges {
+		if r.StartByte >= table.StartByte && r.EndByte <= table.EndByte {
+			return true
+		}
+	}
+	return false
+}
+
 func emitDiag(emit func(Diagnostic), r mdpp.Range, sev Severity, code string, msg string) {
 	emit(Diagnostic{Range: r, Severity: sev, Code: code, Message: msg})
 }
@@ -422,7 +443,52 @@ func isDirectMediaEmbed(src string) bool {
 	return false
 }
 
-var refDefRe = regexp.MustCompile(`(?m)^ {0,3}\[([^\]\^][^\]]*)\]:[ \t]*(\S+)`)
+func isTableDelimiterRow(line string) bool {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 || trimmed == "" || !strings.Contains(trimmed, "|") {
+		return false
+	}
+	cells := 0
+	for _, raw := range strings.Split(trimmed, "|") {
+		cell := strings.TrimSpace(raw)
+		if cell == "" {
+			continue
+		}
+		if len(cell) < 3 {
+			return false
+		}
+		start := 0
+		end := len(cell)
+		if cell[start] == ':' {
+			start++
+		}
+		if end > start && cell[end-1] == ':' {
+			end--
+		}
+		if end-start < 3 {
+			return false
+		}
+		for i := start; i < end; i++ {
+			if cell[i] != '-' {
+				return false
+			}
+		}
+		cells++
+	}
+	return cells > 0
+}
+
+func looksLikeTableRow(line string) bool {
+	return strings.Contains(line, "|") && !isTableDelimiterRow(line)
+}
+
+var (
+	emStarRe       = regexp.MustCompile(`(^|[^*])\*[^*\s][^*]*\*`)
+	emUnderscoreRe = regexp.MustCompile(`(^|[^_])_[^_\s][^_]*_`)
+	bareURLRe      = regexp.MustCompile(`https?://[^\s<>()]+`)
+	refDefRe       = regexp.MustCompile(`(?m)^ {0,3}\[([^\]\^][^\]]*)\]:[ \t]*(\S+)`)
+	bracketTokenRe = regexp.MustCompile(`!?\[([^\]\n]+)\]`)
+)
 
 func collectReferenceDefinitions(src []byte) map[string]mdpp.Range {
 	out := map[string]mdpp.Range{}
@@ -436,8 +502,6 @@ func collectReferenceDefinitions(src []byte) map[string]mdpp.Range {
 	}
 	return out
 }
-
-var bracketTokenRe = regexp.MustCompile(`!?\[([^\]\n]+)\]`)
 
 func collectReferenceUses(src []byte, defs map[string]mdpp.Range) map[string][]mdpp.Range {
 	out := map[string][]mdpp.Range{}
