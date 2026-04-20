@@ -9,7 +9,8 @@ Markdown++ keeps `.md` files readable everywhere while adding the authoring tool
 For authors, start with the VS Code extension:
 
 ```text
-Marketplace: m31labs.markdown-plus-plus
+VSIX release: https://github.com/odvcencio/mdpp-vscode/releases/tag/v0.1.10
+Marketplace item: m31labs.markdown-plus-plus
 ```
 
 Extension source lives at <https://github.com/odvcencio/mdpp-vscode>.
