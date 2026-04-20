@@ -196,6 +196,110 @@ func (s *Server) completion(params CompletionParams) (*CompletionList, error) {
 	}
 }
 
+func (s *Server) codeActions(params CodeActionParams) ([]CodeAction, error) {
+	quickfixAllowed := codeActionKindAllowed(params.Context.Only, "quickfix")
+	fixAllAllowed := codeActionKindAllowed(params.Context.Only, "source.fixAll.mdpp")
+	if !quickfixAllowed && !fixAllAllowed {
+		return nil, nil
+	}
+	open, ok := s.store.Get(params.TextDocument.URI)
+	if !ok {
+		return nil, nil
+	}
+	doc, source, index, _ := open.Snapshot()
+	var actions []CodeAction
+	if quickfixAllowed {
+		for _, d := range lint.Lint(doc) {
+			if d.Fix == nil {
+				continue
+			}
+			diagRange := index.RangeToLSP(d.Range)
+			if !rangesOverlap(params.Range, diagRange) {
+				continue
+			}
+			editRange := index.RangeToLSP(d.Fix.Range)
+			diagnostic := Diagnostic{
+				Range:    diagRange,
+				Severity: lintSeverity(d.Severity),
+				Code:     d.Code,
+				Source:   "mdpp",
+				Message:  d.Message,
+			}
+			actions = append(actions, CodeAction{
+				Title:       fmt.Sprintf("Fix %s: %s", d.Code, d.Message),
+				Kind:        "quickfix",
+				Diagnostics: []Diagnostic{diagnostic},
+				Edit: &WorkspaceEdit{Changes: map[DocumentURI][]TextEdit{
+					params.TextDocument.URI: {{
+						Range:   editRange,
+						NewText: d.Fix.NewText,
+					}},
+				}},
+			})
+		}
+	}
+	if fixAllAllowed {
+		formatted, err := mdppfmt.Format(source)
+		if err != nil {
+			return nil, err
+		}
+		if string(formatted) != string(source) {
+			actions = append(actions, CodeAction{
+				Title: "Format document with mdpp",
+				Kind:  "source.fixAll.mdpp",
+				Edit: &WorkspaceEdit{Changes: map[DocumentURI][]TextEdit{
+					params.TextDocument.URI: {{
+						Range: Range{
+							Start: Position{Line: 0, Character: 0},
+							End:   index.OffsetToPosition(len(source)),
+						},
+						NewText: string(formatted),
+					}},
+				}},
+			})
+		}
+	}
+	return actions, nil
+}
+
+func codeActionKindAllowed(only []string, kind string) bool {
+	if len(only) == 0 {
+		return true
+	}
+	for _, allowed := range only {
+		if allowed == kind || strings.HasPrefix(kind, allowed+".") {
+			return true
+		}
+	}
+	return false
+}
+
+func rangesOverlap(a Range, b Range) bool {
+	if comparePosition(a.Start, a.End) == 0 {
+		return comparePosition(b.Start, a.Start) <= 0 && comparePosition(a.Start, b.End) <= 0
+	}
+	if comparePosition(b.Start, b.End) == 0 {
+		return comparePosition(a.Start, b.Start) <= 0 && comparePosition(b.Start, a.End) <= 0
+	}
+	return comparePosition(a.Start, b.End) < 0 && comparePosition(b.Start, a.End) < 0
+}
+
+func comparePosition(a Position, b Position) int {
+	if a.Line < b.Line {
+		return -1
+	}
+	if a.Line > b.Line {
+		return 1
+	}
+	if a.Character < b.Character {
+		return -1
+	}
+	if a.Character > b.Character {
+		return 1
+	}
+	return 0
+}
+
 func (s *Server) formatting(params DocumentFormattingParams) ([]TextEdit, error) {
 	open, ok := s.store.Get(params.TextDocument.URI)
 	if !ok {

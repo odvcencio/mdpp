@@ -32,6 +32,14 @@ func TestLintDirectives(t *testing.T) {
 	assertLintCode(t, diags, "MDPP110")
 }
 
+func TestLintAllowsDirectMediaGenericEmbed(t *testing.T) {
+	doc := mdpp.MustParse([]byte("[[embed:https://media.example.com/demo.mp4]]\n"))
+	diags := Lint(doc)
+	if findLintCode(diags, "MDPP110") != nil {
+		t.Fatalf("direct media fallback should not warn as an unknown provider: %#v", diags)
+	}
+}
+
 func TestLintSuppressionNextLine(t *testing.T) {
 	doc := mdpp.MustParse([]byte("<!-- mdpp-disable-next-line MD034 -->\nhttp://example.com\n"))
 	diags := Lint(doc)
@@ -57,6 +65,46 @@ func TestLintIgnoresBareURLInsideCode(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected one MD034 diagnostic, got %d: %#v", count, diags)
+	}
+}
+
+func TestLintFixesTrailingWhitespaceFenceLanguageAndUnusedRef(t *testing.T) {
+	doc := mdpp.MustParse([]byte("text  \n\n```Go\nx\n```\n\n[stale]: https://example.com\n"))
+	diags := Lint(doc)
+
+	trailing := findLintCode(diags, "MD009")
+	if trailing == nil || trailing.Fix == nil || trailing.Fix.NewText != "" {
+		t.Fatalf("expected MD009 delete fix, got %#v", trailing)
+	}
+
+	fence := findLintCode(diags, "MDPP300")
+	if fence == nil || fence.Fix == nil || fence.Fix.NewText != "go" {
+		t.Fatalf("expected MDPP300 lowercase fix, got %#v", fence)
+	}
+
+	unused := findLintCode(diags, "MDPP105")
+	if unused == nil || unused.Fix == nil || unused.Fix.Range.EndLine != 8 {
+		t.Fatalf("expected MDPP105 line delete fix, got %#v", unused)
+	}
+}
+
+func TestLintAutolinkNeedsDescriptiveText(t *testing.T) {
+	doc := mdpp.MustParse([]byte("<https://example.com>\n"))
+	diags := Lint(doc)
+	assertLintCode(t, diags, "MDPP201")
+	if findLintCode(diags, "MD034") != nil {
+		t.Fatalf("did not expect MD034 for autolink, got %#v", diags)
+	}
+}
+
+func TestLintReferenceDefinitionURLIsStructured(t *testing.T) {
+	doc := mdpp.MustParse([]byte("Read [the guide][guide] and [Shortcut].\n\n[guide]: https://example.com/guide\n[shortcut]: https://example.com/shortcut\n"))
+	diags := Lint(doc)
+	if findLintCode(diags, "MD034") != nil {
+		t.Fatalf("reference definition URL should not be a bare URL diagnostic: %#v", diags)
+	}
+	if findLintCode(diags, "MDPP105") != nil {
+		t.Fatalf("reference definitions used by full and shortcut links should not be unused: %#v", diags)
 	}
 }
 

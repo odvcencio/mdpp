@@ -154,10 +154,13 @@ func collectContext(d *mdpp.Document) *lintContext {
 		footnoteDefs:      map[string]*mdpp.Node{},
 		footnoteRefs:      map[string][]*mdpp.Node{},
 		linkRefDefs:       collectReferenceDefinitions(d.Source),
-		linkRefUses:       map[string][]mdpp.Range{},
 		fileSuppressions:  map[string]bool{},
 		blockSuppressions: map[int]map[string]bool{},
 		nextSuppressions:  map[int]map[string]bool{},
+	}
+	ctx.linkRefUses = collectReferenceUses(d.Source, ctx.linkRefDefs)
+	for _, r := range ctx.linkRefDefs {
+		ctx.ignoredRanges = append(ctx.ignoredRanges, r)
 	}
 	ctx.collectSuppressions(d)
 	d.Root.Walk(func(n *mdpp.Node) bool {
@@ -172,7 +175,7 @@ func collectContext(d *mdpp.Document) *lintContext {
 			ctx.footnoteDefs[n.Attr("id")] = n
 		case mdpp.NodeFootnoteRef:
 			ctx.footnoteRefs[n.Attr("id")] = append(ctx.footnoteRefs[n.Attr("id")], n)
-		case mdpp.NodeCodeBlock, mdpp.NodeDiagram, mdpp.NodeCodeSpan, mdpp.NodeHTMLBlock, mdpp.NodeHTMLInline, mdpp.NodeMathInline, mdpp.NodeMathBlock, mdpp.NodeFrontmatter:
+		case mdpp.NodeCodeBlock, mdpp.NodeDiagram, mdpp.NodeCodeSpan, mdpp.NodeHTMLBlock, mdpp.NodeHTMLInline, mdpp.NodeMathInline, mdpp.NodeMathBlock, mdpp.NodeFrontmatter, mdpp.NodeAutoEmbed:
 			if n.Range.StartLine != 0 {
 				ctx.ignoredRanges = append(ctx.ignoredRanges, n.Range)
 			}
@@ -252,7 +255,7 @@ func lintAST(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 			u, err := url.Parse(src)
 			if err != nil || u.Scheme == "" || u.Host == "" {
 				emitDiag(emit, n.Range, SeverityError, "MDPP111", "auto-embed URL is malformed")
-			} else if n.Attr("provider") == "generic" {
+			} else if n.Attr("provider") == "generic" && !isDirectMediaEmbed(src) {
 				emitDiag(emit, n.Range, SeverityInfo, "MDPP110", "auto-embed provider is generic")
 			}
 		}
@@ -265,7 +268,13 @@ func lintAST(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 	}
 	for label, r := range ctx.linkRefDefs {
 		if len(ctx.linkRefUses[label]) == 0 {
-			emitDiag(emit, r, SeverityWarning, "MDPP105", "link reference ["+label+"] is never used")
+			emit(Diagnostic{
+				Range:    r,
+				Severity: SeverityWarning,
+				Code:     "MDPP105",
+				Message:  "link reference [" + label + "] is never used",
+				Fix:      &TextEdit{Range: r, NewText: ""},
+			})
 		}
 	}
 	if version := d.FormatVersion(); version != "" && version > mdpp.SpecVersion {
@@ -287,15 +296,25 @@ func lintSource(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 	for i, line := range lines {
 		lineNo := i + 1
 		if strings.HasSuffix(line, " ") || strings.HasSuffix(line, "\t") {
-			emitDiag(emit, lineRange(d.Source, lineNo, len(strings.TrimRight(line, " \t")), len(line)), SeverityInfo, "MD009", "trailing whitespace")
+			r := lineRange(d.Source, lineNo, len(strings.TrimRight(line, " \t")), len(line))
+			emit(Diagnostic{Range: r, Severity: SeverityInfo, Code: "MD009", Message: "trailing whitespace", Fix: &TextEdit{Range: r, NewText: ""}})
 		}
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
-			fields := strings.Fields(strings.TrimSpace(line))
-			if len(fields) > 1 {
-				lang := fields[1]
+			trimmedFence := strings.TrimSpace(line)
+			lang := ""
+			langStart := -1
+			if strings.HasPrefix(trimmedFence, "```") {
+				rest := strings.TrimSpace(strings.TrimPrefix(trimmedFence, "```"))
+				if rest != "" {
+					lang = strings.Fields(rest)[0]
+					langStart = strings.Index(line, lang)
+				}
+			}
+			if lang != "" {
 				lower := strings.ToLower(lang)
 				if lang != lower {
-					emitDiag(emit, lineRange(d.Source, lineNo, strings.Index(line, lang), strings.Index(line, lang)+len(lang)), SeverityInfo, "MDPP300", "fence info-string should be lowercase")
+					r := lineRange(d.Source, lineNo, langStart, langStart+len(lang))
+					emit(Diagnostic{Range: r, Severity: SeverityInfo, Code: "MDPP300", Message: "fence info-string should be lowercase", Fix: &TextEdit{Range: r, NewText: lower}})
 				}
 				fenceLangs[lower] = lang
 			}
@@ -336,7 +355,14 @@ func lintSource(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 			if match[0] > 0 {
 				before = line[match[0]-1 : match[0]]
 			}
+			after := ""
+			if match[1] < len(line) {
+				after = line[match[1] : match[1]+1]
+			}
 			matchRange := byteRange(d.Source, lineStart+match[0], lineStart+match[1])
+			if before == "<" && after == ">" && !ctx.ignored(matchRange) {
+				emitDiag(emit, matchRange, SeverityInfo, "MDPP201", "autolink URL should use descriptive link text")
+			}
 			if before != "<" && before != "(" && !ctx.ignored(matchRange) {
 				emitDiag(emit, matchRange, SeverityInfo, "MD034", "bare URL should use explicit link syntax")
 			}
@@ -382,13 +408,54 @@ func allowedContainer(name string) bool {
 	}
 }
 
+func isDirectMediaEmbed(src string) bool {
+	u, err := url.Parse(src)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(u.Path)
+	for _, ext := range []string{".mp4", ".webm", ".mov", ".m4v", ".mp3", ".wav", ".ogg", ".oga", ".flac"} {
+		if strings.HasSuffix(path, ext) {
+			return true
+		}
+	}
+	return false
+}
+
 var refDefRe = regexp.MustCompile(`(?m)^ {0,3}\[([^\]\^][^\]]*)\]:[ \t]*(\S+)`)
 
 func collectReferenceDefinitions(src []byte) map[string]mdpp.Range {
 	out := map[string]mdpp.Range{}
 	for _, loc := range refDefRe.FindAllSubmatchIndex(src, -1) {
 		label := normalizeLabel(string(src[loc[2]:loc[3]]))
-		out[label] = byteRange(src, loc[0], loc[1])
+		end := loc[1]
+		if end < len(src) && src[end] == '\n' {
+			end++
+		}
+		out[label] = byteRange(src, loc[0], end)
+	}
+	return out
+}
+
+var bracketTokenRe = regexp.MustCompile(`!?\[([^\]\n]+)\]`)
+
+func collectReferenceUses(src []byte, defs map[string]mdpp.Range) map[string][]mdpp.Range {
+	out := map[string][]mdpp.Range{}
+	if len(defs) == 0 {
+		return out
+	}
+	for _, loc := range bracketTokenRe.FindAllSubmatchIndex(src, -1) {
+		label := normalizeLabel(string(src[loc[2]:loc[3]]))
+		if _, ok := defs[label]; !ok {
+			continue
+		}
+		if loc[1] < len(src) {
+			switch src[loc[1]] {
+			case ':', '(', '[':
+				continue
+			}
+		}
+		out[label] = append(out[label], byteRange(src, loc[2], loc[3]))
 	}
 	return out
 }

@@ -94,6 +94,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 	case NodeDiagram:
 		renderDiagramInto(b, n)
 
+	case NodeFrontmatter:
+		return
+
 	case NodeBlockquote:
 		b.WriteString("<blockquote")
 		writeSourceAttrs(r, b, n)

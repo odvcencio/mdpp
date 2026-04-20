@@ -126,10 +126,12 @@ func (d *Document) extractFrontmatter() {
 	// Find the closing ---
 	rest := src[4:]
 	idx := bytes.Index(rest, []byte("\n---\n"))
+	closingLen := len("\n---\n")
 	if idx < 0 {
 		// Also handle --- at EOF without trailing newline
 		if bytes.HasSuffix(rest, []byte("\n---")) {
 			idx = len(rest) - 4
+			closingLen = len("\n---")
 		} else {
 			return
 		}
@@ -140,4 +142,35 @@ func (d *Document) extractFrontmatter() {
 		return
 	}
 	d.frontmatterData = data
+	d.attachFrontmatterNode(yamlBlock, 4+idx+closingLen)
+}
+
+func (d *Document) attachFrontmatterNode(yamlBlock []byte, end int) {
+	if d.Root == nil {
+		return
+	}
+	fm := &Node{
+		Type:    NodeFrontmatter,
+		Literal: string(yamlBlock),
+		Range:   sourceRange(d.Source, 0, end),
+	}
+	children := make([]*Node, 0, len(d.Root.Children)+1)
+	children = append(children, fm)
+	for _, child := range d.Root.Children {
+		if child == nil || isFrontmatterParseArtifact(child, end) {
+			continue
+		}
+		children = append(children, child)
+	}
+	d.Root.Children = children
+}
+
+func isFrontmatterParseArtifact(n *Node, end int) bool {
+	if n.Range.EndByte > 0 && n.Range.EndByte <= end {
+		return true
+	}
+	if n.Range.StartByte < end && strings.HasPrefix(strings.TrimSpace(collectNodeText(n)), "---") {
+		return true
+	}
+	return false
 }

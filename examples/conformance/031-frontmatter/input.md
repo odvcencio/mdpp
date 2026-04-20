@@ -1,6 +1,6 @@
 ---
 title: Corpus Case
-mdpp: 1
+mdpp: 0.1
 ---
 
 # With Frontmatter

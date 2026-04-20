@@ -86,6 +86,7 @@ type ServerCapabilities struct {
 	DefinitionProvider         bool                    `json:"definitionProvider"`
 	ReferencesProvider         bool                    `json:"referencesProvider"`
 	RenameProvider             bool                    `json:"renameProvider"`
+	CodeActionProvider         bool                    `json:"codeActionProvider"`
 	FoldingRangeProvider       bool                    `json:"foldingRangeProvider"`
 	DocumentSymbolProvider     bool                    `json:"documentSymbolProvider"`
 	DocumentFormattingProvider bool                    `json:"documentFormattingProvider"`
@@ -166,6 +167,24 @@ type RenameParams struct {
 
 type WorkspaceEdit struct {
 	Changes map[DocumentURI][]TextEdit `json:"changes,omitempty"`
+}
+
+type CodeActionParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Range        Range                  `json:"range"`
+	Context      CodeActionContext      `json:"context"`
+}
+
+type CodeActionContext struct {
+	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+	Only        []string     `json:"only,omitempty"`
+}
+
+type CodeAction struct {
+	Title       string         `json:"title"`
+	Kind        string         `json:"kind,omitempty"`
+	Diagnostics []Diagnostic   `json:"diagnostics,omitempty"`
+	Edit        *WorkspaceEdit `json:"edit,omitempty"`
 }
 
 type Hover struct {

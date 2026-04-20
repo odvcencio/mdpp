@@ -16,6 +16,9 @@ func TestServerInitializeCapabilities(t *testing.T) {
 	if !result.Capabilities.DefinitionProvider || !result.Capabilities.ReferencesProvider {
 		t.Fatal("expected definition and references providers")
 	}
+	if !result.Capabilities.CodeActionProvider {
+		t.Fatal("expected code action provider")
+	}
 	if !result.Capabilities.FoldingRangeProvider || !result.Capabilities.DocumentSymbolProvider {
 		t.Fatal("expected folding range and document symbol providers")
 	}
@@ -69,6 +72,69 @@ func TestServerFormattingAndPreview(t *testing.T) {
 	}
 	if !strings.Contains(preview.HTML, `data-mdpp-source-start`) {
 		t.Fatalf("expected source-positioned preview HTML, got %q", preview.HTML)
+	}
+}
+
+func TestServerCodeActionsFromLintFixes(t *testing.T) {
+	src := "text  \n\n[stale]: https://example.com\n"
+	uri := DocumentURI("file:///doc.md")
+	s := NewServer()
+	s.store.Open(TextDocumentItem{URI: uri, Version: 1, Text: src})
+
+	actions, err := s.codeActions(CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Range: Range{
+			Start: Position{Line: 0, Character: 0},
+			End:   Position{Line: 3, Character: 0},
+		},
+		Context: CodeActionContext{Only: []string{"quickfix"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 2 {
+		t.Fatalf("expected trailing whitespace and unused reference fixes, got %#v", actions)
+	}
+	byCode := map[string]CodeAction{}
+	for _, action := range actions {
+		if len(action.Diagnostics) != 1 {
+			t.Fatalf("expected one diagnostic per action, got %#v", action)
+		}
+		byCode[action.Diagnostics[0].Code] = action
+	}
+	if action := byCode["MD009"]; action.Edit == nil || action.Edit.Changes[uri][0].NewText != "" {
+		t.Fatalf("expected MD009 delete edit, got %#v", action)
+	}
+	if action := byCode["MDPP105"]; action.Edit == nil || action.Edit.Changes[uri][0].NewText != "" {
+		t.Fatalf("expected MDPP105 delete edit, got %#v", action)
+	}
+}
+
+func TestServerCodeActionsSourceFixAll(t *testing.T) {
+	src := "Title\n=====\n"
+	uri := DocumentURI("file:///doc.md")
+	s := NewServer()
+	s.store.Open(TextDocumentItem{URI: uri, Version: 1, Text: src})
+
+	actions, err := s.codeActions(CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Range: Range{
+			Start: Position{Line: 0, Character: 0},
+			End:   Position{Line: 1, Character: 5},
+		},
+		Context: CodeActionContext{Only: []string{"source.fixAll"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected one source fix-all action, got %#v", actions)
+	}
+	if actions[0].Kind != "source.fixAll.mdpp" {
+		t.Fatalf("expected source.fixAll.mdpp, got %#v", actions[0])
+	}
+	if got := actions[0].Edit.Changes[uri][0].NewText; got != "# Title\n" {
+		t.Fatalf("unexpected fix-all text: %q", got)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/odvcencio/mdpp"
@@ -15,7 +16,21 @@ var (
 	embedDirectiveLineRe = regexp.MustCompile(`^\s*\[\[\s*([Ee][Mm][Bb][Ee][Dd])\s*:\s*(.*?)\s*\]\]\s*$`)
 	setextH1Re           = regexp.MustCompile(`^\s*=+\s*$`)
 	setextH2Re           = regexp.MustCompile(`^\s*-+\s*$`)
+	footnoteDefLineRe    = regexp.MustCompile(`^ {0,3}\[\^([A-Za-z0-9_-]+)\]:[ \t]*(.+)$`)
+	refDefLineRe         = regexp.MustCompile(`^ {0,3}\[([^\]\^][^\]]*)\]:[ \t]*(\S.*)$`)
+	strongUnderscoreRe   = regexp.MustCompile(`(^|[^[:alnum:]_])__([^_\n][^_\n]*?)__([^[:alnum:]_]|$)`)
+	emUnderscoreRe       = regexp.MustCompile(`(^|[^[:alnum:]_])_([^_\n][^_\n]*?)_([^[:alnum:]_]|$)`)
 )
+
+type formattedLine struct {
+	text      string
+	protected bool
+}
+
+type collectedDef struct {
+	label string
+	line  string
+}
 
 // Format reformats src into canonical Markdown++ form.
 func Format(src []byte) ([]byte, error) {
@@ -25,9 +40,11 @@ func Format(src []byte) ([]byte, error) {
 	}
 	src = bytes.TrimPrefix(normalizeLineEndings(src), []byte{0xEF, 0xBB, 0xBF})
 	lines := scanLines(src)
-	out := make([]string, 0, len(lines))
+	out := make([]formattedLine, 0, len(lines))
+	var refs, footnotes []collectedDef
 	inFence := false
 	inFrontmatter := false
+	inMathBlock := false
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
@@ -35,27 +52,37 @@ func Format(src []byte) ([]byte, error) {
 
 		if i == 0 && trimmed == "---" {
 			inFrontmatter = true
-			out = append(out, "---")
+			out = append(out, formattedLine{text: "---", protected: true})
 			continue
 		}
 		if inFrontmatter {
-			out = append(out, strings.TrimRight(line, " \t"))
+			out = append(out, formattedLine{text: line, protected: true})
 			if trimmed == "---" {
 				inFrontmatter = false
 				if i+1 < len(lines) && strings.TrimSpace(lines[i+1]) != "" {
-					out = append(out, "")
+					out = append(out, formattedLine{})
 				}
 			}
 			continue
 		}
 
 		if isFenceLine(trimmed) {
-			out = append(out, canonicalFenceLine(line))
+			out = append(out, formattedLine{text: canonicalFenceLine(line), protected: true})
 			inFence = !inFence
 			continue
 		}
 		if inFence {
-			out = append(out, line)
+			out = append(out, formattedLine{text: line, protected: true})
+			continue
+		}
+
+		if isDisplayMathDelimiter(trimmed) {
+			out = append(out, formattedLine{text: strings.TrimRight(line, " \t"), protected: true})
+			inMathBlock = !inMathBlock
+			continue
+		}
+		if inMathBlock || isHTMLBlockLine(trimmed) {
+			out = append(out, formattedLine{text: line, protected: true})
 			continue
 		}
 
@@ -63,11 +90,11 @@ func Format(src []byte) ([]byte, error) {
 			next := strings.TrimSpace(lines[i+1])
 			switch {
 			case setextH1Re.MatchString(next):
-				out = append(out, "# "+strings.TrimSpace(line))
+				out = append(out, formattedLine{text: "# " + strings.TrimSpace(line)})
 				i++
 				continue
 			case setextH2Re.MatchString(next):
-				out = append(out, "## "+strings.TrimSpace(line))
+				out = append(out, formattedLine{text: "## " + strings.TrimSpace(line)})
 				i++
 				continue
 			}
@@ -78,15 +105,25 @@ func Format(src []byte) ([]byte, error) {
 			line = "[[toc]]"
 		} else if match := embedDirectiveLineRe.FindStringSubmatch(line); match != nil {
 			line = "[[embed:" + match[2] + "]]"
+		} else if match := refDefLineRe.FindStringSubmatch(line); match != nil {
+			refs = append(refs, collectedDef{label: normalizeSortLabel(match[1]), line: "[" + strings.TrimSpace(match[1]) + "]: " + strings.TrimSpace(match[2])})
+			continue
+		} else if match := footnoteDefLineRe.FindStringSubmatch(line); match != nil {
+			footnotes = append(footnotes, collectedDef{label: strings.ToLower(match[1]), line: "[^" + match[1] + "]: " + strings.TrimSpace(match[2])})
+			continue
 		} else {
 			line = canonicalHeadingLine(line)
+			line = canonicalUnorderedListMarker(line)
 			line = canonicalOrderedListMarker(line)
+			line = canonicalTaskMarker(line)
+			line = canonicalEmphasis(line)
 		}
-		out = append(out, line)
+		out = append(out, formattedLine{text: line})
 	}
 
-	out = normalizeBlankLines(out)
-	return []byte(strings.Join(out, "\n") + "\n"), nil
+	out = normalizeBlankLineEntries(out)
+	out = appendDefinitions(out, refs, footnotes)
+	return []byte(joinFormattedLines(out)), nil
 }
 
 func normalizeLineEndings(src []byte) []byte {
@@ -107,6 +144,17 @@ func scanLines(src []byte) []string {
 
 func isFenceLine(trimmed string) bool {
 	return strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")
+}
+
+func isDisplayMathDelimiter(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "$$") && strings.Count(trimmed, "$$") == 1
+}
+
+func isHTMLBlockLine(trimmed string) bool {
+	if trimmed == "" {
+		return false
+	}
+	return strings.HasPrefix(trimmed, "<") && strings.HasSuffix(trimmed, ">")
 }
 
 func canonicalFenceLine(line string) string {
@@ -170,23 +218,88 @@ func canonicalOrderedListMarker(line string) string {
 	return line
 }
 
-func normalizeBlankLines(lines []string) []string {
-	out := make([]string, 0, len(lines))
+func canonicalUnorderedListMarker(line string) string {
+	i := 0
+	for i < len(line) && line[i] == ' ' {
+		i++
+	}
+	if i+1 < len(line) && (line[i] == '*' || line[i] == '+') && line[i+1] == ' ' {
+		return line[:i] + "-" + line[i+1:]
+	}
+	return line
+}
+
+func canonicalTaskMarker(line string) string {
+	line = strings.Replace(line, "[X]", "[x]", 1)
+	line = strings.Replace(line, "[✓]", "[x]", 1)
+	return line
+}
+
+func canonicalEmphasis(line string) string {
+	line = strongUnderscoreRe.ReplaceAllString(line, "$1**$2**$3")
+	line = emUnderscoreRe.ReplaceAllString(line, "$1*$2*$3")
+	return line
+}
+
+func normalizeBlankLineEntries(lines []formattedLine) []formattedLine {
+	out := make([]formattedLine, 0, len(lines))
 	blankRun := 0
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
+		if line.protected {
+			blankRun = 0
+			out = append(out, line)
+			continue
+		}
+		if strings.TrimSpace(line.text) == "" {
 			blankRun++
 			if len(out) == 0 || blankRun > 1 {
 				continue
 			}
-			out = append(out, "")
+			out = append(out, formattedLine{})
 			continue
 		}
 		blankRun = 0
 		out = append(out, line)
 	}
-	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+	for len(out) > 0 && !out[len(out)-1].protected && strings.TrimSpace(out[len(out)-1].text) == "" {
 		out = out[:len(out)-1]
 	}
 	return out
+}
+
+func appendDefinitions(lines []formattedLine, refs []collectedDef, footnotes []collectedDef) []formattedLine {
+	sort.SliceStable(refs, func(i, j int) bool { return refs[i].label < refs[j].label })
+	sort.SliceStable(footnotes, func(i, j int) bool { return footnotes[i].label < footnotes[j].label })
+	if len(refs) > 0 {
+		lines = appendDefinitionBlock(lines, refs)
+	}
+	if len(footnotes) > 0 {
+		lines = appendDefinitionBlock(lines, footnotes)
+	}
+	return lines
+}
+
+func appendDefinitionBlock(lines []formattedLine, defs []collectedDef) []formattedLine {
+	for len(lines) > 0 && !lines[len(lines)-1].protected && strings.TrimSpace(lines[len(lines)-1].text) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > 0 {
+		lines = append(lines, formattedLine{})
+	}
+	for _, def := range defs {
+		lines = append(lines, formattedLine{text: def.line})
+	}
+	return lines
+}
+
+func normalizeSortLabel(label string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.Trim(label, "[]"))), " ")
+}
+
+func joinFormattedLines(lines []formattedLine) string {
+	parts := make([]string, len(lines))
+	for i, line := range lines {
+		parts[i] = line.text
+	}
+	return strings.Join(parts, "\n") + "\n"
 }

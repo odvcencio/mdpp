@@ -187,6 +187,16 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 			return nil, rpcParamError(err), nil
 		}
 		return result, nil, nil
+	case "textDocument/codeAction":
+		params, err := decodeParams[CodeActionParams](msg.Params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		result, err := s.codeActions(params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		return result, nil, nil
 	case "textDocument/completion":
 		params, err := decodeParams[CompletionParams](msg.Params)
 		if err != nil {
@@ -266,6 +276,7 @@ func (s *Server) handleInitialize() InitializeResult {
 			DefinitionProvider:         true,
 			ReferencesProvider:         true,
 			RenameProvider:             true,
+			CodeActionProvider:         true,
 			FoldingRangeProvider:       true,
 			DocumentSymbolProvider:     true,
 			DocumentFormattingProvider: true,

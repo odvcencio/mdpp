@@ -133,6 +133,16 @@ func TestFrontmatter(t *testing.T) {
 	if !ok || len(tags) != 2 {
 		t.Errorf("Frontmatter()[\"tags\"] = %v, want [go markdown]", fm["tags"])
 	}
+	if doc.Root.Children[0].Type != NodeFrontmatter {
+		t.Fatalf("first AST child = %s, want Frontmatter", doc.Root.Children[0].Type)
+	}
+	html, err := Render(doc, RenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(html) != "<h1>Content</h1>\n" {
+		t.Fatalf("rendered frontmatter = %q, want only body heading", html)
+	}
 }
 
 func TestFrontmatterMissing(t *testing.T) {
