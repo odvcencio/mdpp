@@ -83,6 +83,11 @@ type ServerInfo struct {
 type ServerCapabilities struct {
 	TextDocumentSync           TextDocumentSyncOptions `json:"textDocumentSync"`
 	HoverProvider              bool                    `json:"hoverProvider"`
+	DefinitionProvider         bool                    `json:"definitionProvider"`
+	ReferencesProvider         bool                    `json:"referencesProvider"`
+	RenameProvider             bool                    `json:"renameProvider"`
+	FoldingRangeProvider       bool                    `json:"foldingRangeProvider"`
+	DocumentSymbolProvider     bool                    `json:"documentSymbolProvider"`
 	DocumentFormattingProvider bool                    `json:"documentFormattingProvider"`
 	CompletionProvider         CompletionOptions       `json:"completionProvider"`
 	SemanticTokensProvider     SemanticTokensOptions   `json:"semanticTokensProvider"`
@@ -141,6 +146,28 @@ type Location struct {
 
 type HoverParams = TextDocumentPositionParams
 
+type DefinitionParams = TextDocumentPositionParams
+
+type ReferenceParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+	Context      ReferenceContext       `json:"context,omitempty"`
+}
+
+type ReferenceContext struct {
+	IncludeDeclaration bool `json:"includeDeclaration"`
+}
+
+type RenameParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+	NewName      string                 `json:"newName"`
+}
+
+type WorkspaceEdit struct {
+	Changes map[DocumentURI][]TextEdit `json:"changes,omitempty"`
+}
+
 type Hover struct {
 	Contents MarkupContent `json:"contents"`
 	Range    *Range        `json:"range,omitempty"`
@@ -187,6 +214,31 @@ type SemanticTokensRangeParams struct {
 
 type SemanticTokens struct {
 	Data []uint32 `json:"data"`
+}
+
+type FoldingRangeParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+}
+
+type FoldingRange struct {
+	StartLine      uint32  `json:"startLine"`
+	StartCharacter *uint32 `json:"startCharacter,omitempty"`
+	EndLine        uint32  `json:"endLine"`
+	EndCharacter   *uint32 `json:"endCharacter,omitempty"`
+	Kind           string  `json:"kind,omitempty"`
+}
+
+type DocumentSymbolParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+}
+
+type DocumentSymbol struct {
+	Name           string           `json:"name"`
+	Detail         string           `json:"detail,omitempty"`
+	Kind           int              `json:"kind"`
+	Range          Range            `json:"range"`
+	SelectionRange Range            `json:"selectionRange"`
+	Children       []DocumentSymbol `json:"children,omitempty"`
 }
 
 type DocumentFormattingParams struct {
@@ -236,6 +288,12 @@ const (
 	completionItemKindSnippet = 15
 
 	insertTextFormatSnippet = 2
+
+	symbolKindFile      = 1
+	symbolKindNamespace = 3
+	symbolKindClass     = 5
+	symbolKindField     = 8
+	symbolKindString    = 15
 )
 
 var semanticTokenTypes = []string{

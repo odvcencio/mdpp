@@ -147,6 +147,46 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 			return nil, rpcParamError(err), nil
 		}
 		return result, nil, nil
+	case "textDocument/definition":
+		params, err := decodeParams[DefinitionParams](msg.Params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		result, err := s.definition(params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		return result, nil, nil
+	case "textDocument/references":
+		params, err := decodeParams[ReferenceParams](msg.Params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		result, err := s.references(params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		return result, nil, nil
+	case "textDocument/prepareRename":
+		params, err := decodeParams[TextDocumentPositionParams](msg.Params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		result, err := s.prepareRename(params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		return result, nil, nil
+	case "textDocument/rename":
+		params, err := decodeParams[RenameParams](msg.Params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		result, err := s.rename(params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		return result, nil, nil
 	case "textDocument/completion":
 		params, err := decodeParams[CompletionParams](msg.Params)
 		if err != nil {
@@ -187,6 +227,18 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 			return nil, rpcParamError(err), nil
 		}
 		return result, nil, nil
+	case "textDocument/foldingRange":
+		params, err := decodeParams[FoldingRangeParams](msg.Params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		return s.foldingRanges(params), nil, nil
+	case "textDocument/documentSymbol":
+		params, err := decodeParams[DocumentSymbolParams](msg.Params)
+		if err != nil {
+			return nil, rpcParamError(err), nil
+		}
+		return s.documentSymbols(params), nil, nil
 	case "markdownpp/renderPreview":
 		params, err := decodeParams[RenderPreviewParams](msg.Params)
 		if err != nil {
@@ -211,6 +263,11 @@ func (s *Server) handleInitialize() InitializeResult {
 				Save:      SaveOptions{IncludeText: true},
 			},
 			HoverProvider:              true,
+			DefinitionProvider:         true,
+			ReferencesProvider:         true,
+			RenameProvider:             true,
+			FoldingRangeProvider:       true,
+			DocumentSymbolProvider:     true,
 			DocumentFormattingProvider: true,
 			CompletionProvider: CompletionOptions{
 				TriggerCharacters: []string{"[", ":", "!"},

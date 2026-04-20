@@ -386,7 +386,10 @@ func nodeContainsOffset(n *mdpp.Node, offset int, sourceLen int) bool {
 	if end < start {
 		end = start
 	}
-	return offset >= start && offset <= end
+	if offset == sourceLen {
+		return offset >= start && offset <= end
+	}
+	return offset >= start && offset < end
 }
 
 func findFootnoteDef(root *mdpp.Node, id string) *mdpp.Node {
