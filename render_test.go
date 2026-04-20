@@ -245,6 +245,22 @@ func TestRenderTableParsesInlineCellMarkdown(t *testing.T) {
 	assertNotContains(t, out, "[docs](https://example.com)")
 }
 
+func TestRenderContainerDirectives(t *testing.T) {
+	out := NewRenderer().RenderString(":::warning \"Heads up\" {.extra #warn}\nBody **bold**.\n:::\n")
+	assertContains(t, out, `<div class="admonition admonition-warning extra" id="warn">`)
+	assertContains(t, out, `<p class="admonition-title">Heads up</p>`)
+	assertContains(t, out, `<strong>bold</strong>`)
+
+	details := NewRenderer().RenderString(":::details \"Read more\"\nHidden text.\n:::\n")
+	assertContains(t, details, `<details class="mdpp-container mdpp-container-details" data-mdpp-container="details">`)
+	assertContains(t, details, `<summary>Read more</summary>`)
+}
+
+func TestTOCIncludesHeadingsInsideContainers(t *testing.T) {
+	out := NewRenderer(WithHeadingIDs(true)).RenderString("[[toc]]\n\n:::note\n## Inside\n:::\n")
+	assertContains(t, out, `<a href="#inside">Inside</a>`)
+}
+
 func TestRenderHeadingIDs(t *testing.T) {
 	r := NewRenderer(WithHeadingIDs(true))
 	out := r.RenderString("# Hello World")
@@ -259,6 +275,14 @@ func TestRenderHeadingIDsWithExclamation(t *testing.T) {
 	if !strings.Contains(out, `<h1 id="hello-world">Hello World!</h1>`) {
 		t.Errorf("expected heading with exclamation preserved, got %q", out)
 	}
+}
+
+func TestRenderSourcePositions(t *testing.T) {
+	doc := MustParse([]byte("# Hello\n\nBody text\n"))
+	out := NewRenderer(WithSourcePositions(true)).Render(doc)
+
+	assertContains(t, out, `<h1 data-mdpp-source-start="0" data-mdpp-source-end="8" data-mdpp-source-line="1" data-mdpp-source-col="1" data-mdpp-source-end-line="2" data-mdpp-source-end-col="1">Hello</h1>`)
+	assertContains(t, out, `<p data-mdpp-source-start="9" data-mdpp-source-end="19" data-mdpp-source-line="3" data-mdpp-source-col="1" data-mdpp-source-end-line="4" data-mdpp-source-end-col="1">Body text</p>`)
 }
 
 func TestRenderUnsafeHTMLDefault(t *testing.T) {

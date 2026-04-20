@@ -26,7 +26,7 @@ Add the package to a Go project:
 
 Then parse and render a document:
 
-` + "```go\ndoc := mdpp.Parse([]byte(source))\nhtml := mdpp.RenderString(source)\n_ = doc\n_ = html\n```" + `
+` + "```go\ndoc := mdpp.MustParse([]byte(source))\nhtml := mdpp.RenderString(source)\n_ = doc\n_ = html\n```" + `
 
 ## Core concepts
 

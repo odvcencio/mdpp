@@ -59,7 +59,7 @@ func TestAutoEmbed(t *testing.T) {
 func TestAutoEmbedUnknownProvider(t *testing.T) {
 	src := "[[embed:https://my.private.host/video.mp4]]\n"
 	html := NewRenderer().RenderString(src)
-	assertContains(t, html, `class="mdpp-embed"`)
+	assertContains(t, html, `class="mdpp-embed mdpp-embed-generic"`)
 	assertContains(t, html, `data-src="https://my.private.host/video.mp4"`)
 }
 

@@ -2,6 +2,7 @@ package mdpp
 
 import (
 	"html"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -45,6 +46,7 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 			b.WriteString(id)
 			b.WriteByte('"')
 		}
+		writeSourceAttrs(r, b, n)
 		b.WriteByte('>')
 		renderChildrenInto(r, b, n)
 		b.WriteString("</h")
@@ -52,7 +54,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString(">\n")
 
 	case NodeParagraph:
-		b.WriteString("<p>")
+		b.WriteString("<p")
+		writeSourceAttrs(r, b, n)
+		b.WriteByte('>')
 		renderChildrenInto(r, b, n)
 		b.WriteString("</p>\n")
 
@@ -60,7 +64,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		lang := n.Attrs["language"]
 		if r.highlightCode && lang != "" {
 			if highlighted, ok := highlightCode(lang, n.Literal); ok {
-				b.WriteString(`<pre><code class="language-`)
+				b.WriteString(`<pre`)
+				writeSourceAttrs(r, b, n)
+				b.WriteString(`><code class="language-`)
 				b.WriteString(html.EscapeString(lang))
 				b.WriteString(`">`)
 				b.WriteString(highlighted)
@@ -70,14 +76,18 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		}
 		code := html.EscapeString(n.Literal)
 		if lang != "" {
-			b.WriteString(`<pre><code class="language-`)
+			b.WriteString(`<pre`)
+			writeSourceAttrs(r, b, n)
+			b.WriteString(`><code class="language-`)
 			b.WriteString(html.EscapeString(lang))
 			b.WriteString(`">`)
 			b.WriteString(code)
 			b.WriteString("</code></pre>\n")
 			return
 		}
-		b.WriteString("<pre><code>")
+		b.WriteString("<pre")
+		writeSourceAttrs(r, b, n)
+		b.WriteString("><code>")
 		b.WriteString(code)
 		b.WriteString("</code></pre>\n")
 
@@ -85,7 +95,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		renderDiagramInto(b, n)
 
 	case NodeBlockquote:
-		b.WriteString("<blockquote>\n")
+		b.WriteString("<blockquote")
+		writeSourceAttrs(r, b, n)
+		b.WriteString(">\n")
 		renderChildrenInto(r, b, n)
 		b.WriteString("</blockquote>\n")
 
@@ -101,6 +113,7 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 			b.WriteString(html.EscapeString(n.Attrs["start"]))
 			b.WriteByte('"')
 		}
+		writeSourceAttrs(r, b, n)
 		b.WriteString(">\n")
 		renderChildrenInto(r, b, n)
 		b.WriteString("</")
@@ -108,7 +121,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString(">\n")
 
 	case NodeListItem:
-		b.WriteString("<li>")
+		b.WriteString("<li")
+		writeSourceAttrs(r, b, n)
+		b.WriteByte('>')
 		// Render children into a temporary builder so we can trim the
 		// trailing newline cleanly. The child nodes are typically a
 		// single paragraph so the temp cost is bounded.
@@ -121,7 +136,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		renderTableInto(r, b, n)
 
 	case NodeThematicBreak:
-		b.WriteString("<hr />\n")
+		b.WriteString("<hr")
+		writeSourceAttrs(r, b, n)
+		b.WriteString(" />\n")
 
 	case NodeLink:
 		href := html.EscapeString(n.Attrs["href"])
@@ -155,7 +172,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		src = html.EscapeString(src)
 		title := n.Attrs["title"]
 		if title != "" {
-			b.WriteString(`<figure><img src="`)
+			b.WriteString(`<figure`)
+			writeSourceAttrs(r, b, n)
+			b.WriteString(`><img src="`)
 			b.WriteString(src)
 			b.WriteString(`" alt="`)
 			b.WriteString(alt)
@@ -164,7 +183,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 			b.WriteString("</figcaption></figure>")
 			return
 		}
-		b.WriteString(`<img src="`)
+		b.WriteString(`<img`)
+		writeSourceAttrs(r, b, n)
+		b.WriteString(` src="`)
 		b.WriteString(src)
 		b.WriteString(`" alt="`)
 		b.WriteString(alt)
@@ -225,11 +246,16 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		}
 		b.WriteString(`<div class="admonition admonition-`)
 		b.WriteString(adType)
-		b.WriteString(`"><p class="admonition-title">`)
+		b.WriteByte('"')
+		writeSourceAttrs(r, b, n)
+		b.WriteString(`><p class="admonition-title">`)
 		renderAdmonitionTitleInto(r, b, title)
 		b.WriteString("</p>")
 		renderChildrenInto(r, b, n)
 		b.WriteString("</div>\n")
+
+	case NodeContainerDirective:
+		renderContainerDirectiveInto(r, b, n)
 
 	case NodeTaskListItem:
 		renderTaskListItemInto(r, b, n)
@@ -256,11 +282,29 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteByte('\n')
 
 	case NodeMathInline:
+		if r.math == MathOmit {
+			return
+		}
+		if r.math == MathRaw {
+			b.WriteString(`\(`)
+			b.WriteString(html.EscapeString(n.Literal))
+			b.WriteString(`\)`)
+			return
+		}
 		b.WriteString(`<span class="math-inline">`)
 		b.WriteString(renderLatexMath(n.Literal))
 		b.WriteString("</span>")
 
 	case NodeMathBlock:
+		if r.math == MathOmit {
+			return
+		}
+		if r.math == MathRaw {
+			b.WriteString(`\[`)
+			b.WriteString(html.EscapeString(n.Literal))
+			b.WriteString(`\]`)
+			return
+		}
 		b.WriteString(`<div class="math-block">`)
 		b.WriteString(renderLatexMath(n.Literal))
 		b.WriteString("</div>\n")
@@ -288,22 +332,30 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		}
 
 	case NodeTableOfContents:
-		b.WriteString(`<nav class="mdpp-toc" aria-label="Table of contents">` + "\n")
+		b.WriteString(`<nav class="mdpp-toc" aria-label="Table of contents"`)
+		writeSourceAttrs(r, b, n)
+		b.WriteString(">\n")
 		renderChildrenInto(r, b, n)
 		b.WriteString("</nav>\n")
 
 	case NodeDefinitionList:
-		b.WriteString("<dl>\n")
+		b.WriteString("<dl")
+		writeSourceAttrs(r, b, n)
+		b.WriteString(">\n")
 		renderChildrenInto(r, b, n)
 		b.WriteString("</dl>\n")
 
 	case NodeDefinitionTerm:
-		b.WriteString("<dt>")
+		b.WriteString("<dt")
+		writeSourceAttrs(r, b, n)
+		b.WriteByte('>')
 		renderChildrenInto(r, b, n)
 		b.WriteString("</dt>\n")
 
 	case NodeDefinitionDesc:
-		b.WriteString("<dd>")
+		b.WriteString("<dd")
+		writeSourceAttrs(r, b, n)
+		b.WriteByte('>')
 		renderChildrenInto(r, b, n)
 		b.WriteString("</dd>\n")
 
@@ -323,6 +375,7 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 			b.WriteString(provider)
 			b.WriteByte('"')
 		}
+		writeSourceAttrs(r, b, n)
 		b.WriteString(`><a href="`)
 		b.WriteString(src)
 		b.WriteString(`">`)
@@ -342,8 +395,29 @@ func renderChildrenInto(r *Renderer, b *strings.Builder, n *Node) {
 	}
 }
 
+func writeSourceAttrs(r *Renderer, b *strings.Builder, n *Node) {
+	if r == nil || !r.sourcePositions || n == nil || n.Range.StartLine == 0 {
+		return
+	}
+	b.WriteString(` data-mdpp-source-start="`)
+	b.WriteString(strconv.Itoa(n.Range.StartByte))
+	b.WriteString(`" data-mdpp-source-end="`)
+	b.WriteString(strconv.Itoa(n.Range.EndByte))
+	b.WriteString(`" data-mdpp-source-line="`)
+	b.WriteString(strconv.Itoa(n.Range.StartLine))
+	b.WriteString(`" data-mdpp-source-col="`)
+	b.WriteString(strconv.Itoa(n.Range.StartCol))
+	b.WriteString(`" data-mdpp-source-end-line="`)
+	b.WriteString(strconv.Itoa(n.Range.EndLine))
+	b.WriteString(`" data-mdpp-source-end-col="`)
+	b.WriteString(strconv.Itoa(n.Range.EndCol))
+	b.WriteByte('"')
+}
+
 func renderTaskListItemInto(r *Renderer, b *strings.Builder, n *Node) {
-	b.WriteString(`<li class="task-list-item"><input type="checkbox" disabled`)
+	b.WriteString(`<li class="task-list-item"`)
+	writeSourceAttrs(r, b, n)
+	b.WriteString(`><input type="checkbox" disabled`)
 	if n.Attrs["checked"] == "true" {
 		b.WriteString(" checked")
 	}
@@ -357,6 +431,100 @@ func renderTaskListItemInto(r *Renderer, b *strings.Builder, n *Node) {
 	renderChildrenInto(r, &inner, n)
 	b.WriteString(strings.TrimRight(inner.String(), "\n"))
 	b.WriteString("</li>\n")
+}
+
+func renderContainerDirectiveInto(r *Renderer, b *strings.Builder, n *Node) {
+	var body strings.Builder
+	renderChildrenInto(r, &body, n)
+	bodyHTML := body.String()
+	if r.containerHTML != nil {
+		b.WriteString(r.containerHTML(n, bodyHTML))
+		return
+	}
+
+	name := strings.ToLower(n.Attrs["name"])
+	if isAdmonitionContainer(name) {
+		b.WriteString(`<div class="admonition admonition-`)
+		b.WriteString(html.EscapeString(name))
+		writeContainerCommonAttrs(b, n, name, false)
+		writeSourceAttrs(r, b, n)
+		b.WriteByte('>')
+		title := n.Attrs["title"]
+		if title == "" {
+			title = strings.ToUpper(name)
+		}
+		b.WriteString(`<p class="admonition-title">`)
+		renderAdmonitionTitleInto(r, b, title)
+		b.WriteString("</p>")
+		b.WriteString(bodyHTML)
+		b.WriteString("</div>\n")
+		return
+	}
+
+	if name == "details" {
+		b.WriteString(`<details class="mdpp-container mdpp-container-details" data-mdpp-container="details"`)
+		writeContainerIDAndExtraAttrs(b, n)
+		writeSourceAttrs(r, b, n)
+		b.WriteByte('>')
+		if title := n.Attrs["title"]; title != "" {
+			b.WriteString("<summary>")
+			renderAdmonitionTitleInto(r, b, title)
+			b.WriteString("</summary>")
+		}
+		b.WriteString(bodyHTML)
+		b.WriteString("</details>\n")
+		return
+	}
+
+	tagClass := "mdpp-container-" + classToken(name)
+	if name == "column" || name == "col" {
+		tagClass = "mdpp-col"
+	}
+	b.WriteString(`<div class="mdpp-container `)
+	b.WriteString(tagClass)
+	writeContainerCommonAttrs(b, n, name, true)
+	writeSourceAttrs(r, b, n)
+	b.WriteByte('>')
+	if title := n.Attrs["title"]; title != "" {
+		b.WriteString(`<p class="mdpp-container-title">`)
+		renderAdmonitionTitleInto(r, b, title)
+		b.WriteString("</p>")
+	}
+	b.WriteString(bodyHTML)
+	b.WriteString("</div>\n")
+}
+
+func writeContainerCommonAttrs(b *strings.Builder, n *Node, name string, includeBaseData bool) {
+	if class := strings.TrimSpace(n.Attrs["class"]); class != "" {
+		b.WriteByte(' ')
+		b.WriteString(html.EscapeString(class))
+	}
+	b.WriteByte('"')
+	if includeBaseData {
+		b.WriteString(` data-mdpp-container="`)
+		b.WriteString(html.EscapeString(name))
+		b.WriteByte('"')
+	}
+	writeContainerIDAndExtraAttrs(b, n)
+}
+
+func writeContainerIDAndExtraAttrs(b *strings.Builder, n *Node) {
+	if id := n.Attrs["id"]; id != "" {
+		b.WriteString(` id="`)
+		b.WriteString(html.EscapeString(id))
+		b.WriteByte('"')
+	}
+	// Free-form key=value attributes are intentionally not emitted yet; the
+	// parsed JSON is preserved in Attrs["attrs"] for downstream tools.
+}
+
+func isAdmonitionContainer(name string) bool {
+	switch strings.ToLower(name) {
+	case "note", "tip", "warning", "caution", "important":
+		return true
+	default:
+		return false
+	}
 }
 
 func renderAdmonitionTitleInto(r *Renderer, b *strings.Builder, title string) {
@@ -383,7 +551,9 @@ func renderTableInto(r *Renderer, b *strings.Builder, n *Node) {
 	}
 
 	// Responsive wrapper: a <div> with overflow-x:auto via CSS class.
-	b.WriteString(`<div class="mdpp-table">` + "\n")
+	b.WriteString(`<div class="mdpp-table"`)
+	writeSourceAttrs(r, b, n)
+	b.WriteString(">\n")
 	b.WriteString("<table>\n")
 
 	// Emit <colgroup> when any column has alignment so CSS can target
@@ -551,4 +721,9 @@ func slugify(s string) string {
 	result := sb.String()
 	result = strings.TrimRight(result, "-")
 	return result
+}
+
+// Slugify converts heading text into the renderer's auto-generated id.
+func Slugify(s string) string {
+	return slugify(s)
 }

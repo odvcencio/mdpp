@@ -18,6 +18,7 @@ func codeBlockToDiagram(cb *Node) *Node {
 			"syntax":   syntax,
 			"kind":     kind,
 		},
+		Range: cb.Range,
 	}
 }
 

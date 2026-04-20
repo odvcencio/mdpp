@@ -1,0 +1,87 @@
+package mdpp
+
+// String returns the stable public name of a NodeType.
+func (t NodeType) String() string {
+	switch t {
+	case NodeDocument:
+		return "Document"
+	case NodeHeading:
+		return "Heading"
+	case NodeParagraph:
+		return "Paragraph"
+	case NodeCodeBlock:
+		return "CodeBlock"
+	case NodeBlockquote:
+		return "Blockquote"
+	case NodeList:
+		return "List"
+	case NodeListItem:
+		return "ListItem"
+	case NodeTable:
+		return "Table"
+	case NodeTableRow:
+		return "TableRow"
+	case NodeTableCell:
+		return "TableCell"
+	case NodeThematicBreak:
+		return "ThematicBreak"
+	case NodeLink:
+		return "Link"
+	case NodeImage:
+		return "Image"
+	case NodeEmphasis:
+		return "Emphasis"
+	case NodeStrong:
+		return "Strong"
+	case NodeStrikethrough:
+		return "Strikethrough"
+	case NodeCodeSpan:
+		return "CodeSpan"
+	case NodeText:
+		return "Text"
+	case NodeSoftBreak:
+		return "SoftBreak"
+	case NodeHardBreak:
+		return "HardBreak"
+	case NodeHTMLBlock:
+		return "HTMLBlock"
+	case NodeHTMLInline:
+		return "HTMLInline"
+	case NodeFootnoteRef:
+		return "FootnoteRef"
+	case NodeFootnoteDef:
+		return "FootnoteDef"
+	case NodeMathInline:
+		return "MathInline"
+	case NodeMathBlock:
+		return "MathBlock"
+	case NodeAdmonition:
+		return "Admonition"
+	case NodeDefinitionList:
+		return "DefinitionList"
+	case NodeDefinitionTerm:
+		return "DefinitionTerm"
+	case NodeDefinitionDesc:
+		return "DefinitionDesc"
+	case NodeSuperscript:
+		return "Superscript"
+	case NodeSubscript:
+		return "Subscript"
+	case NodeTaskListItem:
+		return "TaskListItem"
+	case NodeFrontmatter:
+		return "Frontmatter"
+	case NodeTableOfContents:
+		return "TableOfContents"
+	case NodeAutoEmbed:
+		return "AutoEmbed"
+	case NodeEmoji:
+		return "Emoji"
+	case NodeDiagram:
+		return "Diagram"
+	case NodeContainerDirective:
+		return "ContainerDirective"
+	default:
+		return "Unknown"
+	}
+}

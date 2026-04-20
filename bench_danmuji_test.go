@@ -18,13 +18,13 @@ func BenchmarkParseShortDoc(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = Parse(source)
+		_ = MustParse(source)
 	}
 }
 
 func BenchmarkRenderShortDoc(b *testing.B) {
 //line /home/draco/work/mdpp/bench.dmj:23
-	doc := Parse([]byte(benchShortMarkdown))
+	doc := MustParse([]byte(benchShortMarkdown))
 	r := NewRenderer()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -35,7 +35,7 @@ func BenchmarkRenderShortDoc(b *testing.B) {
 
 func BenchmarkRenderLongDoc(b *testing.B) {
 //line /home/draco/work/mdpp/bench.dmj:34
-	doc := Parse([]byte(benchLongMarkdown))
+	doc := MustParse([]byte(benchLongMarkdown))
 	r := NewRenderer()
 	b.ReportAllocs()
 	b.ResetTimer()

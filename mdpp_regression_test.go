@@ -82,7 +82,7 @@ func TestMarkdownPPParsingRegressionMatrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			doc := Parse([]byte(tt.source))
+			doc := MustParse([]byte(tt.source))
 			node := findFirstNodeOfType(doc.Root, tt.typ)
 			if node == nil {
 				t.Fatalf("expected node type %d in %#v", tt.typ, doc.Root)

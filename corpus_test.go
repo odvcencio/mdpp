@@ -205,7 +205,7 @@ func TestCorpus_WhitespaceOnlyDocument(t *testing.T) {
 //     assert that the parse tree has all the node types we expect. ---
 
 func TestCorpus_HelloWorldPostASTCoverage(t *testing.T) {
-	doc := Parse([]byte(helloWorldPost))
+	doc := MustParse([]byte(helloWorldPost))
 	want := map[NodeType]int{
 		NodeHeading:         5,    // H1 + 3 H2 + 1 H3 — verify the AST has 5 headings
 		NodeAdmonition:      1,

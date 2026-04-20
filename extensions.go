@@ -151,6 +151,7 @@ func processAdmonitions(root *Node) {
 		adm := &Node{
 			Type:  NodeAdmonition,
 			Attrs: map[string]string{"type": adType},
+			Range: n.Range,
 		}
 
 		// Remove the Link node from the first paragraph's children
@@ -209,6 +210,7 @@ func extractAdmonitionCaption(children []*Node) (string, []*Node) {
 				if tail != "" {
 					clone := *child
 					clone.Literal = tail
+					clone.Range = Range{}
 					rest = append(rest, &clone)
 				}
 				rest = append(rest, children[i+1:]...)
@@ -259,6 +261,7 @@ func cleanAdmonitionLeadingChildren(children []*Node) []*Node {
 		if leading && child.Type == NodeText {
 			clone := *child
 			clone.Literal = cleanAdmonitionText(clone.Literal)
+			clone.Range = Range{}
 			if clone.Literal == "" {
 				continue
 			}
@@ -328,6 +331,7 @@ func cleanBlockquoteHeadingContinuation(children []*Node) []*Node {
 		}
 		clone := *child
 		clone.Literal = cleanBlockquoteContinuationText(clone.Literal)
+		clone.Range = Range{}
 		if clone.Literal == "" {
 			continue
 		}
@@ -399,6 +403,7 @@ func processFootnotes(root *Node) []*Node {
 			Type:     NodeFootnoteDef,
 			Attrs:    map[string]string{"id": match[1]},
 			Children: defChildren,
+			Range:    child.Range,
 		}
 		if _, exists := defs[match[1]]; !exists {
 			defOrder = append(defOrder, match[1])
@@ -441,6 +446,7 @@ func processFootnotes(root *Node) []*Node {
 			n.Children[i] = &Node{
 				Type:  NodeFootnoteRef,
 				Attrs: map[string]string{"id": id},
+				Range: child.Range,
 			}
 		}
 		return true
@@ -479,6 +485,7 @@ func footnoteDefinitionChildren(children []*Node) ([]*Node, bool) {
 	if firstText != "" {
 		clone := *first
 		clone.Literal = firstText
+		clone.Range = Range{}
 		out = append(out, &clone)
 	}
 	out = append(out, children[1:]...)
@@ -506,6 +513,7 @@ func processInlineMath(root *Node) {
 		root.Children[i] = &Node{
 			Type:    NodeMathBlock,
 			Literal: strings.TrimSpace(match[1]),
+			Range:   child.Range,
 		}
 	}
 
@@ -640,6 +648,7 @@ func processAutoEmbeds(root *Node) {
 		embed := &Node{
 			Type:  NodeAutoEmbed,
 			Attrs: map[string]string{"src": url, "provider": detectEmbedProvider(url)},
+			Range: child.Range,
 		}
 		root.Children[i] = embed
 	}
@@ -667,7 +676,7 @@ func detectEmbedProvider(url string) string {
 	case strings.Contains(lower, "codesandbox.io/"):
 		return "codesandbox"
 	}
-	return ""
+	return "generic"
 }
 
 // --- Definition Lists ---
@@ -767,6 +776,7 @@ func splitDefinitionParagraph(para *Node) (*Node, []*Node, bool) {
 			if len(seg) > 0 && seg[0] != nil && seg[0].Type == NodeText {
 				clone := *seg[0]
 				clone.Literal = strings.TrimLeft(clone.Literal, " \t")
+				clone.Range = Range{}
 				seg[0] = &clone
 			}
 		case lit == ": ":
@@ -774,6 +784,7 @@ func splitDefinitionParagraph(para *Node) (*Node, []*Node, bool) {
 		case strings.HasPrefix(lit, ": "):
 			clone := *head
 			clone.Literal = strings.TrimLeft(lit[2:], " \t")
+			clone.Range = Range{}
 			seg = append([]*Node{&clone}, seg[1:]...)
 		default:
 			return nil, nil, false
@@ -807,14 +818,25 @@ func processTOC(doc *Document) {
 	var headings []Heading
 	collectHeadings(doc.Root, &headings)
 	for i, child := range doc.Root.Children {
-		if child == nil || child.Type != NodeParagraph {
+		if child == nil {
+			continue
+		}
+		if child.Type == NodeTableOfContents {
+			toc := buildTOCNode(headings)
+			toc.Range = child.Range
+			doc.Root.Children[i] = toc
+			continue
+		}
+		if child.Type != NodeParagraph {
 			continue
 		}
 		text := strings.TrimSpace(collectSurfaceText(child))
 		if !tocDirectiveRe.MatchString(text) {
 			continue
 		}
-		doc.Root.Children[i] = buildTOCNode(headings)
+		toc := buildTOCNode(headings)
+		toc.Range = child.Range
+		doc.Root.Children[i] = toc
 	}
 }
 
@@ -943,7 +965,7 @@ func processInlinePattern(root *Node, re *regexp.Regexp, factory func(match []st
 				newChildren = append(newChildren, child)
 				continue
 			}
-			split := splitTextByPattern(child.Literal, re, factory)
+			split := splitTextByPattern(child.Literal, re, factory, child.Range)
 			if len(split) == 1 && split[0].Type == NodeText {
 				newChildren = append(newChildren, child)
 				continue
@@ -962,10 +984,10 @@ func processInlinePattern(root *Node, re *regexp.Regexp, factory func(match []st
 
 // splitTextByPattern splits a text string into alternating text and newly
 // created nodes based on a regex pattern.
-func splitTextByPattern(text string, re *regexp.Regexp, factory func(match []string) *Node) []*Node {
+func splitTextByPattern(text string, re *regexp.Regexp, factory func(match []string) *Node, base Range) []*Node {
 	locs := re.FindAllStringSubmatchIndex(text, -1)
 	if len(locs) == 0 {
-		return []*Node{textNode(text)}
+		return []*Node{textNodeRange(text, base)}
 	}
 
 	var nodes []*Node
@@ -973,7 +995,7 @@ func splitTextByPattern(text string, re *regexp.Regexp, factory func(match []str
 
 	for _, loc := range locs {
 		if loc[0] > cursor {
-			nodes = append(nodes, textNode(text[cursor:loc[0]]))
+			nodes = append(nodes, textNodeRange(text[cursor:loc[0]], textSliceRange(base, text, cursor, loc[0])))
 		}
 
 		match := make([]string, len(loc)/2)
@@ -983,12 +1005,16 @@ func splitTextByPattern(text string, re *regexp.Regexp, factory func(match []str
 			}
 		}
 
-		nodes = append(nodes, factory(match))
+		node := factory(match)
+		if node != nil {
+			node.Range = textSliceRange(base, text, loc[0], loc[1])
+			nodes = append(nodes, node)
+		}
 		cursor = loc[1]
 	}
 
 	if cursor < len(text) {
-		nodes = append(nodes, textNode(text[cursor:]))
+		nodes = append(nodes, textNodeRange(text[cursor:], textSliceRange(base, text, cursor, len(text))))
 	}
 
 	return nodes

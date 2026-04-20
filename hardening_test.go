@@ -447,7 +447,7 @@ func TestHardening_NonDiagramLanguageStaysCode(t *testing.T) {
 
 func TestHardening_FrontmatterArray(t *testing.T) {
 	src := "---\ntags:\n  - go\n  - mdpp\n---\nbody\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	fm := doc.Frontmatter()
 	tags, ok := fm["tags"].([]any)
 	if !ok {
@@ -460,7 +460,7 @@ func TestHardening_FrontmatterArray(t *testing.T) {
 
 func TestHardening_FrontmatterNestedMap(t *testing.T) {
 	src := "---\nauthor:\n  name: O\n  handle: odvcencio\n---\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	fm := doc.Frontmatter()
 	author, ok := fm["author"].(map[string]any)
 	if !ok {
@@ -473,7 +473,7 @@ func TestHardening_FrontmatterNestedMap(t *testing.T) {
 
 func TestHardening_FrontmatterInvalidYAMLDoesNotCrash(t *testing.T) {
 	src := "---\n: garbage :: invalid\n---\nbody\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	if doc == nil {
 		t.Fatal("parse returned nil")
 	}
@@ -524,7 +524,7 @@ func TestHardening_TOCSkipsLevelsCleanly(t *testing.T) {
 // --- AST structural assertions (not just HTML substrings) ---
 
 func TestHardening_AdmonitionASTShape(t *testing.T) {
-	doc := Parse([]byte("> [!NOTE] Title\n> body\n"))
+	doc := MustParse([]byte("> [!NOTE] Title\n> body\n"))
 	found := findFirst(doc.Root, NodeAdmonition)
 	if found == nil {
 		t.Fatal("no NodeAdmonition in tree")
@@ -538,7 +538,7 @@ func TestHardening_AdmonitionASTShape(t *testing.T) {
 }
 
 func TestHardening_FootnoteASTShape(t *testing.T) {
-	doc := Parse([]byte("text[^a]\n\n[^a]: def\n"))
+	doc := MustParse([]byte("text[^a]\n\n[^a]: def\n"))
 	ref := findFirst(doc.Root, NodeFootnoteRef)
 	if ref == nil || ref.Attrs["id"] != "a" {
 		t.Fatalf("ref id mismatch: %+v", ref)
@@ -550,7 +550,7 @@ func TestHardening_FootnoteASTShape(t *testing.T) {
 }
 
 func TestHardening_TOCASTShape(t *testing.T) {
-	doc := Parse([]byte("[[toc]]\n\n## A\n\n## B\n"))
+	doc := MustParse([]byte("[[toc]]\n\n## A\n\n## B\n"))
 	toc := findFirst(doc.Root, NodeTableOfContents)
 	if toc == nil {
 		t.Fatal("no NodeTableOfContents in tree")

@@ -26,11 +26,11 @@ func TestHighlightGoFenceInfoStringUsesLanguageToken(t *testing.T) {
 
 func TestHighlightGoTypeConversionDoesNotSwallowString(t *testing.T) {
 	r := NewRenderer(WithHighlightCode(true))
-	html := r.RenderString("```go\nsrc := []byte(\"package main\\nfunc main() {}\\n\")\nlang := grammars.GoLanguage()\ntree, _ := gotreesitter.NewParser(lang).Parse(src)\n```")
+	html := r.RenderString("```go\nsrc := []byte(\"package main\\nfunc main() {}\\n\")\nlang := grammars.GoLanguage()\ntree, _ := gotreesitter.NewParser(lang).MustParse(src)\n```")
 	assertContains(t, html, `<span class="hl-string">&#34;package main\nfunc main() {}\n&#34;</span>`)
 	assertContains(t, html, `<span class="hl-function">GoLanguage</span>`)
 	assertContains(t, html, `<span class="hl-function">NewParser</span>`)
-	assertContains(t, html, `<span class="hl-function">Parse</span>`)
+	assertContains(t, html, `<span class="hl-function">MustParse</span>`)
 	assertNotContains(t, html, `<span class="hl-type">[]byte(&#34;`)
 }
 

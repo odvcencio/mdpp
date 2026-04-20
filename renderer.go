@@ -2,12 +2,15 @@ package mdpp
 
 // Renderer converts Markdown source into HTML.
 type Renderer struct {
-	highlightCode bool
-	headingIDs    bool
-	unsafeHTML    bool
-	hardWraps     bool
-	wrapEmoji     bool
-	imageResolver func(string) string
+	highlightCode   bool
+	headingIDs      bool
+	unsafeHTML      bool
+	hardWraps       bool
+	wrapEmoji       bool
+	imageResolver   func(string) string
+	math            MathOption
+	containerHTML   func(c *Node, body string) string
+	sourcePositions bool
 }
 
 // Option configures a Renderer.
@@ -52,14 +55,24 @@ func WithImageResolver(fn func(string) string) Option {
 	return func(r *Renderer) { r.imageResolver = fn }
 }
 
+// WithContainerRenderer sets a custom renderer for container directives.
+func WithContainerRenderer(fn func(c *Node, body string) string) Option {
+	return func(r *Renderer) { r.containerHTML = fn }
+}
+
+// WithSourcePositions emits data-mdpp-source-* attributes on rendered elements.
+func WithSourcePositions(enabled bool) Option {
+	return func(r *Renderer) { r.sourcePositions = enabled }
+}
+
 // Parse parses Markdown source into a Document using the package-level parser.
 func (r *Renderer) Parse(source []byte) *Document {
-	return Parse(source)
+	return MustParse(source)
 }
 
 // RenderString parses and renders a Markdown string to HTML.
 func (r *Renderer) RenderString(source string) string {
-	doc := Parse([]byte(source))
+	doc := MustParse([]byte(source))
 	return r.Render(doc)
 }
 

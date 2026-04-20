@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseHeading(t *testing.T) {
-	doc := Parse([]byte("# Hello"))
+	doc := MustParse([]byte("# Hello"))
 	root := doc.Root
 	if root.Type != NodeDocument {
 		t.Fatalf("expected NodeDocument, got %d", root.Type)
@@ -43,7 +43,7 @@ func TestParseHeadingLevels(t *testing.T) {
 		{"###### Sixth", "6", "Sixth"},
 	}
 	for _, tt := range tests {
-		doc := Parse([]byte(tt.src))
+		doc := MustParse([]byte(tt.src))
 		if len(doc.Root.Children) == 0 {
 			t.Fatalf("no children for %q", tt.src)
 		}
@@ -62,7 +62,7 @@ func TestParseHeadingLevels(t *testing.T) {
 }
 
 func TestParseHeadingWithExclamation(t *testing.T) {
-	doc := Parse([]byte("# Hello World!"))
+	doc := MustParse([]byte("# Hello World!"))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -85,7 +85,7 @@ A matter of origin, this didn't really exist before February 19th, 2026. That wa
 [^2]: [Disaster, but lucky still](https://link-to-article)
 `)
 
-	doc := Parse(src)
+	doc := MustParse(src)
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -98,8 +98,127 @@ A matter of origin, this didn't really exist before February 19th, 2026. That wa
 	}
 }
 
+func TestParseNodeRanges(t *testing.T) {
+	src := []byte("# Hello\n\nA **bold** move\n")
+	doc := MustParse(src)
+
+	assertRange(t, "document", doc.Root.Range, Range{StartByte: 0, EndByte: len(src), StartLine: 1, StartCol: 1, EndLine: 4, EndCol: 1})
+	if len(doc.Root.Children) < 2 {
+		t.Fatalf("expected heading and paragraph, got %d children", len(doc.Root.Children))
+	}
+
+	heading := doc.Root.Children[0]
+	assertRange(t, "heading", heading.Range, Range{StartByte: 0, EndByte: 8, StartLine: 1, StartCol: 1, EndLine: 2, EndCol: 1})
+	if len(heading.Children) != 1 {
+		t.Fatalf("expected one heading child, got %d", len(heading.Children))
+	}
+	assertRange(t, "heading text", heading.Children[0].Range, Range{StartByte: 2, EndByte: 7, StartLine: 1, StartCol: 3, EndLine: 1, EndCol: 8})
+
+	paragraph := doc.Root.Children[1]
+	assertRange(t, "paragraph", paragraph.Range, Range{StartByte: 9, EndByte: 25, StartLine: 3, StartCol: 1, EndLine: 4, EndCol: 1})
+
+	var strong *Node
+	for _, child := range paragraph.Children {
+		if child.Type == NodeStrong {
+			strong = child
+			break
+		}
+	}
+	if strong == nil {
+		t.Fatal("expected strong node")
+	}
+	assertRange(t, "strong", strong.Range, Range{StartByte: 11, EndByte: 19, StartLine: 3, StartCol: 3, EndLine: 3, EndCol: 11})
+	if len(strong.Children) != 1 {
+		t.Fatalf("expected one strong child, got %d", len(strong.Children))
+	}
+	assertRange(t, "strong text", strong.Children[0].Range, Range{StartByte: 13, EndByte: 17, StartLine: 3, StartCol: 5, EndLine: 3, EndCol: 9})
+}
+
+func TestParseSoftBreakRange(t *testing.T) {
+	doc := MustParse([]byte("one\ntwo\n"))
+	if len(doc.Root.Children) != 1 {
+		t.Fatalf("expected one paragraph, got %d", len(doc.Root.Children))
+	}
+	para := doc.Root.Children[0]
+	if len(para.Children) != 3 {
+		t.Fatalf("expected text, soft break, text; got %d children", len(para.Children))
+	}
+	assertRange(t, "first text", para.Children[0].Range, Range{StartByte: 0, EndByte: 3, StartLine: 1, StartCol: 1, EndLine: 1, EndCol: 4})
+	assertRange(t, "soft break", para.Children[1].Range, Range{StartByte: 3, EndByte: 4, StartLine: 1, StartCol: 4, EndLine: 2, EndCol: 1})
+	assertRange(t, "second text", para.Children[2].Range, Range{StartByte: 4, EndByte: 7, StartLine: 2, StartCol: 1, EndLine: 2, EndCol: 4})
+}
+
+func TestPostProcessedNodeRanges(t *testing.T) {
+	doc := MustParse([]byte("Nice :sweat_smile: and $x$.\n"))
+	emoji := findFirstNodeOfType(doc.Root, NodeEmoji)
+	if emoji == nil {
+		t.Fatal("expected emoji node")
+	}
+	assertRange(t, "emoji", emoji.Range, Range{StartByte: 5, EndByte: 18, StartLine: 1, StartCol: 6, EndLine: 1, EndCol: 19})
+
+	math := findFirstNodeOfType(doc.Root, NodeMathInline)
+	if math == nil {
+		t.Fatal("expected inline math node")
+	}
+	assertRange(t, "inline math", math.Range, Range{StartByte: 23, EndByte: 26, StartLine: 1, StartCol: 24, EndLine: 1, EndCol: 27})
+}
+
+func TestDirectiveNodeRanges(t *testing.T) {
+	tocDoc := MustParse([]byte("# A\n\n[[toc]]\n"))
+	toc := findFirstNodeOfType(tocDoc.Root, NodeTableOfContents)
+	if toc == nil {
+		t.Fatal("expected TOC node")
+	}
+	assertRange(t, "toc", toc.Range, Range{StartByte: 5, EndByte: 13, StartLine: 3, StartCol: 1, EndLine: 4, EndCol: 1})
+
+	embedDoc := MustParse([]byte("[[embed:https://example.com/video]]\n"))
+	embed := findFirstNodeOfType(embedDoc.Root, NodeAutoEmbed)
+	if embed == nil {
+		t.Fatal("expected auto embed node")
+	}
+	assertRange(t, "embed", embed.Range, Range{StartByte: 0, EndByte: 36, StartLine: 1, StartCol: 1, EndLine: 2, EndCol: 1})
+}
+
+func TestContainerDirectiveParseAttrsAndNestedContent(t *testing.T) {
+	src := []byte(":::warning \"Heads up\" {.extra #warn audience=\"dev\"}\nBody **bold**.\n:::\n")
+	doc := MustParse(src)
+	container := findFirstNodeOfType(doc.Root, NodeContainerDirective)
+	if container == nil {
+		t.Fatal("expected container directive")
+	}
+	if got := container.Attr("name"); got != "warning" {
+		t.Fatalf("name = %q, want warning", got)
+	}
+	if got := container.Attr("title"); got != "Heads up" {
+		t.Fatalf("title = %q, want Heads up", got)
+	}
+	if got := container.Attr("class"); got != "extra" {
+		t.Fatalf("class = %q, want extra", got)
+	}
+	if got := container.Attr("id"); got != "warn" {
+		t.Fatalf("id = %q, want warn", got)
+	}
+	if got := container.Attr("attrs"); !strings.Contains(got, `"audience":"dev"`) {
+		t.Fatalf("attrs = %q, want audience JSON", got)
+	}
+	assertRange(t, "container", container.Range, Range{StartByte: 0, EndByte: len(src), StartLine: 1, StartCol: 1, EndLine: 4, EndCol: 1})
+	if findFirstNodeOfType(container, NodeStrong) == nil {
+		t.Fatal("expected nested inline markdown to be parsed")
+	}
+}
+
+func TestContainerDirectiveUnclosedDiagnostic(t *testing.T) {
+	doc := MustParse([]byte(":::note\nBody\n"))
+	if len(doc.Diagnostics()) != 1 {
+		t.Fatalf("expected one diagnostic, got %#v", doc.Diagnostics())
+	}
+	if got := doc.Diagnostics()[0].Code; got != "MDPP-PARSE-002" {
+		t.Fatalf("diagnostic code = %q, want MDPP-PARSE-002", got)
+	}
+}
+
 func TestParseParagraph(t *testing.T) {
-	doc := Parse([]byte("Just some plain text."))
+	doc := MustParse([]byte("Just some plain text."))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -115,7 +234,7 @@ func TestParseParagraph(t *testing.T) {
 
 func TestParseCodeBlock(t *testing.T) {
 	src := "```go\nfmt.Println(\"hello\")\n```"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -133,7 +252,7 @@ func TestParseCodeBlock(t *testing.T) {
 
 func TestParseDiagramFence(t *testing.T) {
 	src := "```mermaid\nflowchart TD\n  A --> B\n```"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -153,7 +272,7 @@ func TestParseDiagramFence(t *testing.T) {
 }
 
 func TestParseDiagramAliasFence(t *testing.T) {
-	doc := Parse([]byte("```erd\nUser ||--o{ Post : writes\n```"))
+	doc := MustParse([]byte("```erd\nUser ||--o{ Post : writes\n```"))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -167,7 +286,7 @@ func TestParseDiagramAliasFence(t *testing.T) {
 }
 
 func TestParseBoldItalic(t *testing.T) {
-	doc := Parse([]byte("**bold** and *italic*"))
+	doc := MustParse([]byte("**bold** and *italic*"))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -202,7 +321,7 @@ func TestParseBoldItalic(t *testing.T) {
 }
 
 func TestParseList(t *testing.T) {
-	doc := Parse([]byte("- one\n- two"))
+	doc := MustParse([]byte("- one\n- two"))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -222,7 +341,7 @@ func TestParseList(t *testing.T) {
 
 func TestParseOrderedListMarkers(t *testing.T) {
 	for _, src := range []string{"1. one\n2. two", "1) one\n2) two"} {
-		doc := Parse([]byte(src))
+		doc := MustParse([]byte(src))
 		if len(doc.Root.Children) == 0 {
 			t.Fatalf("%q: expected at least one child", src)
 		}
@@ -237,7 +356,7 @@ func TestParseOrderedListMarkers(t *testing.T) {
 }
 
 func TestParseOrderedListStart(t *testing.T) {
-	doc := Parse([]byte("3) three\n4) four"))
+	doc := MustParse([]byte("3) three\n4) four"))
 	list := doc.Root.Children[0]
 	if list.Attrs["ordered"] != "true" {
 		t.Fatalf("expected ordered list attrs, got %#v", list.Attrs)
@@ -248,7 +367,7 @@ func TestParseOrderedListStart(t *testing.T) {
 }
 
 func TestParseBlockquote(t *testing.T) {
-	doc := Parse([]byte("> quote"))
+	doc := MustParse([]byte("> quote"))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -273,7 +392,7 @@ func TestRenderLongSimpleBlockquote(t *testing.T) {
 }
 
 func TestParseLink(t *testing.T) {
-	doc := Parse([]byte("[text](https://example.com)"))
+	doc := MustParse([]byte("[text](https://example.com)"))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -298,7 +417,7 @@ func TestParseLink(t *testing.T) {
 }
 
 func TestParseImage(t *testing.T) {
-	doc := Parse([]byte(`![alt text](image.png "A title")`))
+	doc := MustParse([]byte(`![alt text](image.png "A title")`))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -326,7 +445,7 @@ func TestParseImage(t *testing.T) {
 
 func TestParseTable(t *testing.T) {
 	src := "| A | B |\n|---|---|\n| 1 | 2 |"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	if len(doc.Root.Children) == 0 {
 		t.Fatal("expected at least one child")
 	}
@@ -371,7 +490,7 @@ A paragraph with **bold** and *italic*.
 | a  | b   |
 `
 
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	if doc.Root.Type != NodeDocument {
 		t.Fatal("expected NodeDocument root")
 	}
@@ -409,4 +528,11 @@ func collectText(n *Node) string {
 		s += collectText(c)
 	}
 	return s
+}
+
+func assertRange(t *testing.T, label string, got Range, want Range) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("%s range = %#v, want %#v", label, got, want)
+	}
 }

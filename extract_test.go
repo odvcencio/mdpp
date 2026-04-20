@@ -7,7 +7,7 @@ import (
 )
 
 func TestWordCount(t *testing.T) {
-	doc := Parse([]byte("Hello world. This is a test."))
+	doc := MustParse([]byte("Hello world. This is a test."))
 	got := doc.WordCount()
 	if got != 6 {
 		t.Errorf("WordCount() = %d, want 6", got)
@@ -16,7 +16,7 @@ func TestWordCount(t *testing.T) {
 
 func TestWordCountIgnoresCode(t *testing.T) {
 	src := "Hello world\n\n```go\nfunc main() {}\n```\n\nGoodbye friend\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	got := doc.WordCount()
 	// "Hello world" = 2 words, "Goodbye friend" = 2 words = 4 total
 	// Code block content must be excluded.
@@ -27,7 +27,7 @@ func TestWordCountIgnoresCode(t *testing.T) {
 
 func TestWordCountIgnoresDiagrams(t *testing.T) {
 	src := "Hello world\n\n```mermaid\nflowchart TD\n  Several Words --> More Words\n```\n\nGoodbye friend\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	got := doc.WordCount()
 	if got != 4 {
 		t.Errorf("WordCount() = %d, want 4 (should ignore diagram block)", got)
@@ -45,7 +45,7 @@ func TestReadingTime(t *testing.T) {
 		paragraphs = append(paragraphs, strings.Join(words, " "))
 	}
 	src := strings.Join(paragraphs, "\n\n") + "\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	got := doc.ReadingTime()
 	if got != 1*time.Minute {
 		t.Errorf("ReadingTime() = %v, want 1m0s", got)
@@ -53,7 +53,7 @@ func TestReadingTime(t *testing.T) {
 }
 
 func TestReadingTimeMinimum(t *testing.T) {
-	doc := Parse([]byte("Short."))
+	doc := MustParse([]byte("Short."))
 	got := doc.ReadingTime()
 	if got != 1*time.Minute {
 		t.Errorf("ReadingTime() = %v, want 1m0s (minimum)", got)
@@ -61,7 +61,7 @@ func TestReadingTimeMinimum(t *testing.T) {
 }
 
 func TestReadingTimeZero(t *testing.T) {
-	doc := Parse([]byte(""))
+	doc := MustParse([]byte(""))
 	got := doc.ReadingTime()
 	if got != 0 {
 		t.Errorf("ReadingTime() = %v, want 0 for empty document", got)
@@ -70,7 +70,7 @@ func TestReadingTimeZero(t *testing.T) {
 
 func TestHeadings(t *testing.T) {
 	src := "# One\n## Two\n### Three\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	headings := doc.Headings()
 	if len(headings) != 3 {
 		t.Fatalf("Headings() returned %d headings, want 3", len(headings))
@@ -102,7 +102,7 @@ func TestHeadings(t *testing.T) {
 
 func TestTableOfContents(t *testing.T) {
 	src := "# Introduction\n## Background\n### Details\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	toc := doc.TableOfContents()
 	if len(toc) != 3 {
 		t.Fatalf("TableOfContents() returned %d entries, want 3", len(toc))
@@ -121,7 +121,7 @@ func TestTableOfContents(t *testing.T) {
 
 func TestFrontmatter(t *testing.T) {
 	src := "---\ntitle: Hello\ntags:\n  - go\n  - markdown\n---\n\n# Content\n"
-	doc := Parse([]byte(src))
+	doc := MustParse([]byte(src))
 	fm := doc.Frontmatter()
 	if fm == nil {
 		t.Fatal("Frontmatter() returned nil, want map with title")
@@ -136,7 +136,7 @@ func TestFrontmatter(t *testing.T) {
 }
 
 func TestFrontmatterMissing(t *testing.T) {
-	doc := Parse([]byte("# No frontmatter here\n"))
+	doc := MustParse([]byte("# No frontmatter here\n"))
 	fm := doc.Frontmatter()
 	if fm != nil {
 		t.Errorf("Frontmatter() = %v, want nil for document without frontmatter", fm)
