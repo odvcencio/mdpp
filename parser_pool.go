@@ -32,3 +32,19 @@ func parsePooled(lang *gotreesitter.Language, entry *grammars.LangEntry, source 
 	}
 	return pool.Parse(source)
 }
+
+// parseIncrementalFromTree re-parses source using oldTree as a starting point.
+// oldTree must already have Edit() applied for each edit.
+func parseIncrementalFromTree(lang *gotreesitter.Language, entry *grammars.LangEntry, source []byte, oldTree *gotreesitter.Tree) (*gotreesitter.Tree, error) {
+	if lang == nil {
+		return nil, gotreesitter.ErrNoLanguage
+	}
+	// Use a fresh parser — ParserPool parsers get reset on release, which
+	// would otherwise interfere with incremental state tracking.
+	parser := gotreesitter.NewParser(lang)
+	if entry != nil && entry.TokenSourceFactory != nil {
+		ts := entry.TokenSourceFactory(source, lang)
+		return parser.ParseIncrementalWithTokenSource(source, oldTree, ts)
+	}
+	return parser.ParseIncremental(source, oldTree)
+}

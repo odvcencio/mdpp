@@ -1,5 +1,7 @@
 package mdpp
 
+import "strings"
+
 // Renderer converts Markdown source into HTML.
 type Renderer struct {
 	highlightCode   bool
@@ -78,7 +80,15 @@ func (r *Renderer) RenderString(source string) string {
 
 // Render converts a parsed Document AST into an HTML string.
 func (r *Renderer) Render(doc *Document) string {
-	return renderNode(r, doc.Root)
+	if doc == nil || doc.Root == nil {
+		return ""
+	}
+	var b strings.Builder
+	if len(doc.Source) > 0 {
+		b.Grow(len(doc.Source) + len(doc.Source)/4)
+	}
+	renderNodeInto(r, &b, doc.Root)
+	return b.String()
 }
 
 // RenderString is a package-level convenience that parses and renders

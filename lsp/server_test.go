@@ -53,6 +53,10 @@ func TestServerDidOpenPublishesDiagnostics(t *testing.T) {
 	if respErr != nil {
 		t.Fatalf("unexpected response error: %+v", respErr)
 	}
+	// didOpen parses asynchronously so the diagnostic notification is
+	// published from a goroutine. Wait for all in-flight parses to drain
+	// before asserting on the output buffer.
+	s.parseWG.Wait()
 	if !strings.Contains(out.String(), "textDocument/publishDiagnostics") || !strings.Contains(out.String(), "MD034") {
 		t.Fatalf("expected diagnostic notification, got %q", out.String())
 	}
@@ -76,6 +80,67 @@ func TestServerFormattingAndPreview(t *testing.T) {
 	}
 	if !strings.Contains(preview.HTML, `data-mdpp-source-start`) {
 		t.Fatalf("expected source-positioned preview HTML, got %q", preview.HTML)
+	}
+}
+
+func TestServerPreviewHighlightsCodeFences(t *testing.T) {
+	s := NewServer()
+	s.store.Open(TextDocumentItem{
+		URI:     "file:///doc.md",
+		Version: 1,
+		Text:    "```go\npackage main\n\nfunc main() {}\n```\n",
+	})
+
+	preview, err := s.renderPreview(RenderPreviewParams{TextDocument: TextDocumentIdentifier{URI: "file:///doc.md"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(preview.HTML, `<code class="language-go">`) {
+		t.Fatalf("expected language class in preview HTML, got %q", preview.HTML)
+	}
+	if !strings.Contains(preview.HTML, `<span class="hl-keyword">package</span>`) ||
+		!strings.Contains(preview.HTML, `<span class="hl-function">main</span>`) {
+		t.Fatalf("expected gotreesitter-highlighted code fence, got %q", preview.HTML)
+	}
+}
+
+func TestServerPreviewRendersLargeSegmentedDocument(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("# Title\n\n")
+	for i := 0; i < 14; i++ {
+		src.WriteString("## Section\n\n")
+		src.WriteString(strings.Repeat("**gotreesitter** keeps [parsing](https://example.com) in Go. ", 5))
+		src.WriteString("\n\n")
+	}
+	src.WriteString("```go\npackage main\nfunc main() {}\n```\n\n")
+	src.WriteString("## Tables\n\n")
+	src.WriteString("| Command | Question |\n")
+	src.WriteString("|---|---|\n")
+	src.WriteString("| `canopy refs` | *Where is it used?* |\n")
+
+	s := NewServer()
+	s.store.Open(TextDocumentItem{
+		URI:     "file:///doc.md",
+		Version: 1,
+		Text:    src.String(),
+	})
+
+	preview, err := s.renderPreview(RenderPreviewParams{TextDocument: TextDocumentIdentifier{URI: "file:///doc.md"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`<h2 id="tables"`,
+		`<div class="mdpp-table"`,
+		`<code>canopy refs</code>`,
+		`<span class="hl-keyword">package</span>`,
+	} {
+		if !strings.Contains(preview.HTML, want) {
+			t.Fatalf("expected preview HTML to contain %q, got %q", want, preview.HTML)
+		}
+	}
+	if strings.Contains(preview.HTML, "<p>## Tables</p>") || strings.Contains(preview.HTML, "| Command | Question |") {
+		t.Fatalf("preview leaked raw markdown blocks: %q", preview.HTML)
 	}
 }
 

@@ -81,6 +81,9 @@ func RenderPDF(doc *Document, opts PDFOptions) ([]byte, error) {
 	); err != nil {
 		return nil, fmt.Errorf("pdf: print: %w", err)
 	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("pdf: print: empty output")
+	}
 	return out, nil
 }
 

@@ -97,7 +97,7 @@ func (s *Server) foldingRanges(params FoldingRangeParams) []FoldingRange {
 	if !ok {
 		return nil
 	}
-	doc, _, index, _ := open.Snapshot()
+	doc, _, index, _ := open.SnapshotReady()
 	var out []FoldingRange
 	addNodeFold := func(n *mdpp.Node, kind string) {
 		if fr, ok := foldingRangeForNode(index, n, kind); ok {
@@ -132,7 +132,7 @@ func (s *Server) documentSymbols(params DocumentSymbolParams) []DocumentSymbol {
 	if !ok {
 		return nil
 	}
-	doc, _, index, _ := open.Snapshot()
+	doc, _, index, _ := open.SnapshotReady()
 	if doc == nil || doc.Root == nil {
 		return nil
 	}
@@ -299,7 +299,7 @@ func addFlatSymbol(out *[]DocumentSymbol, index *LineIndex, n *mdpp.Node, name s
 }
 
 func documentPositionContext(open *OpenDocument, pos Position) (*mdpp.Document, []byte, *LineIndex, int32, int, []*mdpp.Node, error) {
-	doc, source, index, version := open.Snapshot()
+	doc, source, index, version := open.SnapshotReady()
 	offset, ok := index.PositionToOffset(pos)
 	if !ok {
 		return nil, nil, nil, 0, 0, nil, errors.New("position is outside the document")

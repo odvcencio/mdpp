@@ -30,7 +30,7 @@ func (s *Server) semanticTokensFull(params SemanticTokensParams) (*SemanticToken
 	if !ok {
 		return &SemanticTokens{}, nil
 	}
-	doc, source, index, _ := open.Snapshot()
+	doc, source, index, _ := open.SnapshotReady()
 	return &SemanticTokens{Data: encodeSemanticTokens(collectSemanticTokens(doc, source, index, nil), index)}, nil
 }
 
@@ -39,7 +39,7 @@ func (s *Server) semanticTokensRange(params SemanticTokensRangeParams) (*Semanti
 	if !ok {
 		return &SemanticTokens{}, nil
 	}
-	doc, source, index, _ := open.Snapshot()
+	doc, source, index, _ := open.SnapshotReady()
 	start, ok := index.PositionToOffset(params.Range.Start)
 	if !ok {
 		start = 0

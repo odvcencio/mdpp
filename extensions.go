@@ -427,6 +427,16 @@ func processFootnotes(root *Node) []*Node {
 			return true
 		}
 		for i, child := range n.Children {
+			if child.Type == NodeFootnoteRef {
+				id := child.Attrs["id"]
+				if id != "" {
+					if _, seen := seenRefs[id]; !seen {
+						refOrder = append(refOrder, id)
+						seenRefs[id] = struct{}{}
+					}
+				}
+				continue
+			}
 			if child.Type != NodeLink {
 				continue
 			}

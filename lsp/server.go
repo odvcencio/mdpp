@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/odvcencio/mdpp"
 )
@@ -14,6 +15,16 @@ import (
 type Server struct {
 	store    *DocumentStore
 	shutdown bool
+
+	// writer is the JSON-RPC output stream set once in Serve (and lazily in
+	// dispatch for tests). Async parse goroutines publish notifications via
+	// this writer under writerMu.
+	writerMu sync.Mutex
+	writer   io.Writer
+
+	// parseWG tracks in-flight async parses so Serve can drain them before
+	// returning.
+	parseWG sync.WaitGroup
 }
 
 type incomingMessage struct {
@@ -32,6 +43,12 @@ func Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 }
 
 func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
+	s.setWriter(w)
+	// Drain any in-flight async parses before returning so callers (tests,
+	// hosts that pipe a finite stream through Serve) see the notifications
+	// published on parse completion.
+	defer s.parseWG.Wait()
+
 	reader := bufio.NewReader(r)
 	for {
 		select {
@@ -56,6 +73,23 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	}
 }
 
+func (s *Server) setWriter(w io.Writer) {
+	s.writerMu.Lock()
+	s.writer = w
+	s.writerMu.Unlock()
+}
+
+// writeFramed writes a framed notification/response under the writer mutex so
+// async goroutines don't interleave bytes with the dispatch loop.
+func (s *Server) writeFramed(payload any) error {
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
+	if s.writer == nil {
+		return nil
+	}
+	return writeFramedMessage(s.writer, payload)
+}
+
 func (s *Server) handleBody(w io.Writer, body []byte) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -63,12 +97,21 @@ func (s *Server) handleBody(w io.Writer, body []byte) (err error) {
 		}
 	}()
 
+	// Make sure the writer is registered so the writeFramed path serializes
+	// main-loop writes with goroutine writes. Tests that drive handleBody
+	// directly enter through here too.
+	s.writerMu.Lock()
+	if s.writer == nil {
+		s.writer = w
+	}
+	s.writerMu.Unlock()
+
 	var msg incomingMessage
 	if err := json.Unmarshal(body, &msg); err != nil {
-		return writeFramedMessage(w, errorResponse(nil, errorCodeParseError, err.Error()))
+		return s.writeFramed(errorResponse(nil, errorCodeParseError, err.Error()))
 	}
 	if msg.Method == "" {
-		return writeFramedMessage(w, errorResponse(msg.ID, errorCodeInvalidRequest, "missing method"))
+		return s.writeFramed(errorResponse(msg.ID, errorCodeInvalidRequest, "missing method"))
 	}
 
 	hasID := len(msg.ID) > 0
@@ -80,12 +123,20 @@ func (s *Server) handleBody(w io.Writer, body []byte) (err error) {
 		return nil
 	}
 	if respErr != nil {
-		return writeFramedMessage(w, errorResponse(msg.ID, respErr.Code, respErr.Message))
+		return s.writeFramed(errorResponse(msg.ID, respErr.Code, respErr.Message))
 	}
-	return writeFramedMessage(w, response(msg.ID, result))
+	return s.writeFramed(response(msg.ID, result))
 }
 
 func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError, error) {
+	// Make sure async publishers have a writer to write to. Serve sets this
+	// up front; tests that exercise dispatch() directly take this path.
+	s.writerMu.Lock()
+	if s.writer == nil {
+		s.writer = w
+	}
+	s.writerMu.Unlock()
+
 	switch msg.Method {
 	case "initialize":
 		return s.handleInitialize(), nil, nil
@@ -101,8 +152,12 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 		if err != nil {
 			return nil, rpcParamError(err), nil
 		}
-		doc := s.store.Open(params.TextDocument)
-		return nil, nil, s.publishDiagnostics(w, doc)
+		s.parseWG.Add(1)
+		s.store.OpenAsync(params.TextDocument, func(open *OpenDocument) {
+			defer s.parseWG.Done()
+			_ = s.asyncPublishDiagnostics(open)
+		})
+		return nil, nil, nil
 	case "textDocument/didChange":
 		params, err := decodeParams[DidChangeTextDocumentParams](msg.Params)
 		if err != nil {
@@ -136,7 +191,7 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 			return nil, rpcParamError(err), nil
 		}
 		s.store.Close(params.TextDocument.URI)
-		return nil, nil, writeFramedMessage(w, notification("textDocument/publishDiagnostics", PublishDiagnosticsParams{URI: params.TextDocument.URI}))
+		return nil, nil, s.writeFramed(notification("textDocument/publishDiagnostics", PublishDiagnosticsParams{URI: params.TextDocument.URI, Diagnostics: []Diagnostic{}}))
 	case "textDocument/hover":
 		params, err := decodeParams[HoverParams](msg.Params)
 		if err != nil {
@@ -306,7 +361,22 @@ func (s *Server) publishDiagnostics(w io.Writer, open *OpenDocument) error {
 		return nil
 	}
 	doc, _, index, version := open.Snapshot()
-	return writeFramedMessage(w, notification("textDocument/publishDiagnostics", PublishDiagnosticsParams{
+	return s.writeFramed(notification("textDocument/publishDiagnostics", PublishDiagnosticsParams{
+		URI:         open.URI,
+		Version:     &version,
+		Diagnostics: documentDiagnostics(open.URI, doc, index),
+	}))
+}
+
+// asyncPublishDiagnostics publishes diagnostics through the server-owned
+// writer, serialized with the main dispatch loop via writerMu. Safe to call
+// from goroutines.
+func (s *Server) asyncPublishDiagnostics(open *OpenDocument) error {
+	if open == nil {
+		return nil
+	}
+	doc, _, index, version := open.Snapshot()
+	return s.writeFramed(notification("textDocument/publishDiagnostics", PublishDiagnosticsParams{
 		URI:         open.URI,
 		Version:     &version,
 		Diagnostics: documentDiagnostics(open.URI, doc, index),

@@ -1,6 +1,7 @@
 package mdpp
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -243,6 +244,34 @@ func TestRenderTableParsesInlineCellMarkdown(t *testing.T) {
 	assertContains(t, out, "<sup>2</sup>")
 	assertNotContains(t, out, "**Bold**")
 	assertNotContains(t, out, "[docs](https://example.com)")
+}
+
+func TestRenderLargeSegmentedDocumentKeepsLateTablesAndHeadings(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("# Title\n\n[[toc]]\n\n")
+	for i := 0; i < 14; i++ {
+		fmt.Fprintf(&src, "## Section %02d\n\n", i)
+		src.WriteString(strings.Repeat("**gotreesitter** makes [grammars](https://example.com) available as *Go values* inside prose. ", 5))
+		src.WriteString("\n\n")
+	}
+	src.WriteString("## What we build on top\n\n")
+	src.WriteString("### Orchard: version control and code intelligence\n\n")
+	src.WriteString("**[canopy](https://github.com/odvcencio/canopy)** (*formerly `gts`*) answers structural questions:\n\n")
+	src.WriteString("| Command | Question it answers |\n")
+	src.WriteString("|---|---|\n")
+	src.WriteString("| `canopy callgraph` | *Where does this function get called from?* |\n")
+	src.WriteString("| `canopy impact` | *What's the blast radius if I change this?* |\n\n")
+	src.WriteString("### Languages built on grammargen\n\n")
+	src.WriteString("| Project | Extension | What it compiles to |\n")
+	src.WriteString("|---|---|---|\n")
+	src.WriteString("| **[mdpp](https://github.com/odvcencio/mdpp)** | `.mdpp` | Markdown++ with a real grammar |\n")
+
+	out := NewRenderer(WithHeadingIDs(true)).RenderString(src.String())
+	assertContains(t, out, `<h3 id="languages-built-on-grammargen">Languages built on grammargen</h3>`)
+	assertContains(t, out, `<div class="mdpp-table">`)
+	assertContains(t, out, `<code>canopy callgraph</code>`)
+	assertNotContains(t, out, "<p>### Languages built on grammargen</p>")
+	assertNotContains(t, out, "| Command | Question it answers |")
 }
 
 func TestRenderContainerDirectives(t *testing.T) {

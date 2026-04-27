@@ -86,7 +86,106 @@ func MustParse(source []byte) *Document {
 	return doc
 }
 
+// ParseWithTree parses source and also returns the underlying tree-sitter
+// Tree if the tree-sitter path was used. The returned *Tree is non-nil only
+// when the primary tree-sitter path (not a fallback) produced the document.
+// Callers that receive a non-nil Tree must eventually call tree.Release()
+// (or feed it back into ParseIncremental, which takes ownership).
+func ParseWithTree(source []byte) (doc *Document, tree *gotreesitter.Tree, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			src := normalizeLineEndings(append([]byte(nil), source...))
+			root := &Node{
+				Type:     NodeDocument,
+				Range:    sourceRange(src, 0, len(src)),
+				Children: []*Node{textNodeRange(string(src), sourceRange(src, 0, len(src)))},
+			}
+			doc = &Document{
+				Root:   root,
+				Source: src,
+				diagnostics: []Diagnostic{{
+					Code:     "MDPP-PARSE-000",
+					Severity: SeverityError,
+					Message:  "parser recovered from panic",
+					Range:    sourceRange(src, 0, len(src)),
+				}},
+			}
+			tree = nil
+			err = nil
+		}
+	}()
+	doc, tree = parseDocumentRetainTree(source, nil)
+	return doc, tree, nil
+}
+
+// ParseIncremental re-parses source by applying edit to prevTree and running
+// the tree-sitter incremental parser. Callers must have produced prevTree
+// from a prior ParseWithTree (or prior ParseIncremental) call against the
+// pre-edit source. ParseIncremental takes ownership of prevTree and returns a
+// fresh *Tree that the caller must eventually Release.
+//
+// If the edit-applied source no longer satisfies the tree-sitter primary
+// path (e.g. it now matches a container/all-indented/deep-nested fallback)
+// this function falls back to a full parse and the returned Tree may be nil.
+func ParseIncremental(source []byte, prevTree *gotreesitter.Tree, edit gotreesitter.InputEdit) (doc *Document, tree *gotreesitter.Tree, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			src := normalizeLineEndings(append([]byte(nil), source...))
+			root := &Node{
+				Type:     NodeDocument,
+				Range:    sourceRange(src, 0, len(src)),
+				Children: []*Node{textNodeRange(string(src), sourceRange(src, 0, len(src)))},
+			}
+			doc = &Document{
+				Root:   root,
+				Source: src,
+				diagnostics: []Diagnostic{{
+					Code:     "MDPP-PARSE-000",
+					Severity: SeverityError,
+					Message:  "parser recovered from panic",
+					Range:    sourceRange(src, 0, len(src)),
+				}},
+			}
+			if prevTree != nil {
+				prevTree.Release()
+			}
+			tree = nil
+			err = nil
+		}
+	}()
+	if prevTree != nil {
+		prevTree.Edit(edit)
+	}
+	doc, tree = parseDocumentRetainTree(source, prevTree)
+	return doc, tree, nil
+}
+
 func parseDocument(source []byte) *Document {
+	doc, tree := parseDocumentRetainTree(source, nil)
+	if tree != nil {
+		tree.Release()
+	}
+	return doc
+}
+
+func parseDocumentCtx(source []byte, ctx *parseCtx) *Document {
+	doc, tree := parseDocumentRetainTreeCtx(source, nil, ctx)
+	if tree != nil {
+		tree.Release()
+	}
+	return doc
+}
+
+// parseDocumentRetainTree parses source and, when the primary tree-sitter
+// path is used, returns the resulting *Tree for callers that want to retain
+// it for incremental reparses. prevTree (if non-nil) is fed to
+// ParseIncremental; the caller must have already applied Tree.Edit to it.
+// parseDocumentRetainTree takes ownership of prevTree.
+func parseDocumentRetainTree(source []byte, prevTree *gotreesitter.Tree) (*Document, *gotreesitter.Tree) {
+	return parseDocumentRetainTreeCtx(source, prevTree, nil)
+}
+
+func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx *parseCtx) (*Document, *gotreesitter.Tree) {
 	source = normalizeLineEndings(source)
 	source = lowerMarkdownPlusSource(source)
 	// tree-sitter markdown requires a trailing newline for correct parsing.
@@ -94,8 +193,26 @@ func parseDocument(source []byte) *Document {
 		source = append(source, '\n')
 	}
 
-	if doc := parseContainerDocument(source); doc != nil {
-		return doc
+	releasePrev := func() {
+		if prevTree != nil {
+			prevTree.Release()
+			prevTree = nil
+		}
+	}
+
+	// Top-level-only: seed the seen set so we can prune stale entries at
+	// the end of the root parse without clobbering inner recursive parses.
+	topLevel := ctx != nil && ctx.seen == nil
+	if topLevel {
+		ctx.seen = make(map[cacheKey]struct{})
+	}
+
+	if doc := parseContainerDocumentCtx(source, ctx); doc != nil {
+		releasePrev()
+		if topLevel && ctx != nil {
+			ctx.cache.pruneNotIn(ctx.seen)
+		}
+		return doc, nil
 	}
 
 	// Pure all-indented documents are mis-parsed by tree-sitter-markdown
@@ -103,33 +220,72 @@ func parseDocument(source []byte) *Document {
 	// a synthetic NodeCodeBlock when every non-blank line in the source is
 	// indented 4+ spaces or a leading tab.
 	if doc := parseAllIndentedDocument(source); doc != nil {
-		return doc
+		releasePrev()
+		if topLevel && ctx != nil {
+			ctx.cache.pruneNotIn(ctx.seen)
+		}
+		return doc, nil
 	}
 
 	// tree-sitter-markdown caps list nesting at 4 levels and emits an ERROR
 	// wrapping the whole document beyond that. Detect pure-list documents
 	// with deeper nesting and reconstruct the tree from indent levels.
 	if doc := parseDeepNestedListDocument(source); doc != nil {
-		return doc
+		releasePrev()
+		if topLevel && ctx != nil {
+			ctx.cache.pruneNotIn(ctx.seen)
+		}
+		return doc, nil
 	}
 	if doc := parseSimpleBlockquoteDocument(source); doc != nil {
-		return doc
+		releasePrev()
+		if topLevel && ctx != nil {
+			ctx.cache.pruneNotIn(ctx.seen)
+		}
+		return doc, nil
+	}
+	if prevTree == nil {
+		if doc := parseSegmentedDocumentCtx(source, ctx); doc != nil {
+			releasePrev()
+			if topLevel && ctx != nil {
+				ctx.cache.pruneNotIn(ctx.seen)
+			}
+			return doc, nil
+		}
 	}
 	parseSource, headingRepairs := protectSlowATXHeadingPunctuation(source)
 
 	lang := blockLang()
 	if lang == nil {
-		return &Document{Root: &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}, Source: source}
+		releasePrev()
+		return &Document{Root: &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}, Source: source}, nil
 	}
 
-	tree, err := parsePooled(lang, mdEntry, parseSource)
-	if err != nil || tree == nil {
-		return &Document{Root: &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}, Source: source}
+	var tree *gotreesitter.Tree
+	var err error
+	if prevTree != nil {
+		tree, err = parseIncrementalFromTree(lang, mdEntry, parseSource, prevTree)
+		if err != nil || tree == nil {
+			// Incremental parse failed; fall back to full parse.
+			releasePrev()
+			tree, err = parsePooled(lang, mdEntry, parseSource)
+		} else if tree != prevTree {
+			// prevTree was consumed and a new tree was produced; release the old.
+			prevTree.Release()
+			prevTree = nil
+		} else {
+			// Parser returned the prevTree unchanged; don't double-release.
+			prevTree = nil
+		}
+	} else {
+		tree, err = parsePooled(lang, mdEntry, parseSource)
 	}
-	defer tree.Release()
+	if err != nil || tree == nil {
+		return &Document{Root: &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}, Source: source}, nil
+	}
 
 	bt := gotreesitter.Bind(tree)
-	root := convertBlock(bt, bt.RootNode(), source)
+	root := convertBlockCtx(bt, bt.RootNode(), source, ctx)
 	if root == nil {
 		root = &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}
 	}
@@ -138,7 +294,10 @@ func parseDocument(source []byte) *Document {
 	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode())
 	doc.extractFrontmatter()
 	postProcess(doc)
-	return doc
+	if topLevel && ctx != nil {
+		ctx.cache.pruneNotIn(ctx.seen)
+	}
+	return doc, tree
 }
 
 // collectLinkRefDefs walks the tree-sitter AST gathering every
@@ -295,6 +454,452 @@ func stripBlockquoteMarker(line string) (string, bool) {
 	return content, true
 }
 
+const segmentedDocumentMinBytes = 2048
+
+type blockChunk struct {
+	start int
+	end   int
+}
+
+func parseSegmentedDocumentCtx(source []byte, ctx *parseCtx) *Document {
+	chunks := topLevelHeadingChunks(source)
+	if len(chunks) < 2 {
+		return nil
+	}
+
+	children := make([]*Node, 0, len(chunks)*2)
+	var diagnostics []Diagnostic
+	linkRefs := make(map[string]linkRefDef)
+	for _, chunk := range chunks {
+		children = appendParsedSegmentCtx(children, &diagnostics, linkRefs, source, chunk.start, chunk.end, ctx)
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	doc := &Document{
+		Root:        &Node{Type: NodeDocument, Children: children, Range: sourceRange(source, 0, len(source))},
+		Source:      source,
+		diagnostics: diagnostics,
+		linkRefDefs: linkRefs,
+	}
+	doc.extractFrontmatter()
+	postProcess(doc)
+	return doc
+}
+
+func topLevelHeadingChunks(source []byte) []blockChunk {
+	if len(source) < segmentedDocumentMinBytes {
+		return nil
+	}
+	lines := sourceLines(source)
+	if len(lines) == 0 {
+		return nil
+	}
+
+	starts := make([]int, 0, 8)
+	inFence := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line.text)
+		if isMarkdownFenceLine(trimmed) {
+			inFence = !inFence
+			continue
+		}
+		if inFence || !isTopLevelATXHeadingLine(line.text) {
+			continue
+		}
+		starts = append(starts, line.start)
+	}
+	if len(starts) < 3 {
+		return nil
+	}
+	if starts[0] != 0 {
+		starts = append([]int{0}, starts...)
+	}
+	chunks := make([]blockChunk, 0, len(starts))
+	for i, start := range starts {
+		end := len(source)
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		if strings.TrimSpace(string(source[start:end])) == "" {
+			continue
+		}
+		chunks = append(chunks, blockChunk{start: start, end: end})
+	}
+	if len(chunks) < 2 {
+		return nil
+	}
+	return chunks
+}
+
+func isTopLevelATXHeadingLine(line string) bool {
+	if line == "" || line[0] != '#' {
+		return false
+	}
+	return isATXHeadingLine([]byte(line))
+}
+
+func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRefs map[string]linkRefDef, source []byte, start int, end int, ctx *parseCtx) []*Node {
+	chunk := source[start:end]
+	if strings.TrimSpace(string(chunk)) == "" {
+		return children
+	}
+
+	if ctx != nil && len(chunk) > 0 {
+		key := hashContent(roleChunk, chunk)
+		ctx.recordSeen(key)
+		if e, ok := ctx.cache.get(key); ok {
+			ctx.hits++
+			for _, child := range e.children {
+				children = append(children, cloneAndShift(child, start-e.baseStart, source))
+			}
+			return children
+		}
+		ctx.misses++
+	}
+
+	doc, ok := parseFastBlockChunk(chunk)
+	if !ok {
+		doc = parseDocumentCtx(chunk, ctx)
+	}
+	if doc == nil || doc.Root == nil {
+		return children
+	}
+	if len(doc.diagnostics) > 0 {
+		*diagnostics = append(*diagnostics, bodyDocDiagnostics(doc, source, start)...)
+	}
+	for k, v := range doc.linkRefDefs {
+		linkRefs[k] = v
+	}
+
+	var cachedChildren []*Node
+	if ctx != nil {
+		cachedChildren = make([]*Node, 0, len(doc.Root.Children))
+	}
+	for _, child := range doc.Root.Children {
+		shiftNodeRanges(child, source, start)
+		children = append(children, child)
+		if ctx != nil {
+			cachedChildren = append(cachedChildren, cloneAndShift(child, -start, nil))
+		}
+	}
+	if ctx != nil {
+		key := hashContent(roleChunk, chunk)
+		ctx.cache.put(key, &cacheEntry{children: cachedChildren, baseStart: 0})
+	}
+	return children
+}
+
+func parseFastBlockChunk(source []byte) (*Document, bool) {
+	if len(source) == 0 || bytes.HasPrefix(source, []byte("---\n")) || bytes.Contains(source, []byte(":::")) {
+		return nil, false
+	}
+	lines := sourceLines(source)
+	children := make([]*Node, 0, len(lines)/2)
+	for i := 0; i < len(lines); {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line.text)
+		if trimmed == "" {
+			i++
+			continue
+		}
+		if isATXHeadingLine([]byte(line.text)) {
+			heading := fastHeadingNode(source, line)
+			children = append(children, heading)
+			i++
+			continue
+		}
+		if isMarkdownFenceLine(trimmed) {
+			node, next, ok := fastFenceNode(source, lines, i)
+			if !ok {
+				return nil, false
+			}
+			children = append(children, node)
+			i = next
+			continue
+		}
+		if strings.HasPrefix(strings.TrimLeft(line.text, " \t"), ">") {
+			start := i
+			for i < len(lines) && (strings.TrimSpace(lines[i].text) == "" || strings.HasPrefix(strings.TrimLeft(lines[i].text, " \t"), ">")) {
+				i++
+			}
+			doc := parseSimpleBlockquoteDocument(source[lines[start].start:lines[i-1].next])
+			if doc == nil || doc.Root == nil {
+				return nil, false
+			}
+			for _, child := range doc.Root.Children {
+				shiftNodeRanges(child, source, lines[start].start)
+				children = append(children, child)
+			}
+			continue
+		}
+		if i+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(strings.TrimSpace(lines[i+1].text)) {
+			table, next := fastTableNode(source, lines, i)
+			children = append(children, table)
+			i = next
+			continue
+		}
+		if isLooseListMarkerLine(trimmed) {
+			if line.text != trimmed {
+				return nil, false
+			}
+			if fastListLineHasTaskMarker(trimmed) {
+				return nil, false
+			}
+			list, next := fastListNode(source, lines, i)
+			children = append(children, list)
+			i = next
+			continue
+		}
+		if fn := fastFootnoteDefinitionNode(source, line); fn != nil {
+			children = append(children, fn)
+			i++
+			continue
+		}
+		if isLikelyReferenceDefinitionLine(trimmed) || strings.HasPrefix(trimmed, "<") {
+			return nil, false
+		}
+
+		para, next := fastParagraphNode(source, lines, i)
+		children = append(children, para)
+		i = next
+	}
+	doc := &Document{Root: &Node{Type: NodeDocument, Children: children, Range: sourceRange(source, 0, len(source))}, Source: source}
+	doc.extractFrontmatter()
+	postProcess(doc)
+	return doc, true
+}
+
+func fastHeadingNode(source []byte, line sourceLine) *Node {
+	textStart, textEnd, _ := atxHeadingTextRange([]byte(line.text))
+	heading := &Node{
+		Type:  NodeHeading,
+		Attrs: map[string]string{"level": levelStr(fastHeadingLevel(line.text))},
+		Range: sourceRange(source, line.start, line.end),
+	}
+	heading.Children = parseInlineAt(line.text[textStart:textEnd], source, line.start+textStart)
+	return heading
+}
+
+func fastHeadingLevel(line string) int {
+	level := 0
+	for level < len(line) && line[level] == '#' {
+		level++
+	}
+	if level == 0 || level > 6 {
+		return 1
+	}
+	return level
+}
+
+func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bool) {
+	open := strings.TrimSpace(lines[start].text)
+	fenceChar := open[0]
+	fenceLen := 0
+	for fenceLen < len(open) && open[fenceLen] == fenceChar {
+		fenceLen++
+	}
+	info := strings.TrimSpace(open[fenceLen:])
+	end := start + 1
+	for end < len(lines) {
+		trimmed := strings.TrimSpace(lines[end].text)
+		if len(trimmed) >= fenceLen && strings.Count(trimmed[:fenceLen], string(fenceChar)) == fenceLen {
+			break
+		}
+		end++
+	}
+	if end >= len(lines) {
+		return nil, start, false
+	}
+	var literal strings.Builder
+	for i := start + 1; i < end; i++ {
+		literal.WriteString(lines[i].text)
+		literal.WriteByte('\n')
+	}
+	cb := &Node{
+		Type:    NodeCodeBlock,
+		Literal: literal.String(),
+		Attrs:   map[string]string{"language": normalizedFenceLanguage(info)},
+		Range:   sourceRange(source, lines[start].start, lines[end].next),
+	}
+	return codeBlockToDiagram(cb), end + 1, true
+}
+
+func fastTableNode(source []byte, lines []sourceLine, start int) (*Node, int) {
+	end := start
+	for end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end].text), "|") {
+		end++
+	}
+	table := &Node{Type: NodeTable, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[end-1].end)}
+	aligns := fastTableAligns(lines[start+1].text)
+	if len(aligns) > 0 {
+		table.Attrs["align"] = strings.Join(aligns, ",")
+	}
+	for i := start; i < end; i++ {
+		if i == start+1 {
+			continue
+		}
+		row := &Node{Type: NodeTableRow, Range: sourceRange(source, lines[i].start, lines[i].end)}
+		cells := splitFastTableCells(lines[i].text)
+		for _, cell := range cells {
+			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start, lines[i].end)}
+			cell = strings.TrimSpace(cell)
+			if cell != "" {
+				c.Children = parseInlineAt(cell, source, -1)
+			}
+			row.Children = append(row.Children, c)
+		}
+		table.Children = append(table.Children, row)
+	}
+	return table, end
+}
+
+func fastTableAligns(line string) []string {
+	cells := splitFastTableCells(line)
+	aligns := make([]string, 0, len(cells))
+	for _, cell := range cells {
+		cell = strings.TrimSpace(cell)
+		left := strings.HasPrefix(cell, ":")
+		right := strings.HasSuffix(cell, ":")
+		switch {
+		case left && right:
+			aligns = append(aligns, "center")
+		case right:
+			aligns = append(aligns, "right")
+		case left:
+			aligns = append(aligns, "left")
+		default:
+			aligns = append(aligns, "")
+		}
+	}
+	return aligns
+}
+
+func splitFastTableCells(line string) []string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "|")
+	line = strings.TrimSuffix(line, "|")
+	return strings.Split(line, "|")
+}
+
+func fastListNode(source []byte, lines []sourceLine, start int) (*Node, int) {
+	ordered := fastOrderedListMarker(strings.TrimSpace(lines[start].text))
+	list := &Node{Type: NodeList, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[start].end)}
+	if ordered {
+		list.Attrs["ordered"] = "true"
+		if markerStart := fastOrderedListStart(strings.TrimSpace(lines[start].text)); markerStart > 1 {
+			list.Attrs["start"] = strconv.Itoa(markerStart)
+		}
+	}
+	i := start
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i].text)
+		if trimmed == "" {
+			break
+		}
+		itemText, ok := fastListItemText(trimmed, ordered)
+		if !ok {
+			break
+		}
+		item := &Node{Type: NodeListItem, Range: sourceRange(source, lines[i].start, lines[i].end)}
+		para := &Node{Type: NodeParagraph, Range: item.Range}
+		para.Children = parseInlineAt(itemText, source, -1)
+		item.Children = []*Node{para}
+		list.Children = append(list.Children, item)
+		list.Range.EndByte = lines[i].end
+		i++
+	}
+	return list, i
+}
+
+func fastOrderedListMarker(line string) bool {
+	return fastOrderedListStart(line) > 0
+}
+
+func fastOrderedListStart(line string) int {
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i > 0 && i+1 < len(line) && line[i] == '.' && line[i+1] == ' ' {
+		start, err := strconv.Atoi(line[:i])
+		if err == nil {
+			return start
+		}
+	}
+	return 0
+}
+
+func fastListItemText(line string, ordered bool) (string, bool) {
+	if ordered {
+		i := 0
+		for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+			i++
+		}
+		if i > 0 && i+1 < len(line) && line[i] == '.' && line[i+1] == ' ' {
+			return line[i+2:], true
+		}
+		return "", false
+	}
+	if len(line) >= 2 && (line[0] == '-' || line[0] == '*' || line[0] == '+') && line[1] == ' ' {
+		return line[2:], true
+	}
+	return "", false
+}
+
+func fastListLineHasTaskMarker(line string) bool {
+	item, ok := fastListItemText(line, fastOrderedListMarker(line))
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(item, "[x] ") || strings.HasPrefix(item, "[X] ") || strings.HasPrefix(item, "[ ] ")
+}
+
+func isLikelyReferenceDefinitionLine(line string) bool {
+	if !strings.HasPrefix(line, "[") || strings.HasPrefix(line, "[^") {
+		return false
+	}
+	close := strings.Index(line, "]:")
+	return close > 1
+}
+
+func fastFootnoteDefinitionNode(source []byte, line sourceLine) *Node {
+	match := footnoteDefinitionRawRe.FindStringSubmatch(line.text)
+	if match == nil {
+		return nil
+	}
+	fn := &Node{Type: NodeFootnoteDef, Attrs: map[string]string{"id": match[1]}, Range: sourceRange(source, line.start, line.end)}
+	if strings.TrimSpace(match[2]) != "" {
+		fn.Children = parseFootnoteDefinitionInline(match[2], source)
+	}
+	return fn
+}
+
+func fastParagraphNode(source []byte, lines []sourceLine, start int) (*Node, int) {
+	end := start
+	var text strings.Builder
+	for end < len(lines) {
+		trimmed := strings.TrimSpace(lines[end].text)
+		if trimmed == "" || isATXHeadingLine([]byte(lines[end].text)) || isMarkdownFenceLine(trimmed) ||
+			strings.HasPrefix(strings.TrimLeft(lines[end].text, " \t"), ">") ||
+			isLooseListMarkerLine(trimmed) || fastFootnoteDefinitionNode(source, lines[end]) != nil ||
+			(end+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(strings.TrimSpace(lines[end+1].text))) {
+			break
+		}
+		if text.Len() > 0 {
+			text.WriteByte('\n')
+		}
+		text.WriteString(lines[end].text)
+		end++
+	}
+	if end == start {
+		end++
+	}
+	para := &Node{Type: NodeParagraph, Range: sourceRange(source, lines[start].start, lines[end-1].end)}
+	para.Children = parseInlineAt(text.String(), source, lines[start].start)
+	return para, end
+}
+
 type sourceLine struct {
 	start int
 	end   int
@@ -303,11 +908,15 @@ type sourceLine struct {
 }
 
 func parseContainerDocument(source []byte) *Document {
+	return parseContainerDocumentCtx(source, nil)
+}
+
+func parseContainerDocumentCtx(source []byte, ctx *parseCtx) *Document {
 	if !bytes.Contains(source, []byte(":::")) {
 		return nil
 	}
 	lines := sourceLines(source)
-	children, diagnostics, found := parseContainerChildren(source, lines, 0, len(lines), 0, len(source))
+	children, diagnostics, found := parseContainerChildrenCtx(source, lines, 0, len(lines), 0, len(source), ctx)
 	if !found {
 		return nil
 	}
@@ -341,6 +950,10 @@ func sourceLines(source []byte) []sourceLine {
 }
 
 func parseContainerChildren(source []byte, lines []sourceLine, from int, to int, chunkStart int, chunkEnd int) ([]*Node, []Diagnostic, bool) {
+	return parseContainerChildrenCtx(source, lines, from, to, chunkStart, chunkEnd, nil)
+}
+
+func parseContainerChildrenCtx(source []byte, lines []sourceLine, from int, to int, chunkStart int, chunkEnd int, ctx *parseCtx) ([]*Node, []Diagnostic, bool) {
 	var children []*Node
 	var diagnostics []Diagnostic
 	found := false
@@ -362,7 +975,7 @@ func parseContainerChildren(source []byte, lines []sourceLine, from int, to int,
 			continue
 		}
 		found = true
-		children = appendParsedChunk(children, source[cursor:line.start], source, cursor)
+		children = appendParsedChunkCtx(children, source[cursor:line.start], source, cursor, ctx)
 
 		closeIndex := -1
 		depth := 1
@@ -407,12 +1020,14 @@ func parseContainerChildren(source []byte, lines []sourceLine, from int, to int,
 			})
 		}
 
-		bodyDoc := parseDocument(source[bodyStart:bodyEnd])
+		bodyDoc, bodyShifted := parseBodyChunkCtx(source, bodyStart, bodyEnd, ctx)
 		var bodyChildren []*Node
 		if bodyDoc != nil && bodyDoc.Root != nil {
 			bodyChildren = append(bodyChildren, bodyDoc.Root.Children...)
-			for _, child := range bodyChildren {
-				shiftNodeRanges(child, source, bodyStart)
+			if !bodyShifted {
+				for _, child := range bodyChildren {
+					shiftNodeRanges(child, source, bodyStart)
+				}
 			}
 		}
 
@@ -428,12 +1043,46 @@ func parseContainerChildren(source []byte, lines []sourceLine, from int, to int,
 		i = nextLine - 1
 	}
 
-	children = appendParsedChunk(children, source[cursor:chunkEnd], source, cursor)
+	children = appendParsedChunkCtx(children, source[cursor:chunkEnd], source, cursor, ctx)
 	return children, diagnostics, found
 }
 
 func appendParsedChunk(children []*Node, chunk []byte, source []byte, offset int) []*Node {
+	return appendParsedChunkCtx(children, chunk, source, offset, nil)
+}
+
+// appendParsedChunkCtx parses a container-path source chunk, shifts its node
+// ranges to be relative to the outer source, and appends the resulting block
+// nodes. When ctx is non-nil, the chunk's parsed children are cached (by
+// chunk content hash) so identical chunks on a subsequent incremental parse
+// reuse the cached subtrees instead of re-parsing.
+func appendParsedChunkCtx(children []*Node, chunk []byte, source []byte, offset int, ctx *parseCtx) []*Node {
 	if strings.TrimSpace(string(chunk)) == "" {
+		return children
+	}
+	if ctx != nil && len(chunk) > 0 {
+		key := hashContent(roleChunk, chunk)
+		ctx.recordSeen(key)
+		if e, ok := ctx.cache.get(key); ok {
+			ctx.hits++
+			for _, child := range e.children {
+				clone := cloneAndShift(child, offset-e.baseStart, source)
+				children = append(children, clone)
+			}
+			return children
+		}
+		ctx.misses++
+		doc := parseDocumentCtx(chunk, ctx)
+		if doc == nil || doc.Root == nil {
+			return children
+		}
+		cachedChildren := make([]*Node, 0, len(doc.Root.Children))
+		for _, child := range doc.Root.Children {
+			shiftNodeRanges(child, source, offset)
+			children = append(children, child)
+			cachedChildren = append(cachedChildren, cloneAndShift(child, -offset, nil))
+		}
+		ctx.cache.put(key, &cacheEntry{children: cachedChildren, baseStart: 0})
 		return children
 	}
 	doc := parseDocument(chunk)
@@ -445,6 +1094,41 @@ func appendParsedChunk(children []*Node, chunk []byte, source []byte, offset int
 		children = append(children, child)
 	}
 	return children
+}
+
+// parseBodyChunkCtx parses the body slice of a container directive. When
+// ctx is non-nil, the body is cached by content hash; cached returns have
+// already been shifted relative to the outer source so the caller must not
+// re-shift them.
+func parseBodyChunkCtx(source []byte, bodyStart, bodyEnd int, ctx *parseCtx) (*Document, bool) {
+	chunk := source[bodyStart:bodyEnd]
+	if ctx == nil {
+		return parseDocument(chunk), false
+	}
+	key := hashContent(roleBodyDoc, chunk)
+	ctx.recordSeen(key)
+	if e, ok := ctx.cache.get(key); ok {
+		ctx.hits++
+		root := &Node{Type: NodeDocument, Children: make([]*Node, 0, len(e.children))}
+		for _, child := range e.children {
+			root.Children = append(root.Children, cloneAndShift(child, bodyStart-e.baseStart, source))
+		}
+		return &Document{Root: root, Source: source}, true
+	}
+	ctx.misses++
+	doc := parseDocumentCtx(chunk, ctx)
+	if doc == nil || doc.Root == nil {
+		return doc, false
+	}
+	// Shift ranges to outer source, then stash slice-relative copies in
+	// the cache for later reuse.
+	cachedChildren := make([]*Node, 0, len(doc.Root.Children))
+	for _, child := range doc.Root.Children {
+		cachedChildren = append(cachedChildren, cloneAndShift(child, 0, nil))
+		shiftNodeRanges(child, source, bodyStart)
+	}
+	ctx.cache.put(key, &cacheEntry{children: cachedChildren, baseStart: 0})
+	return doc, true
 }
 
 func bodyDocDiagnostics(doc *Document, source []byte, offset int) []Diagnostic {
@@ -1067,6 +1751,14 @@ func repairProtectedHeadings(root *Node, repairs []headingTextRepair) {
 
 // convertBlock recursively converts a block-level tree-sitter node into an AST Node.
 func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byte) *Node {
+	return convertBlockCtx(bt, n, source, nil)
+}
+
+// convertBlockCtx is the cache-aware variant used by the Parser. When ctx is
+// non-nil, paragraph and heading subtrees are memoized by content hash so
+// unchanged blocks on a subsequent incremental reparse skip expensive inline
+// reparsing and node conversion.
+func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byte, ctx *parseCtx) *Node {
 	if n == nil {
 		return nil
 	}
@@ -1075,7 +1767,7 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 	switch typ {
 	case "document":
 		doc := newNodeFromTree(NodeDocument, n)
-		doc.Children = convertBlockChildren(bt, n, source)
+		doc.Children = convertBlockChildrenCtx(bt, n, source, ctx)
 		return doc
 
 	case "section":
@@ -1086,7 +1778,7 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 		if synth := synthesiseSectionContent(bt, n, source); synth != nil {
 			return synth
 		}
-		nodes := convertBlockChildren(bt, n, source)
+		nodes := convertBlockChildrenCtx(bt, n, source, ctx)
 		if len(nodes) == 1 {
 			return nodes[0]
 		}
@@ -1097,6 +1789,30 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 		return wrapper
 
 	case "atx_heading", "setext_heading":
+		// Cache heading subtrees by their full text content so an unchanged
+		// heading on an incremental reparse reuses the prior inline parse.
+		if ctx != nil {
+			rawText := bt.NodeText(n)
+			key := hashString(roleHeading, rawText)
+			ctx.recordSeen(key)
+			if e, ok := ctx.cache.get(key); ok {
+				ctx.hits++
+				newStart := int(n.StartByte())
+				return cloneAndShift(e.root, newStart-e.baseStart, source)
+			}
+			ctx.misses++
+			heading := newNodeFromTree(NodeHeading, n)
+			level := headingLevel(bt, n)
+			if heading.Attrs == nil {
+				heading.Attrs = make(map[string]string)
+			}
+			heading.Attrs["level"] = levelStr(level)
+			if text, start, ok := extractHeadingTextSpan(bt, n); ok && text != "" {
+				heading.Children = append(heading.Children, parseInlineAt(text, source, start)...)
+			}
+			ctx.cache.put(key, &cacheEntry{root: cloneForCache(heading, int(n.StartByte())), baseStart: int(n.StartByte())})
+			return heading
+		}
 		heading := newNodeFromTree(NodeHeading, n)
 		level := headingLevel(bt, n)
 		if heading.Attrs == nil {
@@ -1113,6 +1829,20 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 		if footnoteDefs := convertFootnoteDefinitionParagraph(nodeText, source); footnoteDefs != nil {
 			applyTreeRange(footnoteDefs, n)
 			return footnoteDefs
+		}
+
+		// Cache paragraph subtrees by their full text content. The expensive
+		// work here is parseInlineAt — a cached hit replaces a second
+		// tree-sitter inline parse with a pointer copy + range shift.
+		if ctx != nil {
+			key := hashString(roleParagraph, nodeText)
+			ctx.recordSeen(key)
+			if e, ok := ctx.cache.get(key); ok {
+				ctx.hits++
+				newStart := int(n.StartByte())
+				return cloneAndShift(e.root, newStart-e.baseStart, source)
+			}
+			ctx.misses++
 		}
 
 		para := newNodeFromTree(NodeParagraph, n)
@@ -1164,6 +1894,10 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 		}
 		// Split text nodes on newlines → insert NodeSoftBreak
 		para.Children = splitTextNewlines(para.Children)
+		if ctx != nil {
+			key := hashString(roleParagraph, nodeText)
+			ctx.cache.put(key, &cacheEntry{root: cloneForCache(para, int(nodeStart)), baseStart: int(nodeStart)})
+		}
 		return para
 
 	case "fenced_code_block", "indented_code_block":
@@ -1177,7 +1911,7 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 			if childType == "block_quote_marker" || childType == "block_continuation" {
 				continue
 			}
-			if converted := convertBlock(bt, child, source); converted != nil {
+			if converted := convertBlockCtx(bt, child, source, ctx); converted != nil {
 				bq.Children = append(bq.Children, converted)
 			}
 		}
@@ -1243,9 +1977,28 @@ func convertBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 		return nil
 
 	default:
+		if isBlockWrapperNodeType(typ) && n.ChildCount() > 0 {
+			nodes := convertBlockChildrenCtx(bt, n, source, ctx)
+			if len(nodes) == 1 {
+				return nodes[0]
+			}
+			if len(nodes) > 0 {
+				wrapper := newNodeFromTree(NodeDocument, n)
+				wrapper.Children = nodes
+				return wrapper
+			}
+		}
 		// Skip node types we don't map (block_continuation, markers, etc.)
 		return nil
 	}
+}
+
+func isBlockWrapperNodeType(typ string) bool {
+	switch typ {
+	case "_block_not_section":
+		return true
+	}
+	return strings.HasPrefix(typ, "_section") && strings.Contains(typ, "repeat")
 }
 
 func parseFootnoteDefinitionInline(text string, source []byte) []*Node {
@@ -1484,6 +2237,12 @@ func parseInline(text string, source []byte) []*Node {
 }
 
 func parseInlineAt(text string, source []byte, baseOffset int) []*Node {
+	if !needsInlineTreeParser(text) {
+		return splitTextNewlines([]*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))})
+	}
+	if nodes, ok := parseInlineSimpleAt(text, source, baseOffset); ok {
+		return splitTextNewlines(nodes)
+	}
 	if len(text) > maxInlineParseChunk {
 		chunks := splitInlineParseChunks(text, maxInlineParseChunk)
 		if len(chunks) > 1 {
@@ -1504,6 +2263,253 @@ func parseInlineAt(text string, source []byte, baseOffset int) []*Node {
 }
 
 const maxInlineParseChunk = 320
+
+func needsInlineTreeParser(text string) bool {
+	if text == "" {
+		return false
+	}
+	if strings.Contains(text, "  \n") || strings.Contains(text, "\\\n") {
+		return true
+	}
+	return strings.ContainsAny(text, "*_`[<\\~")
+}
+
+func parseInlineSimpleAt(text string, source []byte, baseOffset int) ([]*Node, bool) {
+	if strings.Contains(text, "  \n") || strings.Contains(text, "\\\n") {
+		return nil, false
+	}
+	var nodes []*Node
+	for i := 0; i < len(text); {
+		switch text[i] {
+		case '_', '<', '\\':
+			return nil, false
+		case '`':
+			end := strings.IndexByte(text[i+1:], '`')
+			if end < 0 {
+				appendTextRange(&nodes, text[i:i+1], inlineSpanRange(source, baseOffset, i, i+1))
+				i++
+				continue
+			}
+			end += i + 1
+			n := newNode(NodeCodeSpan)
+			n.Literal = text[i+1 : end]
+			n.Range = inlineSpanRange(source, baseOffset, i, end+1)
+			nodes = append(nodes, n)
+			i = end + 1
+		case '*':
+			if strings.HasPrefix(text[i:], "***") {
+				return nil, false
+			}
+			if strings.HasPrefix(text[i:], "**") {
+				end := strings.Index(text[i+2:], "**")
+				if end >= 0 {
+					end += i + 2
+					children, ok := parseInlineSimpleAt(text[i+2:end], source, addBaseOffset(baseOffset, i+2))
+					if !ok {
+						return nil, false
+					}
+					n := newNode(NodeStrong, children...)
+					n.Range = inlineSpanRange(source, baseOffset, i, end+2)
+					nodes = append(nodes, n)
+					i = end + 2
+					continue
+				}
+			}
+			end := findSingleStarClose(text, i+1)
+			if end < 0 {
+				appendTextRange(&nodes, text[i:i+1], inlineSpanRange(source, baseOffset, i, i+1))
+				i++
+				continue
+			}
+			if end == i+1 {
+				appendTextRange(&nodes, text[i:end+1], inlineSpanRange(source, baseOffset, i, end+1))
+				i = end + 1
+				continue
+			}
+			children, ok := parseInlineSimpleAt(text[i+1:end], source, addBaseOffset(baseOffset, i+1))
+			if !ok {
+				return nil, false
+			}
+			n := newNode(NodeEmphasis, children...)
+			n.Range = inlineSpanRange(source, baseOffset, i, end+1)
+			nodes = append(nodes, n)
+			i = end + 1
+		case '~':
+			double := strings.HasPrefix(text[i:], "~~")
+			delim := "~"
+			contentStart := i + 1
+			if double {
+				delim = "~~"
+				contentStart = i + 2
+			}
+			end := strings.Index(text[contentStart:], delim)
+			if end < 0 {
+				appendTextRange(&nodes, text[i:i+1], inlineSpanRange(source, baseOffset, i, i+1))
+				i++
+				continue
+			}
+			end += contentStart
+			if end == contentStart {
+				appendTextRange(&nodes, text[i:end+len(delim)], inlineSpanRange(source, baseOffset, i, end+len(delim)))
+				i = end + len(delim)
+				continue
+			}
+			if double {
+				children, ok := parseInlineSimpleAt(text[contentStart:end], source, addBaseOffset(baseOffset, contentStart))
+				if !ok {
+					return nil, false
+				}
+				n := newNode(NodeStrikethrough, children...)
+				n.Range = inlineSpanRange(source, baseOffset, i, end+len(delim))
+				nodes = append(nodes, n)
+			} else {
+				n := newNode(NodeSubscript)
+				n.Literal = text[contentStart:end]
+				n.Range = inlineSpanRange(source, baseOffset, i, end+len(delim))
+				nodes = append(nodes, n)
+			}
+			i = end + len(delim)
+		case '!':
+			if i+1 < len(text) && text[i+1] == '[' {
+				n, next, ok := parseSimpleImage(text, source, baseOffset, i)
+				if !ok {
+					return nil, false
+				}
+				if n != nil {
+					nodes = append(nodes, n)
+					i = next
+					continue
+				}
+			}
+			appendTextRange(&nodes, text[i:i+1], inlineSpanRange(source, baseOffset, i, i+1))
+			i++
+		case '[':
+			n, next, ok := parseSimpleLink(text, source, baseOffset, i)
+			if !ok {
+				return nil, false
+			}
+			if n != nil {
+				nodes = append(nodes, n)
+				i = next
+				continue
+			}
+			appendTextRange(&nodes, text[i:i+1], inlineSpanRange(source, baseOffset, i, i+1))
+			i++
+		default:
+			start := i
+			for i < len(text) && !isSimpleInlineSpecial(text[i]) {
+				i++
+			}
+			appendTextRange(&nodes, text[start:i], inlineSpanRange(source, baseOffset, start, i))
+		}
+	}
+	return nodes, true
+}
+
+func isSimpleInlineSpecial(b byte) bool {
+	switch b {
+	case '_', '<', '\\', '`', '*', '~', '!', '[':
+		return true
+	default:
+		return false
+	}
+}
+
+func findSingleStarClose(text string, start int) int {
+	for i := start; i < len(text); i++ {
+		if text[i] != '*' {
+			continue
+		}
+		if i > 0 && text[i-1] == '*' {
+			continue
+		}
+		if i+1 < len(text) && text[i+1] == '*' {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+func addBaseOffset(baseOffset int, delta int) int {
+	if baseOffset < 0 {
+		return -1
+	}
+	return baseOffset + delta
+}
+
+func parseSimpleLink(text string, source []byte, baseOffset int, start int) (*Node, int, bool) {
+	close := strings.IndexByte(text[start+1:], ']')
+	if close < 0 {
+		return nil, start, true
+	}
+	close += start + 1
+	label := text[start+1 : close]
+	labelChildren, ok := parseInlineSimpleAt(label, source, addBaseOffset(baseOffset, start+1))
+	if !ok {
+		return nil, 0, false
+	}
+	if close+1 < len(text) && text[close+1] == '(' {
+		destEnd := strings.IndexByte(text[close+2:], ')')
+		if destEnd < 0 {
+			return nil, start, true
+		}
+		destEnd += close + 2
+		href, title := parseSimpleLinkDestination(text[close+2 : destEnd])
+		link := newNode(NodeLink, labelChildren...)
+		link.Attrs = map[string]string{"href": href}
+		if title != "" {
+			link.Attrs["title"] = title
+		}
+		link.Range = inlineSpanRange(source, baseOffset, start, destEnd+1)
+		return link, destEnd + 1, true
+	}
+	if close+1 < len(text) && text[close+1] == '[' {
+		return nil, 0, false
+	}
+	link := newNode(NodeLink, labelChildren...)
+	link.Attrs = map[string]string{"raw": text[start : close+1]}
+	link.Range = inlineSpanRange(source, baseOffset, start, close+1)
+	return link, close + 1, true
+}
+
+func parseSimpleImage(text string, source []byte, baseOffset int, start int) (*Node, int, bool) {
+	close := strings.IndexByte(text[start+2:], ']')
+	if close < 0 {
+		return nil, start, true
+	}
+	close += start + 2
+	if close+1 >= len(text) || text[close+1] != '(' {
+		return nil, start, true
+	}
+	destEnd := strings.IndexByte(text[close+2:], ')')
+	if destEnd < 0 {
+		return nil, start, true
+	}
+	destEnd += close + 2
+	src, title := parseSimpleLinkDestination(text[close+2 : destEnd])
+	img := newNode(NodeImage)
+	img.Attrs = map[string]string{"alt": text[start+2 : close], "src": src}
+	if title != "" {
+		img.Attrs["title"] = title
+	}
+	img.Range = inlineSpanRange(source, baseOffset, start, destEnd+1)
+	return img, destEnd + 1, true
+}
+
+func parseSimpleLinkDestination(spec string) (string, string) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", ""
+	}
+	href := spec
+	title := ""
+	if idx := strings.IndexAny(spec, " \t"); idx >= 0 {
+		href = spec[:idx]
+		title = stripQuotes(strings.TrimSpace(spec[idx+1:]))
+	}
+	return href, title
+}
 
 func splitInlineParseChunks(text string, max int) []string {
 	if max < 80 || len(text) <= max {
@@ -1632,8 +2638,13 @@ func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recov
 }
 
 func convertBlockChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byte) []*Node {
+	return convertBlockChildrenCtx(bt, n, source, nil)
+}
+
+func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byte, ctx *parseCtx) []*Node {
 	var nodes []*Node
 	var loose strings.Builder
+	looseStart := 0
 	looseAttach := false
 	separatedByBlankLine := false
 
@@ -1641,13 +2652,14 @@ func convertBlockChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sour
 		if loose.Len() == 0 {
 			return
 		}
-		appendLooseBlockText(&nodes, loose.String(), looseAttach, source)
+		appendLooseBlockText(&nodes, loose.String(), looseAttach, source, looseStart, ctx)
 		loose.Reset()
+		looseStart = 0
 		looseAttach = false
 		separatedByBlankLine = false
 	}
 
-	appendLooseRaw := func(raw string) {
+	appendLooseRaw := func(raw string, start int) {
 		if raw == "" {
 			return
 		}
@@ -1660,6 +2672,7 @@ func convertBlockChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sour
 			return
 		}
 		if loose.Len() == 0 {
+			looseStart = start
 			looseAttach = canAttachLooseText(nodes, separatedByBlankLine)
 		}
 		loose.WriteString(raw)
@@ -1698,22 +2711,22 @@ func convertBlockChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sour
 			childEnd = nodeEnd
 		}
 		if childStart > cursor {
-			appendLooseRaw(string(source[cursor:childStart]))
+			appendLooseRaw(string(source[cursor:childStart]), cursor)
 		}
 
-		if converted := convertBlock(bt, child, source); converted != nil {
+		if converted := convertBlockCtx(bt, child, source, ctx); converted != nil {
 			flushLoose()
 			appendBlockNode(&nodes, converted)
 			separatedByBlankLine = false
 		} else if childEnd > childStart {
-			appendLooseRaw(string(source[childStart:childEnd]))
+			appendLooseRaw(string(source[childStart:childEnd]), childStart)
 		}
 		if childEnd > cursor {
 			cursor = childEnd
 		}
 	}
 	if cursor < nodeEnd {
-		appendLooseRaw(string(source[cursor:nodeEnd]))
+		appendLooseRaw(string(source[cursor:nodeEnd]), cursor)
 	}
 	flushLoose()
 
@@ -1738,7 +2751,10 @@ func canAttachLooseText(nodes []*Node, separatedByBlankLine bool) bool {
 	return nodes[len(nodes)-1].Type == NodeParagraph
 }
 
-func appendLooseBlockText(nodes *[]*Node, text string, attach bool, source []byte) {
+func appendLooseBlockText(nodes *[]*Node, text string, attach bool, source []byte, offset int, ctx *parseCtx) {
+	if !attach && appendRecoveredBlockText(nodes, text, source, offset, ctx) {
+		return
+	}
 	segments := looseParagraphSegments(text)
 	for i, segment := range segments {
 		trimmed := strings.TrimSpace(segment)
@@ -1759,6 +2775,100 @@ func appendLooseBlockText(nodes *[]*Node, text string, attach bool, source []byt
 		para.Children = append(para.Children, parseInline(trimmed, source)...)
 		para.Children = splitTextNewlines(para.Children)
 		*nodes = append(*nodes, para)
+	}
+}
+
+func appendRecoveredBlockText(nodes *[]*Node, text string, source []byte, offset int, ctx *parseCtx) bool {
+	if ctx != nil && ctx.suppressLooseRecovery {
+		return false
+	}
+	if !looksLikeStructuredBlockText(text) {
+		return false
+	}
+	recoverCtx := &parseCtx{suppressLooseRecovery: true}
+	doc := parseDocumentCtx([]byte(text), recoverCtx)
+	if doc == nil || doc.Root == nil || !recoveredBlockUseful(doc.Root.Children) {
+		return false
+	}
+	for _, child := range doc.Root.Children {
+		shiftNodeRanges(child, source, offset)
+		appendBlockNode(nodes, child)
+	}
+	return true
+}
+
+func looksLikeStructuredBlockText(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if isATXHeadingLine([]byte(line)) || isMarkdownFenceLine(trimmed) || tocDirectiveRe.MatchString(trimmed) {
+			return true
+		}
+		if strings.HasPrefix(trimmed, "|") && i+1 < len(lines) && isPipeTableDelimiterLine(strings.TrimSpace(lines[i+1])) {
+			return true
+		}
+		if isLooseListMarkerLine(trimmed) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPipeTableDelimiterLine(line string) bool {
+	if !strings.HasPrefix(line, "|") || !strings.Contains(line, "-") {
+		return false
+	}
+	for _, r := range line {
+		switch r {
+		case '|', ':', '-', ' ', '\t':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isLooseListMarkerLine(line string) bool {
+	if len(line) < 2 {
+		return false
+	}
+	if (line[0] == '-' || line[0] == '*' || line[0] == '+') && line[1] == ' ' {
+		return true
+	}
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	return i > 0 && i+1 < len(line) && line[i] == '.' && line[i+1] == ' '
+}
+
+func recoveredBlockUseful(children []*Node) bool {
+	for _, child := range children {
+		if isRecoveredStructuredBlock(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRecoveredStructuredBlock(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type {
+	case NodeHeading, NodeTable, NodeList, NodeCodeBlock, NodeDiagram, NodeBlockquote,
+		NodeAdmonition, NodeContainerDirective, NodeThematicBreak, NodeTableOfContents,
+		NodeDefinitionList, NodeAutoEmbed:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -13,9 +13,9 @@ import (
 
 func documentDiagnostics(uri DocumentURI, doc *mdpp.Document, index *LineIndex) []Diagnostic {
 	if doc == nil || index == nil {
-		return nil
+		return []Diagnostic{}
 	}
-	var out []Diagnostic
+	out := []Diagnostic{}
 	for _, d := range doc.Diagnostics() {
 		out = append(out, Diagnostic{
 			Range:    index.RangeToLSP(d.Range),
@@ -73,7 +73,7 @@ func (s *Server) hover(params HoverParams) (*Hover, error) {
 	if !ok {
 		return nil, nil
 	}
-	doc, _, index, _ := open.Snapshot()
+	doc, _, index, _ := open.SnapshotReady()
 	if doc == nil || doc.Root == nil {
 		return nil, nil
 	}
@@ -216,7 +216,7 @@ func (s *Server) codeActions(params CodeActionParams) ([]CodeAction, error) {
 	if !ok {
 		return nil, nil
 	}
-	doc, source, index, _ := open.Snapshot()
+	doc, source, index, _ := open.SnapshotReady()
 	var actions []CodeAction
 	if quickfixAllowed {
 		for _, d := range lint.Lint(doc) {
@@ -477,7 +477,7 @@ func (s *Server) formatting(params DocumentFormattingParams) ([]TextEdit, error)
 	if !ok {
 		return nil, nil
 	}
-	_, source, index, _ := open.Snapshot()
+	_, source, index, _ := open.SnapshotReady()
 	formatted, err := mdppfmt.Format(source)
 	if err != nil {
 		return nil, err
@@ -506,9 +506,22 @@ func (s *Server) renderPreview(params RenderPreviewParams) (*RenderPreviewResult
 	if !ok {
 		return nil, errors.New("document is not open: " + string(uri))
 	}
+	// If the document's initial parse is still in flight, serve a loading
+	// placeholder immediately rather than blocking the LSP on a multi-second
+	// parse. The client will receive the real HTML after the next
+	// publishDiagnostics notification triggers a re-render.
+	if open.Parsing() {
+		_, _, _, version := open.Snapshot()
+		return &RenderPreviewResult{
+			URI:     uri,
+			HTML:    "<p class=\"mdpp-loading\">Parsing…</p>",
+			Version: version,
+		}, nil
+	}
 	doc, _, _, version := open.Snapshot()
 	html, err := mdpp.Render(doc, mdpp.RenderOptions{
 		HeadingIDs:      true,
+		HighlightCode:   true,
 		SourcePositions: true,
 	})
 	if err != nil {
