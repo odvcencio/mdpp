@@ -4,6 +4,10 @@ The only Markdown stack with a real grammar: the LSP, formatter, and linter unde
 
 Markdown++ keeps `.md` files readable everywhere while adding the authoring tools Markdown has always needed: diagnostics, formatting, semantic highlighting, hover, completions, live preview, HTML rendering, and PDF export. The core is a Go package backed by gotreesitter, so every tool works from the same syntax tree with byte ranges.
 
+## Agent Skill
+
+Agents helping someone use mdpp should read the canonical M31 Labs skill: [using-mdpp](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-mdpp/SKILL.md).
+
 ## Install
 
 For authors, start with the VS Code extension:
