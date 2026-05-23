@@ -2,7 +2,7 @@
 
 The only Markdown stack with a real grammar: the LSP, formatter, and linter understand your document instead of pattern-matching at it, and the output is a faithful artifact rather than a best-effort guess.
 
-Markdown++ keeps `.md` files readable everywhere while adding the authoring tools Markdown has always needed: diagnostics, formatting, semantic highlighting, hover, completions, live preview, HTML rendering, and PDF export. The core is a Go package backed by gotreesitter, so every tool works from the same syntax tree with byte ranges.
+Markdown++ keeps `.md` files readable everywhere while adding the authoring tools Markdown has always needed: diagnostics, formatting, semantic highlighting, hover, completions, live preview, HTML rendering, and optional PDF export. The core is a Go package backed by gotreesitter, so every tool works from the same syntax tree with byte ranges.
 
 ## Agent Skill
 
@@ -17,7 +17,7 @@ VSIX release: https://github.com/odvcencio/mdpp-vscode/releases/tag/v0.1.10
 Marketplace item: m31labs.markdown-plus-plus
 ```
 
-Extension source lives at <https://github.com/odvcencio/mdpp-vscode>.
+Extension source lives in [mdpp-vscode](https://github.com/odvcencio/mdpp-vscode).
 
 For the CLI and language server:
 
@@ -34,12 +34,6 @@ Render HTML:
 
 ```bash
 mdpp render README.md -o README.html
-```
-
-Export PDF:
-
-```bash
-mdpp render --format=pdf README.md -o README.pdf
 ```
 
 Format and lint:
@@ -68,6 +62,20 @@ The package exposes the parser, renderer, diagnostics, formatter, linter inputs,
 go get github.com/odvcencio/mdpp
 ```
 
+PDF rendering is intentionally split into an optional module so HTML-only
+consumers do not pay for browser dependencies:
+
+```bash
+go get github.com/odvcencio/mdpp/pdf
+```
+
+```go
+doc := mdpp.MustParse([]byte(source))
+out, err := pdf.Render(doc, pdf.Options{
+    RenderOptions: mdpp.RenderOptions{HeadingIDs: true},
+})
+```
+
 ## What Ships
 
 | Area | Support |
@@ -77,7 +85,7 @@ go get github.com/odvcencio/mdpp
 | Formatter | Source-preserving canonical formatting for headings, lists, tables, directives, fences, references, and footnotes. |
 | Linter | Built-in Markdown++ rules with source ranges, fixes, and LSP diagnostics. |
 | LSP | Hover, definition, document symbols, formatting, completions, semantic tokens, code actions, and live-preview rendering. |
-| Output | HTML and PDF. |
+| Output | HTML in core; PDF in `github.com/odvcencio/mdpp/pdf`. |
 
 ## Why It Is Different
 
@@ -91,7 +99,7 @@ That is what makes these features practical:
 - Format source while preserving code, math, HTML, YAML values, and diagram bodies byte-for-byte.
 - Highlight meaning, not just punctuation.
 - Render a live preview from the same AST used by diagnostics and formatting.
-- Export HTML and PDF from the same document model.
+- Export HTML from core and PDF through the optional PDF module from the same document model.
 
 ## Example
 

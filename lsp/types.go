@@ -80,6 +80,17 @@ type ServerInfo struct {
 	Version string `json:"version,omitempty"`
 }
 
+type MarkdownPPServerInfo struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	SpecVersion string `json:"specVersion"`
+	BuildCommit string `json:"buildCommit,omitempty"`
+	BuildTime   string `json:"buildTime,omitempty"`
+	BinaryPath  string `json:"binaryPath,omitempty"`
+	PID         int    `json:"pid,omitempty"`
+	GoVersion   string `json:"goVersion,omitempty"`
+}
+
 type ServerCapabilities struct {
 	TextDocumentSync           TextDocumentSyncOptions `json:"textDocumentSync"`
 	HoverProvider              bool                    `json:"hoverProvider"`
@@ -124,6 +135,11 @@ type PublishDiagnosticsParams struct {
 	URI         DocumentURI  `json:"uri"`
 	Version     *int32       `json:"version,omitempty"`
 	Diagnostics []Diagnostic `json:"diagnostics"`
+}
+
+type PreviewReadyParams struct {
+	URI     DocumentURI `json:"uri"`
+	Version int32       `json:"version"`
 }
 
 type Diagnostic struct {
@@ -282,20 +298,38 @@ type TextEdit struct {
 type RenderPreviewParams struct {
 	URI          DocumentURI            `json:"uri,omitempty"`
 	TextDocument TextDocumentIdentifier `json:"textDocument,omitempty"`
+	Fragments    bool                   `json:"fragments,omitempty"`
 }
 
 type RenderPreviewResult struct {
-	URI         DocumentURI    `json:"uri"`
-	HTML        string         `json:"html"`
-	Frontmatter map[string]any `json:"frontmatter,omitempty"`
-	TOCEntries  []mdppTOCEntry `json:"tocEntries,omitempty"`
-	Version     int32          `json:"version"`
+	URI         DocumentURI           `json:"uri"`
+	HTML        string                `json:"html"`
+	Fragments   []mdppPreviewFragment `json:"fragments,omitempty"`
+	Frontmatter map[string]any        `json:"frontmatter,omitempty"`
+	TOCEntries  []mdppTOCEntry        `json:"tocEntries,omitempty"`
+	Version     int32                 `json:"version"`
 }
 
 type mdppTOCEntry struct {
 	Level int    `json:"level"`
 	ID    string `json:"id"`
 	Text  string `json:"text"`
+}
+
+type mdppPreviewFragment struct {
+	Index int              `json:"index"`
+	Type  string           `json:"type"`
+	Range mdppPreviewRange `json:"range"`
+	HTML  string           `json:"html"`
+}
+
+type mdppPreviewRange struct {
+	StartByte int `json:"startByte"`
+	EndByte   int `json:"endByte"`
+	StartLine int `json:"startLine"`
+	StartCol  int `json:"startCol"`
+	EndLine   int `json:"endLine"`
+	EndCol    int `json:"endCol"`
 }
 
 const (

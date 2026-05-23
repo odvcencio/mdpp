@@ -2,6 +2,18 @@ package mdpp
 
 import "strings"
 
+// NodeRenderer can override rendering for a node type. It should write any
+// desired HTML into b and return true when it handled n.
+type NodeRenderer func(r *Renderer, b *strings.Builder, n *Node) bool
+
+// RenderFragment is a top-level rendered block with its source range.
+type RenderFragment struct {
+	Index int
+	Type  NodeType
+	Range Range
+	HTML  string
+}
+
 // Renderer converts Markdown source into HTML.
 type Renderer struct {
 	highlightCode   bool
@@ -13,6 +25,7 @@ type Renderer struct {
 	math            MathOption
 	containerHTML   func(c *Node, body string) string
 	sourcePositions bool
+	nodeRenderers   map[NodeType]NodeRenderer
 }
 
 // Option configures a Renderer.
@@ -67,6 +80,20 @@ func WithSourcePositions(enabled bool) Option {
 	return func(r *Renderer) { r.sourcePositions = enabled }
 }
 
+// WithNodeRenderer installs a custom renderer for one node type.
+func WithNodeRenderer(typ NodeType, fn NodeRenderer) Option {
+	return func(r *Renderer) {
+		if r.nodeRenderers == nil {
+			r.nodeRenderers = make(map[NodeType]NodeRenderer)
+		}
+		if fn == nil {
+			delete(r.nodeRenderers, typ)
+			return
+		}
+		r.nodeRenderers[typ] = fn
+	}
+}
+
 // Parse parses Markdown source into a Document using the package-level parser.
 func (r *Renderer) Parse(source []byte) *Document {
 	return MustParse(source)
@@ -89,6 +116,48 @@ func (r *Renderer) Render(doc *Document) string {
 	}
 	renderNodeInto(r, &b, doc.Root)
 	return b.String()
+}
+
+// RenderNodeInto writes one AST node into b using this renderer's options.
+func (r *Renderer) RenderNodeInto(b *strings.Builder, n *Node) {
+	renderNodeInto(r, b, n)
+}
+
+// RenderChildrenInto writes a node's children into b using this renderer's options.
+func (r *Renderer) RenderChildrenInto(b *strings.Builder, n *Node) {
+	renderChildrenInto(r, b, n)
+}
+
+// RenderWithFragments renders a document and returns top-level HTML fragments
+// suitable for preview clients that want block-level incremental updates.
+func (r *Renderer) RenderWithFragments(doc *Document) (string, []RenderFragment) {
+	if doc == nil || doc.Root == nil {
+		return "", nil
+	}
+	if doc.Root.Type != NodeDocument {
+		var b strings.Builder
+		renderNodeInto(r, &b, doc.Root)
+		html := b.String()
+		return html, []RenderFragment{{Index: 0, Type: doc.Root.Type, Range: doc.Root.Range, HTML: html}}
+	}
+	fragments := make([]RenderFragment, 0, len(doc.Root.Children))
+	var out strings.Builder
+	if len(doc.Source) > 0 {
+		out.Grow(len(doc.Source) + len(doc.Source)/4)
+	}
+	for i, child := range doc.Root.Children {
+		var part strings.Builder
+		renderNodeInto(r, &part, child)
+		html := part.String()
+		out.WriteString(html)
+		fragments = append(fragments, RenderFragment{
+			Index: i,
+			Type:  child.Type,
+			Range: child.Range,
+			HTML:  html,
+		})
+	}
+	return out.String(), fragments
 }
 
 // RenderString is a package-level convenience that parses and renders

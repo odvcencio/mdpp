@@ -1,4 +1,4 @@
-package mdpp
+package pdf
 
 import (
 	"bytes"
@@ -7,14 +7,16 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/odvcencio/mdpp"
 )
 
-func TestRenderPDFProducesPDFBytes(t *testing.T) {
+func TestRenderProducesPDFBytes(t *testing.T) {
 	skipIfNoLocalChrome(t)
 
-	doc := MustParse([]byte("# PDF Smoke\n\n[[toc]]\n\n## Section\n\nBody with math $x^2$.\n"))
-	out, err := RenderPDF(doc, PDFOptions{
-		RenderOptions: RenderOptions{HeadingIDs: true, Math: MathRaw},
+	doc := mdpp.MustParse([]byte("# PDF Smoke\n\n[[toc]]\n\n## Section\n\nBody with math $x^2$.\n"))
+	out, err := Render(doc, Options{
+		RenderOptions: mdpp.RenderOptions{HeadingIDs: true, Math: mdpp.MathRaw},
 		Timeout:       15 * time.Second,
 		SettleDelay:   10 * time.Millisecond,
 		Background:    true,
@@ -23,22 +25,22 @@ func TestRenderPDFProducesPDFBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.HasPrefix(out, []byte("%PDF-")) {
-		t.Fatalf("RenderPDF output header = %q", out[:minInt(len(out), 16)])
+		t.Fatalf("Render output header = %q", out[:minInt(len(out), 16)])
 	}
 	if !bytes.Contains(out, []byte("%%EOF")) {
-		t.Fatalf("RenderPDF output missing EOF marker; length=%d", len(out))
+		t.Fatalf("Render output missing EOF marker; length=%d", len(out))
 	}
 }
 
-func TestRenderPDFCanRasterizeFirstPage(t *testing.T) {
+func TestRenderCanRasterizeFirstPage(t *testing.T) {
 	skipIfNoLocalChrome(t)
 	if _, err := exec.LookPath("pdftoppm"); err != nil {
 		t.Skip("pdftoppm not available")
 	}
 
-	doc := MustParse([]byte("# Raster Smoke\n\n![Diagram](images/diagram.png \"Architecture\")\n\n| A | B |\n|---|---|\n| 1 | 2 |\n"))
-	out, err := RenderPDF(doc, PDFOptions{
-		RenderOptions: RenderOptions{HeadingIDs: true, Math: MathRaw},
+	doc := mdpp.MustParse([]byte("# Raster Smoke\n\n![Diagram](images/diagram.png \"Architecture\")\n\n| A | B |\n|---|---|\n| 1 | 2 |\n"))
+	out, err := Render(doc, Options{
+		RenderOptions: mdpp.RenderOptions{HeadingIDs: true, Math: mdpp.MathRaw},
 		Timeout:       15 * time.Second,
 		SettleDelay:   10 * time.Millisecond,
 		Background:    true,
@@ -69,8 +71,8 @@ func TestRenderPDFCanRasterizeFirstPage(t *testing.T) {
 	}
 }
 
-func TestPDFHelpersDefaultPaperAndMargins(t *testing.T) {
-	width, height := paperDimensions(PDFOptions{})
+func TestHelpersDefaultPaperAndMargins(t *testing.T) {
+	width, height := paperDimensions(Options{})
 	if width != 8.5 || height != 11 {
 		t.Fatalf("default paper = %gx%g, want letter", width, height)
 	}
@@ -78,7 +80,7 @@ func TestPDFHelpersDefaultPaperAndMargins(t *testing.T) {
 	if margins.Top != 0.5 || margins.Right != 0.5 || margins.Bottom != 0.5 || margins.Left != 0.5 {
 		t.Fatalf("default margins = %+v, want all 0.5", margins)
 	}
-	width, height = paperDimensions(PDFOptions{PaperSize: PaperCustom, PaperWidthInches: 4, PaperHeightInches: 6})
+	width, height = paperDimensions(Options{PaperSize: PaperCustom, PaperWidthInches: 4, PaperHeightInches: 6})
 	if width != 4 || height != 6 {
 		t.Fatalf("custom paper = %gx%g, want 4x6", width, height)
 	}

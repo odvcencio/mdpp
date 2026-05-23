@@ -182,6 +182,29 @@ func TestRenderLink(t *testing.T) {
 	}
 }
 
+func TestRenderReferenceLinkPreservesHyphenatedText(t *testing.T) {
+	out := NewRenderer().RenderString("[Tree-sitter][tree-sitter]\n\n[tree-sitter]: https://tree-sitter.github.io/tree-sitter/")
+	if !strings.Contains(out, `<a href="https://tree-sitter.github.io/tree-sitter/">Tree-sitter</a>`) {
+		t.Errorf("expected full hyphenated reference text, got %q", out)
+	}
+	if strings.Contains(out, `tree-sitter]:`) || strings.Contains(out, `: https://tree-sitter.github.io`) {
+		t.Errorf("did not expect reference definition to render, got %q", out)
+	}
+	if strings.Contains(out, `>-</a>`) {
+		t.Errorf("did not expect reference link text to collapse to punctuation, got %q", out)
+	}
+}
+
+func TestRenderStrongReferenceLinkPreservesHyphenatedText(t *testing.T) {
+	out := NewRenderer().RenderString("**[ferrous-wheel][ferrous-wheel]**\n\n[ferrous-wheel]: https://github.com/odvcencio/ferrous-wheel")
+	if !strings.Contains(out, `<strong><a href="https://github.com/odvcencio/ferrous-wheel">ferrous-wheel</a></strong>`) {
+		t.Errorf("expected strong reference link text, got %q", out)
+	}
+	if strings.Contains(out, `ferrous-wheel]:`) || strings.Contains(out, `: https://github.com/odvcencio/ferrous-wheel`) {
+		t.Errorf("did not expect reference definition to render, got %q", out)
+	}
+}
+
 func TestRenderUnresolvedShortcutLinkAsText(t *testing.T) {
 	out := NewRenderer().RenderString("Keep [literal brackets] in prose")
 	if strings.Contains(out, `<a href="">`) {
@@ -312,6 +335,33 @@ func TestRenderSourcePositions(t *testing.T) {
 
 	assertContains(t, out, `<h1 data-mdpp-source-start="0" data-mdpp-source-end="8" data-mdpp-source-line="1" data-mdpp-source-col="1" data-mdpp-source-end-line="2" data-mdpp-source-end-col="1">Hello</h1>`)
 	assertContains(t, out, `<p data-mdpp-source-start="9" data-mdpp-source-end="19" data-mdpp-source-line="3" data-mdpp-source-col="1" data-mdpp-source-end-line="4" data-mdpp-source-end-col="1">Body text</p>`)
+}
+
+func TestRenderWithFragments(t *testing.T) {
+	doc := MustParse([]byte("# Title\n\nBody.\n"))
+	html, fragments := NewRenderer(WithHeadingIDs(true), WithSourcePositions(true)).RenderWithFragments(doc)
+	assertContains(t, html, `<h1 id="title"`)
+	if len(fragments) != 2 {
+		t.Fatalf("fragment count = %d, want 2", len(fragments))
+	}
+	if fragments[0].Index != 0 || fragments[0].Type != NodeHeading || !strings.Contains(fragments[0].HTML, `<h1 id="title"`) {
+		t.Fatalf("unexpected first fragment: %#v", fragments[0])
+	}
+	if fragments[0].Range.StartByte != 0 || fragments[0].Range.StartLine != 1 {
+		t.Fatalf("unexpected first fragment range: %#v", fragments[0].Range)
+	}
+}
+
+func TestRenderNodeRendererHook(t *testing.T) {
+	r := NewRenderer(WithNodeRenderer(NodeParagraph, func(r *Renderer, b *strings.Builder, n *Node) bool {
+		b.WriteString("<section>")
+		r.RenderChildrenInto(b, n)
+		b.WriteString("</section>\n")
+		return true
+	}))
+	out := r.RenderString("Body")
+	assertContains(t, out, "<section>Body</section>")
+	assertNotContains(t, out, "<p>")
 }
 
 func TestRenderUnsafeHTMLDefault(t *testing.T) {

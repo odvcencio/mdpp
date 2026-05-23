@@ -34,6 +34,24 @@ func TestServerInitializeCapabilities(t *testing.T) {
 	}
 }
 
+func TestServerInfoRequest(t *testing.T) {
+	s := NewServer()
+	result, respErr, err := s.dispatch(io.Discard, incomingMessage{Method: "markdownpp/serverInfo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respErr != nil {
+		t.Fatalf("unexpected response error: %+v", respErr)
+	}
+	info, ok := result.(MarkdownPPServerInfo)
+	if !ok {
+		t.Fatalf("unexpected server info result: %#v", result)
+	}
+	if info.Name != "mdpp-lsp" || info.Version == "" || info.SpecVersion == "" || info.BinaryPath == "" {
+		t.Fatalf("incomplete server info: %#v", info)
+	}
+}
+
 func TestServerDidOpenPublishesDiagnostics(t *testing.T) {
 	s := NewServer()
 	params := DidOpenTextDocumentParams{TextDocument: TextDocumentItem{
@@ -60,6 +78,9 @@ func TestServerDidOpenPublishesDiagnostics(t *testing.T) {
 	if !strings.Contains(out.String(), "textDocument/publishDiagnostics") || !strings.Contains(out.String(), "MD034") {
 		t.Fatalf("expected diagnostic notification, got %q", out.String())
 	}
+	if !strings.Contains(out.String(), "markdownpp/previewReady") {
+		t.Fatalf("expected preview-ready notification, got %q", out.String())
+	}
 }
 
 func TestServerFormattingAndPreview(t *testing.T) {
@@ -80,6 +101,9 @@ func TestServerFormattingAndPreview(t *testing.T) {
 	}
 	if !strings.Contains(preview.HTML, `data-mdpp-source-start`) {
 		t.Fatalf("expected source-positioned preview HTML, got %q", preview.HTML)
+	}
+	if len(preview.Fragments) == 0 || !strings.Contains(preview.Fragments[0].HTML, "<h1") {
+		t.Fatalf("expected source-mapped preview fragments, got %#v", preview.Fragments)
 	}
 }
 
@@ -181,8 +205,8 @@ func TestServerJSONRPCHarness(t *testing.T) {
 	}
 
 	frames := readRPCFrames(t, output.Bytes())
-	if len(frames) != 5 {
-		t.Fatalf("expected 5 RPC frames, got %d: %#v", len(frames), frames)
+	if len(frames) != 6 {
+		t.Fatalf("expected 6 RPC frames, got %d: %#v", len(frames), frames)
 	}
 
 	initFrame := rpcFrameByID(frames, "1")
@@ -201,6 +225,14 @@ func TestServerJSONRPCHarness(t *testing.T) {
 	}
 	if len(diagParams.Diagnostics) == 0 {
 		t.Fatalf("expected diagnostics notification, got %#v", diagParams)
+	}
+	readyFrame := rpcFrameByMethod(frames, "markdownpp/previewReady")
+	var readyParams PreviewReadyParams
+	if err := json.Unmarshal(readyFrame.Params, &readyParams); err != nil {
+		t.Fatal(err)
+	}
+	if readyParams.URI != uri || readyParams.Version != 1 {
+		t.Fatalf("unexpected preview-ready params: %#v", readyParams)
 	}
 
 	hoverFrame := rpcFrameByID(frames, "2")

@@ -282,7 +282,11 @@ func cleanAdmonitionText(text string) string {
 		lines[i] = strings.TrimPrefix(line, "> ")
 		lines[i] = strings.TrimPrefix(lines[i], ">")
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	cleaned := strings.TrimLeft(strings.Join(lines, "\n"), " \t")
+	if strings.TrimSpace(cleaned) == "" {
+		return ""
+	}
+	return cleaned
 }
 
 // --- Quote headings ---

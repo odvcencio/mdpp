@@ -1,4 +1,4 @@
-package mdpp
+package pdf
 
 import (
 	"context"
@@ -10,11 +10,43 @@ import (
 
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
+	"github.com/odvcencio/mdpp"
 )
 
-// RenderPDF renders a document to PDF using headless Chrome.
-func RenderPDF(doc *Document, opts PDFOptions) ([]byte, error) {
-	rendered, err := Render(doc, opts.RenderOptions)
+// Options configures Render.
+type Options struct {
+	PaperSize         PaperSize
+	PaperWidthInches  float64
+	PaperHeightInches float64
+	MarginInches      Margins
+	UserCSS           string
+	Background        bool
+	HeaderFooter      HeaderFooterTemplate
+	RenderOptions     mdpp.RenderOptions
+	BrowserURL        string
+	Timeout           time.Duration
+	SettleDelay       time.Duration
+}
+
+// PaperSize is a built-in PDF paper size.
+type PaperSize int
+
+const (
+	PaperLetter PaperSize = iota
+	PaperA4
+	PaperLegal
+	PaperCustom
+)
+
+// Margins holds PDF page margins in inches.
+type Margins struct{ Top, Right, Bottom, Left float64 }
+
+// HeaderFooterTemplate contains chromedp-compatible header/footer HTML.
+type HeaderFooterTemplate struct{ HeaderHTML, FooterHTML string }
+
+// Render renders a document to PDF using headless Chrome.
+func Render(doc *mdpp.Document, opts Options) ([]byte, error) {
+	rendered, err := mdpp.Render(doc, opts.RenderOptions)
 	if err != nil {
 		return nil, fmt.Errorf("pdf: render: %w", err)
 	}
@@ -47,7 +79,7 @@ func RenderPDF(doc *Document, opts PDFOptions) ([]byte, error) {
 	ctx, tabCancel := chromedp.NewContext(ctx)
 	defer tabCancel()
 
-	htmlDoc := pdfHTMLShell(string(rendered), opts.UserCSS)
+	htmlDoc := htmlShell(string(rendered), opts.UserCSS)
 	url := "data:text/html;base64," + base64.StdEncoding.EncodeToString([]byte(htmlDoc))
 	var out []byte
 	if err := chromedp.Run(ctx,
@@ -87,7 +119,7 @@ func RenderPDF(doc *Document, opts PDFOptions) ([]byte, error) {
 	return out, nil
 }
 
-func pdfHTMLShell(body string, userCSS string) string {
+func htmlShell(body string, userCSS string) string {
 	var b strings.Builder
 	b.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><style>")
 	b.WriteString(`body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.5;color:#111;margin:0;}pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}pre{white-space:pre-wrap;background:#f6f8fa;padding:12px;border-radius:6px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #d0d7de;padding:4px 8px;}blockquote{border-left:4px solid #d0d7de;margin-left:0;padding-left:12px;color:#57606a;}.admonition,.mdpp-container{border:1px solid #d0d7de;border-left-width:4px;padding:8px 12px;margin:1em 0;border-radius:6px;}.admonition-title,.mdpp-container-title{font-weight:700;margin-top:0;}.mdpp-toc{border:1px solid #d0d7de;padding:8px 12px;margin:1em 0;border-radius:6px;}.mdpp-embed{border:1px solid #d0d7de;padding:12px;margin:1em 0;border-radius:6px;}@page{margin:0.5in;}`)
@@ -98,7 +130,7 @@ func pdfHTMLShell(body string, userCSS string) string {
 	return b.String()
 }
 
-func paperDimensions(opts PDFOptions) (float64, float64) {
+func paperDimensions(opts Options) (float64, float64) {
 	switch opts.PaperSize {
 	case PaperA4:
 		return 8.27, 11.69
@@ -119,10 +151,10 @@ func pdfMargins(m Margins) Margins {
 	return m
 }
 
-func explicitFalseBackground(opts PDFOptions) bool {
+func explicitFalseBackground(opts Options) bool {
 	return !opts.Background
 }
 
-func escapePDFTemplate(s string) string {
+func escapeTemplate(s string) string {
 	return html.EscapeString(s)
 }

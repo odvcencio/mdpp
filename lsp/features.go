@@ -509,7 +509,7 @@ func (s *Server) renderPreview(params RenderPreviewParams) (*RenderPreviewResult
 	// If the document's initial parse is still in flight, serve a loading
 	// placeholder immediately rather than blocking the LSP on a multi-second
 	// parse. The client will receive the real HTML after the next
-	// publishDiagnostics notification triggers a re-render.
+	// markdownpp/previewReady notification triggers a re-render.
 	if open.Parsing() {
 		_, _, _, version := open.Snapshot()
 		return &RenderPreviewResult{
@@ -519,21 +519,50 @@ func (s *Server) renderPreview(params RenderPreviewParams) (*RenderPreviewResult
 		}, nil
 	}
 	doc, _, _, version := open.Snapshot()
-	html, err := mdpp.Render(doc, mdpp.RenderOptions{
+	opts := mdpp.RenderOptions{
 		HeadingIDs:      true,
 		HighlightCode:   true,
 		SourcePositions: true,
-	})
+	}
+	html, fragments, err := mdpp.RenderWithFragments(doc, opts)
 	if err != nil {
 		return nil, err
 	}
 	return &RenderPreviewResult{
 		URI:         uri,
 		HTML:        string(html),
+		Fragments:   previewFragments(fragments),
 		Frontmatter: doc.Frontmatter(),
 		TOCEntries:  tocEntries(doc.TableOfContents()),
 		Version:     version,
 	}, nil
+}
+
+func previewFragments(in []mdpp.RenderFragment) []mdppPreviewFragment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]mdppPreviewFragment, len(in))
+	for i, fragment := range in {
+		out[i] = mdppPreviewFragment{
+			Index: fragment.Index,
+			Type:  fragment.Type.String(),
+			Range: previewRange(fragment.Range),
+			HTML:  fragment.HTML,
+		}
+	}
+	return out
+}
+
+func previewRange(r mdpp.Range) mdppPreviewRange {
+	return mdppPreviewRange{
+		StartByte: r.StartByte,
+		EndByte:   r.EndByte,
+		StartLine: r.StartLine,
+		StartCol:  r.StartCol,
+		EndLine:   r.EndLine,
+		EndCol:    r.EndCol,
+	}
 }
 
 func tocEntries(in []mdpp.TOCEntry) []mdppTOCEntry {

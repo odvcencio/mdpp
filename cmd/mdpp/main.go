@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/odvcencio/mdpp"
 	mdppfmt "github.com/odvcencio/mdpp/fmt"
@@ -58,8 +57,7 @@ func runRender(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 	output := fs.String("o", "", "write output to file")
 	fs.StringVar(output, "out", "", "write output to file")
 	fs.StringVar(output, "output", "", "write output to file")
-	pdf := fs.Bool("pdf", false, "render PDF instead of HTML")
-	format := fs.String("format", "html", `output format: "html", "pdf", or "slides"`)
+	format := fs.String("format", "html", `output format: "html" or "slides"`)
 	unsafeHTML := fs.Bool("unsafe-html", false, "allow raw HTML passthrough")
 	headingIDs := fs.Bool("heading-ids", true, "render heading id attributes")
 	noHeadingIDs := fs.Bool("no-heading-ids", false, `skip auto id="..." on headings`)
@@ -67,11 +65,6 @@ func runRender(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 	hardWraps := fs.Bool("hard-wraps", false, "render soft line breaks as <br>")
 	wrapEmoji := fs.Bool("emoji", false, "wrap emoji in accessible spans")
 	mathMode := fs.String("math", "server", "math rendering mode: server, raw, omit")
-	paper := fs.String("paper", "letter", "PDF paper size: letter, a4, legal")
-	margin := fs.Float64("margin", 0.5, "PDF margin in inches, all sides")
-	cssPath := fs.String("css", "", "CSS file to include when rendering PDF")
-	browserURL := fs.String("browser-url", "", "remote Chrome DevTools URL for PDF rendering")
-	timeout := fs.Duration("timeout", 60*time.Second, "PDF render timeout")
 	if err := fs.Parse(args); err != nil {
 		return exitError
 	}
@@ -82,7 +75,8 @@ func runRender(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 	switch strings.ToLower(*format) {
 	case "", "html":
 	case "pdf":
-		*pdf = true
+		stdfmt.Fprintln(stderr, "mdpp render: PDF rendering moved to github.com/odvcencio/mdpp/pdf")
+		return exitError
 	case "slides":
 		stdfmt.Fprintln(stderr, "mdpp render: --format slides is reserved and not implemented")
 		return exitError
@@ -110,38 +104,7 @@ func runRender(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 		return exitError
 	}
 
-	var out []byte
-	if *pdf {
-		var css string
-		if *cssPath != "" {
-			cssBytes, err := os.ReadFile(*cssPath)
-			if err != nil {
-				stdfmt.Fprintf(stderr, "mdpp render: read css: %v\n", err)
-				return exitError
-			}
-			css = string(cssBytes)
-		}
-		browser := *browserURL
-		if browser == "" {
-			browser = os.Getenv("CHROME_WS_URL")
-		}
-		paperSize, err := parsePaperSize(*paper)
-		if err != nil {
-			stdfmt.Fprintf(stderr, "mdpp render: %v\n", err)
-			return exitError
-		}
-		out, err = mdpp.RenderPDF(doc, mdpp.PDFOptions{
-			PaperSize:     paperSize,
-			MarginInches:  mdpp.Margins{Top: *margin, Right: *margin, Bottom: *margin, Left: *margin},
-			UserCSS:       css,
-			BrowserURL:    browser,
-			Timeout:       *timeout,
-			RenderOptions: renderOpts,
-			Background:    true,
-		})
-	} else {
-		out, err = mdpp.Render(doc, renderOpts)
-	}
+	out, err := mdpp.Render(doc, renderOpts)
 	if err != nil {
 		stdfmt.Fprintf(stderr, "mdpp render: %v\n", err)
 		return exitError
@@ -449,19 +412,6 @@ func parseMathOption(mode string) (mdpp.MathOption, error) {
 		return mdpp.MathOmit, nil
 	default:
 		return mdpp.MathServer, stdfmt.Errorf("unknown math mode %q", mode)
-	}
-}
-
-func parsePaperSize(raw string) (mdpp.PaperSize, error) {
-	switch strings.ToLower(raw) {
-	case "", "letter":
-		return mdpp.PaperLetter, nil
-	case "a4":
-		return mdpp.PaperA4, nil
-	case "legal":
-		return mdpp.PaperLegal, nil
-	default:
-		return mdpp.PaperLetter, stdfmt.Errorf("unknown paper size %q", raw)
 	}
 }
 

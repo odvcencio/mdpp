@@ -43,6 +43,12 @@ func TestAdmonitionCustomTitle(t *testing.T) {
 	assertNotContains(t, html, "<p>Deployment caveat")
 }
 
+func TestAdmonitionPreservesSpaceBeforeInlineBodyNode(t *testing.T) {
+	html := NewRenderer().RenderString("> [!NOTE] Thesis\n> Tree-sitter made syntax trees reusable. **gotreesitter** makes grammar reusable.")
+	assertContains(t, html, `reusable. <strong>gotreesitter</strong>`)
+	assertNotContains(t, html, `reusable.<strong>gotreesitter</strong>`)
+}
+
 func TestAdmonitionCustomTitleRendersEmojiShortcodes(t *testing.T) {
 	html := NewRenderer(WithWrapEmoji(true)).RenderString("> [!NOTE] Taking notes :sweat_smile:\n> Body")
 	assertContains(t, html, `<p class="admonition-title">Taking notes <span class="emoji" role="img" aria-label="sweat_smile">😅</span></p>`)

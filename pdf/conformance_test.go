@@ -1,7 +1,8 @@
-package mdpp
+package pdf
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"image"
 	"image/draw"
@@ -12,10 +13,14 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/odvcencio/mdpp"
 )
 
+var updateConformance = flag.Bool("update", false, "update examples/conformance expected PDF PNG files")
+
 func TestConformancePDFCorpus(t *testing.T) {
-	root := filepath.Join("examples", "conformance")
+	root := filepath.Join("..", "examples", "conformance")
 	cases, err := pdfConformanceCases(root)
 	if err != nil {
 		t.Fatalf("list pdf conformance corpus: %v", err)
@@ -46,8 +51,8 @@ func TestConformancePDFCorpus(t *testing.T) {
 				t.Fatalf("read input: %v", err)
 			}
 
-			pdf, err := RenderPDF(MustParse(input), PDFOptions{
-				RenderOptions: RenderOptions{},
+			pdf, err := Render(mdpp.MustParse(input), Options{
+				RenderOptions: mdpp.RenderOptions{},
 				Timeout:       15 * time.Second,
 				SettleDelay:   10 * time.Millisecond,
 				Background:    true,
@@ -177,4 +182,15 @@ func optionalRegularFile(path string) bool {
 		return false
 	}
 	return !info.IsDir()
+}
+
+func requireRegularFile(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("missing required file %s: %v", path, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("required file %s is a directory", path)
+	}
 }

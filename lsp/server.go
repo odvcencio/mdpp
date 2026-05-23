@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"runtime"
 	"sync"
 
 	"github.com/odvcencio/mdpp"
@@ -155,7 +157,7 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 		s.parseWG.Add(1)
 		s.store.OpenAsync(params.TextDocument, func(open *OpenDocument) {
 			defer s.parseWG.Done()
-			_ = s.asyncPublishDiagnostics(open)
+			_ = s.asyncPublishDocumentReady(open)
 		})
 		return nil, nil, nil
 	case "textDocument/didChange":
@@ -170,7 +172,7 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 		if err := doc.ApplyChanges(params.TextDocument.Version, params.ContentChanges); err != nil {
 			return nil, rpcParamError(err), nil
 		}
-		return nil, nil, s.publishDiagnostics(w, doc)
+		return nil, nil, s.publishDocumentReady(w, doc)
 	case "textDocument/didSave":
 		params, err := decodeParams[DidSaveTextDocumentParams](msg.Params)
 		if err != nil {
@@ -182,7 +184,7 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 			if err := doc.ApplyChanges(version, []TextDocumentContentChangeEvent{{Text: *params.Text}}); err != nil {
 				return nil, rpcParamError(err), nil
 			}
-			return nil, nil, s.publishDiagnostics(w, doc)
+			return nil, nil, s.publishDocumentReady(w, doc)
 		}
 		return nil, nil, nil
 	case "textDocument/didClose":
@@ -314,6 +316,8 @@ func (s *Server) dispatch(w io.Writer, msg incomingMessage) (any, *ResponseError
 			return nil, rpcParamError(err), nil
 		}
 		return result, nil, nil
+	case "markdownpp/serverInfo":
+		return serverInfo(), nil, nil
 	default:
 		return nil, &ResponseError{Code: errorCodeMethodNotFound, Message: "method not found: " + msg.Method}, nil
 	}
@@ -348,6 +352,20 @@ func (s *Server) handleInitialize() InitializeResult {
 	}
 }
 
+func serverInfo() MarkdownPPServerInfo {
+	binaryPath, _ := os.Executable()
+	return MarkdownPPServerInfo{
+		Name:        "mdpp-lsp",
+		Version:     mdpp.Version,
+		SpecVersion: mdpp.SpecVersion,
+		BuildCommit: mdpp.BuildCommit,
+		BuildTime:   mdpp.BuildTime,
+		BinaryPath:  binaryPath,
+		PID:         os.Getpid(),
+		GoVersion:   runtime.Version(),
+	}
+}
+
 func rpcParamError(err error) *ResponseError {
 	return &ResponseError{Code: errorCodeInvalidParams, Message: err.Error()}
 }
@@ -368,17 +386,37 @@ func (s *Server) publishDiagnostics(w io.Writer, open *OpenDocument) error {
 	}))
 }
 
-// asyncPublishDiagnostics publishes diagnostics through the server-owned
-// writer, serialized with the main dispatch loop via writerMu. Safe to call
-// from goroutines.
-func (s *Server) asyncPublishDiagnostics(open *OpenDocument) error {
+func (s *Server) publishDocumentReady(w io.Writer, open *OpenDocument) error {
+	if err := s.publishDiagnostics(w, open); err != nil {
+		return err
+	}
+	return s.publishPreviewReady(open)
+}
+
+// asyncPublishDocumentReady publishes diagnostics plus the preview-ready
+// notification through the server-owned writer. Safe to call from goroutines.
+func (s *Server) asyncPublishDocumentReady(open *OpenDocument) error {
 	if open == nil {
 		return nil
 	}
 	doc, _, index, version := open.Snapshot()
-	return s.writeFramed(notification("textDocument/publishDiagnostics", PublishDiagnosticsParams{
+	if err := s.writeFramed(notification("textDocument/publishDiagnostics", PublishDiagnosticsParams{
 		URI:         open.URI,
 		Version:     &version,
 		Diagnostics: documentDiagnostics(open.URI, doc, index),
+	})); err != nil {
+		return err
+	}
+	return s.publishPreviewReady(open)
+}
+
+func (s *Server) publishPreviewReady(open *OpenDocument) error {
+	if open == nil {
+		return nil
+	}
+	_, _, _, version := open.Snapshot()
+	return s.writeFramed(notification("markdownpp/previewReady", PreviewReadyParams{
+		URI:     open.URI,
+		Version: version,
 	}))
 }

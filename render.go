@@ -28,6 +28,11 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 	if n == nil {
 		return
 	}
+	if r != nil && r.nodeRenderers != nil {
+		if fn := r.nodeRenderers[n.Type]; fn != nil && fn(r, b, n) {
+			return
+		}
+	}
 
 	switch n.Type {
 	case NodeDocument:

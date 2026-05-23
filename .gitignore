@@ -1,0 +1,5 @@
+dist/
+/mdpp
+/mdpp-lsp
+*.prof
+*.test

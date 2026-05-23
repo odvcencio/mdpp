@@ -357,7 +357,7 @@ func normalizeLinkLabel(s string) string {
 }
 
 func lowerMarkdownPlusSource(source []byte) []byte {
-	if !strings.Contains(string(source), "[!") {
+	if !bytes.Contains(source, []byte("[!")) {
 		return source
 	}
 	lines := strings.Split(string(source), "\n")
@@ -2511,6 +2511,50 @@ func parseSimpleLinkDestination(spec string) (string, string) {
 	return href, title
 }
 
+func referenceLinkParts(raw string, typ string) (text string, ref string, ok bool) {
+	if raw == "" || raw[0] != '[' {
+		return "", "", false
+	}
+	closeText := markdownBracketClose(raw, 1)
+	if closeText < 0 {
+		return "", "", false
+	}
+	text = raw[1:closeText]
+	switch typ {
+	case "shortcut_link":
+		return text, "", true
+	case "collapsed_reference_link":
+		if closeText+2 <= len(raw) && raw[closeText+1:] == "[]" {
+			return text, text, true
+		}
+	case "full_reference_link":
+		if closeText+1 >= len(raw) || raw[closeText+1] != '[' {
+			return "", "", false
+		}
+		closeRef := markdownBracketClose(raw, closeText+2)
+		if closeRef < 0 {
+			return "", "", false
+		}
+		return text, raw[closeText+2 : closeRef], true
+	}
+	return "", "", false
+}
+
+func markdownBracketClose(raw string, start int) int {
+	escaped := false
+	for i := start; i < len(raw); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case raw[i] == '\\':
+			escaped = true
+		case raw[i] == ']':
+			return i
+		}
+	}
+	return -1
+}
+
 func splitInlineParseChunks(text string, max int) []string {
 	if max < 80 || len(text) <= max {
 		return nil
@@ -2718,6 +2762,8 @@ func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, s
 			flushLoose()
 			appendBlockNode(&nodes, converted)
 			separatedByBlankLine = false
+		} else if skipRawBlockChild(bt, child) {
+			separatedByBlankLine = false
 		} else if childEnd > childStart {
 			appendLooseRaw(string(source[childStart:childEnd]), childStart)
 		}
@@ -2731,6 +2777,14 @@ func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, s
 	flushLoose()
 
 	return nodes
+}
+
+func skipRawBlockChild(bt *gotreesitter.BoundTree, n *gotreesitter.Node) bool {
+	if n == nil || bt.NodeType(n) != "link_reference_definition" {
+		return false
+	}
+	raw := strings.TrimRight(bt.NodeText(n), "\n")
+	return !footnoteDefinitionRawRe.MatchString(raw)
 }
 
 func appendBlockNode(nodes *[]*Node, n *Node) {
@@ -2992,10 +3046,20 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 		if link.Attrs == nil {
 			link.Attrs = make(map[string]string)
 		}
+		raw := bt.NodeText(n)
 		// Capture full raw text for shortcut links so post-processing
 		// can detect footnote refs ([^id]) and admonition markers ([!TYPE]).
 		if typ == "shortcut_link" {
-			link.Attrs["raw"] = bt.NodeText(n)
+			link.Attrs["raw"] = raw
+		}
+		if text, ref, ok := referenceLinkParts(raw, typ); ok {
+			childBase := addBaseOffset(baseOffset, int(n.StartByte())+1)
+			link.Children = append(link.Children, parseInlineAt(text, source, childBase)...)
+			if ref != "" {
+				link.Attrs["ref"] = ref
+			}
+			nodes = append(nodes, link)
+			break
 		}
 		for i := 0; i < n.ChildCount(); i++ {
 			child := n.Child(i)
