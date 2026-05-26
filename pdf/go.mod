@@ -1,4 +1,4 @@
-module github.com/odvcencio/mdpp/pdf
+module m31labs.dev/mdpp/pdf
 
 go 1.26
 
