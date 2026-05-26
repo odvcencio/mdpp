@@ -365,3 +365,55 @@ func TestTOCDirectiveIgnoredInCodeFence(t *testing.T) {
 	assertNotContains(t, html, `<nav class="mdpp-toc"`)
 	assertContains(t, html, "[[toc]]")
 }
+
+// ── recursion-trigger regression tests ───────────────────────────────────────
+//
+// 2026-05-26 indexer crash: directive openers inside inline backtick spans
+// inside pipe-table cells were re-entering the post-CST extension scanners
+// recursively. The depth-guard fix (MDPP-PARSE-003) is the safety net;
+// these tests are the contract — no panic AND no directive node from a
+// cell's inline span.
+
+func TestRegression_TOCInsideBacktickInsideTableCell(t *testing.T) {
+	src := "| col |\n|---|\n| `[[toc]]` |\n\n## Alpha\n"
+	html := NewRenderer().RenderString(src)
+	assertNotContains(t, html, `<nav class="mdpp-toc"`)
+	assertContains(t, html, "<code>")
+	assertContains(t, html, "[[toc]]")
+}
+
+func TestRegression_ContainerOpenerInsideBacktickInsideTableCell(t *testing.T) {
+	src := "| col |\n|---|\n| `:::warning body :::` |\n"
+	doc := MustParse([]byte(src))
+	if doc == nil {
+		t.Fatal("parse returned nil document")
+	}
+	if found := doc.AST().Find(NodeContainerDirective); len(found) != 0 {
+		t.Errorf("expected zero NodeContainerDirective, got %d", len(found))
+	}
+	for _, d := range doc.Diagnostics() {
+		if d.Code == "MDPP-PARSE-003" {
+			t.Errorf("MDPP-PARSE-003 fired on benign input — depth guard should not be hit here")
+		}
+	}
+}
+
+func TestRegression_ContainerOpenerInTablePlusTOCInBacktick(t *testing.T) {
+	// The exact shape that crashed the indexer:
+	// m31labs-mdpp-vscode/concepts/syntax-grammar.md
+	src := "" +
+		"| Pattern | Match | Scope |\n" +
+		"|---|---|---|\n" +
+		"| directives | `[[toc]]`, `[[embed:url]]` | a |\n" +
+		"| containers | `:::TypeName` fence openers | b |\n"
+	doc := MustParse([]byte(src))
+	if doc == nil {
+		t.Fatal("parse returned nil document")
+	}
+	if len(doc.AST().Find(NodeTableOfContents)) != 0 {
+		t.Errorf("NodeTableOfContents appeared from inline code span in table cell")
+	}
+	if len(doc.AST().Find(NodeContainerDirective)) != 0 {
+		t.Errorf("NodeContainerDirective appeared from inline code span in table cell")
+	}
+}

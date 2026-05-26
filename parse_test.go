@@ -1,6 +1,8 @@
 package mdpp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -535,4 +537,47 @@ func assertRange(t *testing.T, label string, got Range, want Range) {
 	if got != want {
 		t.Fatalf("%s range = %#v, want %#v", label, got, want)
 	}
+}
+
+// FuzzParse asserts that Parse never panics on arbitrary input. The contract
+// is that any byte slice produces either a *Document (possibly carrying
+// MDPP-PARSE-000 diagnostics) or an error — but never a panic.
+//
+// Seed corpus: every input.md under examples/conformance/, plus a handful of
+// inline seeds targeting the recursion shapes that triggered the 2026-05-26
+// crash before the parser depth guard landed.
+func FuzzParse(f *testing.F) {
+	corpusRoot := filepath.Join("examples", "conformance")
+	entries, _ := os.ReadDir(corpusRoot)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(corpusRoot, e.Name(), "input.md"))
+		if err != nil {
+			continue
+		}
+		f.Add(data)
+	}
+
+	f.Add([]byte("| col |\n|---|\n| `[[toc]]` |\n\n## Alpha\n"))
+	f.Add([]byte("| col |\n|---|\n| `:::warning body :::` |\n"))
+	f.Add([]byte(":::warning\n:::tip\nbody\n:::\n"))
+	f.Add([]byte(strings.Repeat(":::a\n", 200) + strings.Repeat(":::\n", 200)))
+	f.Add([]byte("[[toc]]\n\n## A\n\n:::warning [[toc]] :::\n"))
+
+	f.Fuzz(func(t *testing.T, src []byte) {
+		if len(src) > 1<<14 {
+			t.Skip()
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Parse panicked on %d bytes: %v\nbytes: %q", len(src), r, src)
+			}
+		}()
+		doc, _ := Parse(src)
+		if doc == nil {
+			t.Fatal("Parse returned nil document on non-error path")
+		}
+	})
 }
