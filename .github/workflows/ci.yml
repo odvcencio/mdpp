@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  fuzz:
+    name: Fuzz (short)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Fuzz formatter (30s)
+        run: go test -run=^$ -fuzz=FuzzFormat -fuzztime=30s ./fmt
+      - name: Fuzz parser (30s)
+        run: |
+          if go test -run=^$ -list=. ./. | grep -q '^FuzzParse$'; then
+            go test -run=^$ -fuzz=FuzzParse -fuzztime=30s .
+          else
+            echo "FuzzParse not yet defined; skipping"
+          fi
