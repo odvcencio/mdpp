@@ -1,0 +1,8 @@
+(Document)
+  (Paragraph)
+    (Text "Hello ")
+    (Emoji code="rocket" "🚀")
+    (Text " world ")
+    (Emoji code="tada" "🎉")
+    (Text " ")
+    (Emoji code="+1" "👍")

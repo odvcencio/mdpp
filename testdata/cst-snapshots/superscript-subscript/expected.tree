@@ -1,0 +1,7 @@
+(Document)
+  (Paragraph)
+    (Text "E = mc")
+    (Superscript "2")
+    (Text " and water is H")
+    (Subscript "2")
+    (Text "O.")

@@ -1,0 +1,8 @@
+(Document)
+  (Paragraph)
+    (Text "Some prose first")
+    (Text ".")
+  (AutoEmbed provider="youtube" src="https://youtu.be/dQw4w9WgXcQ")
+  (Paragraph)
+    (Text "More prose")
+    (Text ".")
