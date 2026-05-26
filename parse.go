@@ -186,6 +186,37 @@ func parseDocumentRetainTree(source []byte, prevTree *gotreesitter.Tree) (*Docum
 }
 
 func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx *parseCtx) (*Document, *gotreesitter.Tree) {
+	// Recursion guard. Container directive trailing-chunk reparsing
+	// (parseContainerChildrenCtx → appendParsedChunkCtx → parseDocument →
+	// parseDocumentRetainTreeCtx) can re-encounter the same opener literal
+	// inside an inline span / table cell that the extension scanner doesn't
+	// honor, causing unbounded recursion. Maintain a depth counter even when
+	// callers passed ctx=nil — synthesize a transient counter-only ctx so
+	// the cap fires on the nil-ctx recursion path too (the path that
+	// appendParsedChunkCtx takes via parseDocument).
+	if ctx == nil {
+		ctx = &parseCtx{}
+	}
+	if ctx.containerDepth >= maxContainerDepth {
+		root := &Node{
+			Type: NodeDocument,
+			Children: []*Node{{
+				Type:    NodeParagraph,
+				Literal: string(source),
+				Range:   sourceRange(source, 0, len(source)),
+			}},
+			Range: sourceRange(source, 0, len(source)),
+		}
+		doc := &Document{Root: root, Source: source, diagnostics: []Diagnostic{{
+			Code:     "MDPP-PARSE-003",
+			Severity: SeverityWarning,
+			Message:  "parse recursion depth exceeded; treating remainder as raw text",
+			Range:    sourceRange(source, 0, len(source)),
+		}}}
+		return doc, prevTree
+	}
+	ctx.containerDepth++
+	defer func() { ctx.containerDepth-- }()
 	source = normalizeLineEndings(source)
 	source = lowerMarkdownPlusSource(source)
 	// tree-sitter markdown requires a trailing newline for correct parsing.
@@ -1100,8 +1131,38 @@ func appendParsedChunkCtx(children []*Node, chunk []byte, source []byte, offset 
 // ctx is non-nil, the body is cached by content hash; cached returns have
 // already been shifted relative to the outer source so the caller must not
 // re-shift them.
+//
+// Recursion guard: an unclosed container directive auto-closes at end of
+// document and its body is recursively parsed. If that body re-contains the
+// same opener fence (e.g. an opener literal that survived a literal
+// table-cell or backtick span), the recursion would not terminate. Cap
+// container-body depth via ctx.containerDepth.
 func parseBodyChunkCtx(source []byte, bodyStart, bodyEnd int, ctx *parseCtx) (*Document, bool) {
 	chunk := source[bodyStart:bodyEnd]
+	if ctx != nil {
+		if ctx.containerDepth >= maxContainerDepth {
+			// Bail out — treat the body as a raw paragraph wrapped in a
+			// minimal NodeDocument so the outer container still has well-
+			// formed children but no further recursion occurs.
+			root := &Node{
+				Type: NodeDocument,
+				Children: []*Node{{
+					Type:    NodeParagraph,
+					Literal: string(chunk),
+					Range:   sourceRange(source, bodyStart, bodyEnd),
+				}},
+				Range: sourceRange(source, bodyStart, bodyEnd),
+			}
+			return &Document{Root: root, Source: source, diagnostics: []Diagnostic{{
+				Code:     "MDPP-PARSE-003",
+				Severity: SeverityWarning,
+				Message:  "container directive body recursion depth exceeded; treating remainder as raw text",
+				Range:    sourceRange(source, bodyStart, bodyEnd),
+			}}}, false
+		}
+		ctx.containerDepth++
+		defer func() { ctx.containerDepth-- }()
+	}
 	if ctx == nil {
 		return parseDocument(chunk), false
 	}

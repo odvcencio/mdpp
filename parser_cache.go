@@ -174,7 +174,19 @@ type parseCtx struct {
 	// present here at the end of the parse represent stale paragraphs /
 	// chunks no longer in the document and are evicted to bound memory.
 	seen map[cacheKey]struct{}
+	// containerDepth tracks recursive container-directive body parsing so a
+	// pathological document — e.g. one whose body contains the same opener
+	// fence inside an inline span, table cell, or unclosed outer fence —
+	// cannot blow the stack via unbounded re-entry through
+	// parseContainerChildrenCtx → parseBodyChunkCtx → parseDocumentCtx.
+	containerDepth int
 }
+
+// maxContainerDepth caps recursive container-directive body parsing. Real
+// authored documents nest containers at most a few levels; anything beyond
+// this threshold is either malformed or a recursion trap (a literal opener
+// inside a backtick span / table cell that the directive scanner ignores).
+const maxContainerDepth = 32
 
 func (c *parseCtx) recordSeen(k cacheKey) {
 	if c == nil {
