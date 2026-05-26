@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/mdpp"
-	mdppfmt "github.com/odvcencio/mdpp/fmt"
-	"github.com/odvcencio/mdpp/lint"
+	"m31labs.dev/mdpp"
+	mdppfmt "m31labs.dev/mdpp/fmt"
+	"m31labs.dev/mdpp/lint"
 )
 
 func documentDiagnostics(uri DocumentURI, doc *mdpp.Document, index *LineIndex) []Diagnostic {

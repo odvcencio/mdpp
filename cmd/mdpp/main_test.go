@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 func TestRenderWritesHTMLToStdout(t *testing.T) {

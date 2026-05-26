@@ -7,7 +7,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 func TestFormatConformanceCorpusIdempotentAndStable(t *testing.T) {

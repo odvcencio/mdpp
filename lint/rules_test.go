@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 func TestLintImplementedRulesPositiveCases(t *testing.T) {

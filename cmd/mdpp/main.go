@@ -9,9 +9,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/odvcencio/mdpp"
-	mdppfmt "github.com/odvcencio/mdpp/fmt"
-	mdpplint "github.com/odvcencio/mdpp/lint"
+	"m31labs.dev/mdpp"
+	mdppfmt "m31labs.dev/mdpp/fmt"
+	mdpplint "m31labs.dev/mdpp/lint"
 )
 
 const (

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/odvcencio/mdpp/internal/emoji"
+	"m31labs.dev/mdpp/internal/emoji"
 )
 
 var emojiPattern = regexp.MustCompile(`:([a-z0-9_+-]+):`)

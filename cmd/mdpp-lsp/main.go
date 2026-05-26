@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/mdpp/lsp"
+	"m31labs.dev/mdpp/lsp"
 )
 
 func main() {

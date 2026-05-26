@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 // Severity classifies a diagnostic.

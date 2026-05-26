@@ -10,7 +10,7 @@ import (
 
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 // Options configures Render.

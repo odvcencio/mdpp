@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 type semanticToken struct {

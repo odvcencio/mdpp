@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 var (

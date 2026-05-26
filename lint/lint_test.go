@@ -3,7 +3,7 @@ package lint
 import (
 	"testing"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 func TestLintUndefinedFootnote(t *testing.T) {

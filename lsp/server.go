@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 type Server struct {

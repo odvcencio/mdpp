@@ -3,7 +3,7 @@ package lsp
 import (
 	"sync"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 var (

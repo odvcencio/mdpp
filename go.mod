@@ -1,4 +1,4 @@
-module github.com/odvcencio/mdpp
+module m31labs.dev/mdpp
 
 go 1.26
 

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 var updateConformance = flag.Bool("update", false, "update examples/conformance expected PDF PNG files")

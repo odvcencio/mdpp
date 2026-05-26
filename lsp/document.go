@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
-	"github.com/odvcencio/mdpp"
+	"m31labs.dev/mdpp"
 )
 
 type DocumentStore struct {
