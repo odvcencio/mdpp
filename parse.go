@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammargen"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
 
@@ -37,7 +38,12 @@ var (
 
 func blockLang() *gotreesitter.Language {
 	mdLangOnce.Do(func() {
-		mdLang = grammars.MarkdownLanguage()
+		lang, err := grammargen.GenerateLanguage(grammargen.MarkdownGrammar())
+		if err != nil {
+			panic("mdpp: grammargen.GenerateLanguage(MarkdownGrammar) failed: " + err.Error())
+		}
+		grammars.AdaptScannerForLanguage("markdown", lang)
+		mdLang = lang
 		mdEntry = grammars.DetectLanguageByName("markdown")
 	})
 	return mdLang
@@ -448,6 +454,13 @@ func parseSimpleBlockquoteDocument(source []byte) *Document {
 		if strings.HasPrefix(strings.TrimSpace(content), "[") {
 			// Defer admonitions and bracketed blockquote headings to the
 			// slow path which has dedicated post-processors.
+			return nil
+		}
+		if strings.HasPrefix(strings.TrimSpace(content), ">") {
+			// Nested blockquote (`> > inner`). The recursive strip-and-reparse
+			// here flattens the nesting because the inner `> inner` line parses
+			// to a bare block_quote_marker. The tree-sitter grammar emits a
+			// proper nested `block_quote` wrapper, so defer to the slow path.
 			return nil
 		}
 		contentLines = append(contentLines, content)
@@ -1335,6 +1348,16 @@ func protectSlowATXHeadingPunctuation(source []byte) ([]byte, []headingTextRepai
 			previousLineCanBeSetextHeading = false
 		} else if inFence {
 			previousLineCanBeSetextHeading = false
+		} else if text, htmlOffsets, ok := slowATXHeadingRawTextHTML(line); ok {
+			if protected == nil {
+				protected = append([]byte(nil), source...)
+			}
+			for _, off := range htmlOffsets {
+				protected[start+off] = '0'
+			}
+			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text})
+			headingOrdinal++
+			previousLineCanBeSetextHeading = false
 		} else if text, punctOffset, ok := slowATXHeadingPunctuation(line); ok {
 			if protected == nil {
 				protected = append([]byte(nil), source...)
@@ -1362,6 +1385,54 @@ func protectSlowATXHeadingPunctuation(source []byte) ([]byte, []headingTextRepai
 		return source, nil
 	}
 	return protected, repairs
+}
+
+// rawTextHTMLTags are the CommonMark HTML-block type-1 raw-text elements.
+// The generated grammar fails (emits an ERROR node, dropping the whole
+// heading) when an ATX heading's content contains a matched open+close pair
+// for one of these — e.g. `# <script>x</script>`. Neutralising the slash in
+// each closing tag lets the heading parse as a normal atx_heading; the
+// original text is then restored verbatim by repairProtectedHeadings (which
+// re-parses it as inline content, where the renderer escapes the raw HTML).
+var rawTextHTMLTags = []string{"script", "style", "pre", "textarea"}
+
+// slowATXHeadingRawTextHTML reports whether an ATX heading line carries a
+// raw-text HTML element with a matching closing tag that the grammar cannot
+// parse. It returns the heading's text content and the byte offsets (relative
+// to the line) of the '/' in each offending closing tag, which the caller
+// neutralises so the heading parses cleanly.
+func slowATXHeadingRawTextHTML(line []byte) (string, []int, bool) {
+	textStart, textEnd, ok := atxHeadingTextRange(line)
+	if !ok || textStart >= textEnd {
+		return "", nil, false
+	}
+	text := string(line[textStart:textEnd])
+	lower := strings.ToLower(text)
+	var offsets []int
+	for _, tag := range rawTextHTMLTags {
+		open := "<" + tag
+		closeTag := "</" + tag
+		// Require both an opening and a closing tag — a lone `</script>` or a
+		// lone `<script>` parses fine and must be left untouched.
+		if !strings.Contains(lower, open) || !strings.Contains(lower, closeTag) {
+			continue
+		}
+		searchFrom := 0
+		for {
+			idx := strings.Index(lower[searchFrom:], closeTag)
+			if idx < 0 {
+				break
+			}
+			abs := searchFrom + idx
+			// abs points at '<'; the '/' is the next byte.
+			offsets = append(offsets, textStart+abs+1)
+			searchFrom = abs + len(closeTag)
+		}
+	}
+	if len(offsets) == 0 {
+		return "", nil, false
+	}
+	return text, offsets, true
 }
 
 func slowATXHeadingPunctuation(line []byte) (string, int, bool) {
@@ -3357,20 +3428,56 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 		childTypes[i] = bt.NodeType(n.Child(i))
 	}
 
-	// Pattern: block_quote_marker + paragraph/... = blockquote
+	// Pattern: block_quote_marker + paragraph/... = blockquote.
+	//
+	// tree-sitter-markdown sometimes hoists several blank-line-separated
+	// blockquotes into a single flat section (block_quote_marker, paragraph,
+	// block_quote_marker, paragraph, ...) instead of wrapping each in its own
+	// block_quote node. A fresh block_quote_marker that follows a blank-line
+	// gap in the source begins a new, independent blockquote — split on it so
+	// each quote becomes its own NodeBlockquote (otherwise downstream passes
+	// such as admonition detection only ever see the first quote).
 	if childTypes[0] == "block_quote_marker" {
-		bq := newNodeFromTree(NodeBlockquote, n)
-		for i := 1; i < n.ChildCount(); i++ {
+		var quotes []*Node
+		var bq *Node
+		prevEnd := -1
+		for i := 0; i < n.ChildCount(); i++ {
 			child := n.Child(i)
 			ct := childTypes[i]
+			if ct == "block_quote_marker" {
+				startNewQuote := bq == nil
+				if !startNewQuote && prevEnd >= 0 && int(child.StartByte()) > prevEnd {
+					// A byte gap before a fresh marker means tree-sitter saw a
+					// blank-line break: the previous quote ended and a new,
+					// independent blockquote begins. Markers belonging to the
+					// same quote sit flush against the preceding content.
+					startNewQuote = true
+				}
+				if startNewQuote {
+					bq = newNodeFromTree(NodeBlockquote, n)
+					quotes = append(quotes, bq)
+				}
+				prevEnd = int(child.EndByte())
+				continue
+			}
+			prevEnd = int(child.EndByte())
 			if ct == "block_continuation" {
 				continue
+			}
+			if bq == nil {
+				bq = newNodeFromTree(NodeBlockquote, n)
+				quotes = append(quotes, bq)
 			}
 			if converted := convertBlock(bt, child, source); converted != nil {
 				bq.Children = append(bq.Children, converted)
 			}
 		}
-		return bq
+		if len(quotes) == 1 {
+			return quotes[0]
+		}
+		wrapper := newNodeFromTree(NodeDocument, n)
+		wrapper.Children = quotes
+		return wrapper
 	}
 
 	// Pattern: list_item children = list
@@ -3383,12 +3490,29 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 	}
 	if hasListItem {
 		list := newNodeFromTree(NodeList, n)
+		var lastItem *Node
 		for i := 0; i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if bt.NodeType(child) == "list_item" {
+			ct := bt.NodeType(child)
+			if ct == "list_item" {
 				applyListMarkerAttrs(bt, list, child)
 				if converted := convertListItem(bt, child, source); converted != nil {
 					list.Children = append(list.Children, converted)
+					lastItem = converted
+				}
+				continue
+			}
+			if ct == "block_continuation" || ct == "_whitespace" {
+				continue
+			}
+			// A non-list_item block sitting between list_items is a loose-list
+			// continuation: tree-sitter-markdown hoists the blank-line-separated
+			// continuation paragraph to the section level rather than nesting it
+			// inside the preceding item. Re-attach it to the most recent item so
+			// the list stays a single list and the content is not dropped.
+			if lastItem != nil {
+				if converted := convertBlock(bt, child, source); converted != nil {
+					lastItem.Children = append(lastItem.Children, converted)
 				}
 			}
 		}
