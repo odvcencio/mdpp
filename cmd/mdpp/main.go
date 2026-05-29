@@ -12,6 +12,8 @@ import (
 	"m31labs.dev/mdpp"
 	mdppfmt "m31labs.dev/mdpp/fmt"
 	mdpplint "m31labs.dev/mdpp/lint"
+	"m31labs.dev/sirena"
+	"m31labs.dev/sirena/fence"
 )
 
 const (
@@ -393,13 +395,61 @@ func renderOptions(headingIDs bool, highlight bool, unsafeHTML bool, hardWraps b
 		return mdpp.RenderOptions{}, err
 	}
 	return mdpp.RenderOptions{
-		HeadingIDs:    headingIDs,
-		HighlightCode: highlight,
-		UnsafeHTML:    unsafeHTML,
-		HardWraps:     hardWraps,
-		WrapEmoji:     wrapEmoji,
-		Math:          math,
+		HeadingIDs:     headingIDs,
+		HighlightCode:  highlight,
+		UnsafeHTML:     unsafeHTML,
+		HardWraps:      hardWraps,
+		WrapEmoji:      wrapEmoji,
+		Math:           math,
+		SirenaRenderer: sirenaFenceRenderer,
 	}, nil
+}
+
+// sirenaFenceRenderer adapts sirena's fence package to mdpp's sirena-free
+// SirenaRenderer seam. This is the only place the mdpp CLI imports sirena;
+// the mdpp library itself stays dependency-free.
+func sirenaFenceRenderer(body string, o mdpp.SirenaFenceOptions) (mdpp.SirenaFenceResult, error) {
+	res, err := fence.Render([]byte(body), fence.Options{
+		ViewRef:      o.View,
+		Theme:        o.Theme,
+		Interactive:  o.Interactive,
+		StrictBudget: o.StrictBudget,
+	})
+	if err != nil {
+		return mdpp.SirenaFenceResult{}, err
+	}
+	return mdpp.SirenaFenceResult{
+		SVG:         res.SVG,
+		Diagnostics: mapSirenaDiagnostics(res.Diagnostics),
+	}, nil
+}
+
+func mapSirenaDiagnostics(in []sirena.Diagnostic) []mdpp.Diagnostic {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]mdpp.Diagnostic, len(in))
+	for i, d := range in {
+		out[i] = mdpp.Diagnostic{
+			Code:     d.Code,
+			Severity: mapSirenaSeverity(d.Severity),
+			Message:  d.Message,
+		}
+	}
+	return out
+}
+
+// mapSirenaSeverity translates by name, not value: sirena orders Error=0,
+// mdpp orders Info=0, so a numeric cast would invert the scale.
+func mapSirenaSeverity(s sirena.Severity) mdpp.Severity {
+	switch s {
+	case sirena.SeverityError:
+		return mdpp.SeverityError
+	case sirena.SeverityWarning:
+		return mdpp.SeverityWarning
+	default:
+		return mdpp.SeverityInfo
+	}
 }
 
 func parseMathOption(mode string) (mdpp.MathOption, error) {
