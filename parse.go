@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
-	"github.com/odvcencio/gotreesitter/grammargen"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
 
@@ -38,10 +37,14 @@ var (
 
 func blockLang() *gotreesitter.Language {
 	mdLangOnce.Do(func() {
-		lang, err := grammargen.GenerateLanguage(grammargen.MarkdownGrammar())
-		if err != nil {
-			panic("mdpp: grammargen.GenerateLanguage(MarkdownGrammar) failed: " + err.Error())
-		}
+		// Use the precompiled embedded grammar rather than generating the
+		// LALR tables at runtime. grammargen.GenerateLanguage(MarkdownGrammar())
+		// allocates ~0.5GB and takes seconds on EVERY fresh process — a severe
+		// cost for short-lived CLI consumers (e.g. the hypha CLI, which parses
+		// markdown on every write path and was spinning toward OOM). The
+		// embedded grammars.MarkdownLanguage() is the same grammar without that
+		// cost, and mirrors inlineLang()'s already-embedded path.
+		lang := grammars.MarkdownLanguage()
 		grammars.AdaptScannerForLanguage("markdown", lang)
 		mdLang = lang
 		mdEntry = grammars.DetectLanguageByName("markdown")
