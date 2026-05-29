@@ -9,6 +9,4 @@ require (
 
 require github.com/oklog/ulid/v2 v2.1.1 // indirect
 
-require m31labs.dev/sirena v0.0.0-00010101000000-000000000000
-
-replace m31labs.dev/sirena => ../sirena
+require m31labs.dev/sirena v0.0.2-internal
