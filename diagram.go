@@ -25,6 +25,8 @@ func codeBlockToDiagram(cb *Node) *Node {
 func diagramFenceInfo(language, source string) (syntax, kind string, ok bool) {
 	lang := normalizedFenceLanguage(language)
 	switch lang {
+	case "sirena", "sir":
+		return "sirena", "sirena", true
 	case "mermaid", "mmd":
 		return "mermaid", inferMermaidDiagramKind(source), true
 	case "flow", "flowchart", "graph":

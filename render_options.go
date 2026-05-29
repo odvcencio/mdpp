@@ -13,6 +13,9 @@ type RenderOptions struct {
 	NodeRenderers     map[NodeType]NodeRenderer
 	Math              MathOption
 	Sanitize          bool
+	// SirenaRenderer, when set, renders ```sirena / ```sir fences to inline
+	// SVG. Wired by consumers (e.g. cmd/mdpp) so the library stays sirena-free.
+	SirenaRenderer SirenaRenderer
 }
 
 // MathOption selects how math nodes render.
@@ -58,6 +61,9 @@ func rendererFromOptions(opts RenderOptions) *Renderer {
 	}
 	for typ, fn := range opts.NodeRenderers {
 		rendererOptions = append(rendererOptions, WithNodeRenderer(typ, fn))
+	}
+	if opts.SirenaRenderer != nil {
+		rendererOptions = append(rendererOptions, WithSirenaRenderer(opts.SirenaRenderer))
 	}
 	r := NewRenderer(rendererOptions...)
 	r.math = opts.Math

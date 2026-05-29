@@ -26,6 +26,7 @@ type Renderer struct {
 	containerHTML   func(c *Node, body string) string
 	sourcePositions bool
 	nodeRenderers   map[NodeType]NodeRenderer
+	sirenaRenderer  SirenaRenderer
 }
 
 // Option configures a Renderer.

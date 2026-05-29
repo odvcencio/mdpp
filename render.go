@@ -97,7 +97,7 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString("</code></pre>\n")
 
 	case NodeDiagram:
-		renderDiagramInto(b, n)
+		r.renderDiagramInto(b, n)
 
 	case NodeFrontmatter:
 		return
@@ -642,7 +642,17 @@ func writeTableAlignAttr(b *strings.Builder, aligns []string, idx int) {
 	b.WriteByte('"')
 }
 
-func renderDiagramInto(b *strings.Builder, n *Node) {
+func (r *Renderer) renderDiagramInto(b *strings.Builder, n *Node) {
+	// sirena fences render to inline SVG when a SirenaRenderer is wired
+	// (cmd/mdpp wires sirena.fence.Render). On renderer failure or an empty
+	// result, fall through to the source-passthrough below so content is
+	// never lost — matching the mermaid path.
+	if n.Attrs["syntax"] == "sirena" && r != nil && r.sirenaRenderer != nil {
+		if r.renderSirenaInto(b, n) {
+			return
+		}
+	}
+
 	syntax := n.Attrs["syntax"]
 	if syntax == "" {
 		syntax = "diagram"
