@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Hardening tests cover features that exist and work, filling gaps the prior
@@ -606,3 +607,109 @@ func assertHeadingCount(t *testing.T, doc *Document, want int) {
 
 // Silence unused import warning on fmt when the only use above is via %q in t.Fatalf.
 var _ = fmt.Sprintf
+
+// --- GLR complexity guard (bug #2) ---
+
+// TestGLRGuard_PathologicalLongLine verifies that a ~30 KB single line of
+// inline-ambiguous content (the GLR-cliff case) returns in well under a second
+// and produces a Document with the MDPP-PARSE-004 diagnostic rather than
+// hanging or OOM-ing the process.
+func TestGLRGuard_PathologicalLongLine(t *testing.T) {
+	// Build a ~30 000-byte line with dense inline-ambiguous chars.
+	unit := "a *b* _c_ [d](e) {f} \"g\" --> "
+	repeat := (30000 / len(unit)) + 1
+	longLine := strings.Repeat(unit, repeat)[:30000]
+	src := []byte("# H\n\n" + longLine + "\n")
+
+	start := time.Now()
+	doc, err := Parse(src)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Parse returned unexpected error: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("Parse returned nil document")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Parse took %v — should be <5s (GLR guard not firing?)", elapsed)
+	}
+
+	// Expect the MDPP-PARSE-004 diagnostic on the long-line body.
+	found := false
+	for _, d := range doc.Diagnostics() {
+		if d.Code == "MDPP-PARSE-004" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("want MDPP-PARSE-004 diagnostic; got diagnostics: %v", doc.Diagnostics())
+	}
+}
+
+// TestGLRGuard_JustUnderThreshold verifies that a line just below
+// maxGLRLineBytes (even with inline-ambiguous chars) parses normally.
+func TestGLRGuard_JustUnderThreshold(t *testing.T) {
+	// Build a line of maxGLRLineBytes-1 bytes with inline-ambiguous chars.
+	unit := "*_"
+	base := strings.Repeat(unit, (maxGLRLineBytes-1)/len(unit))
+	longLine := (base + strings.Repeat("a", maxGLRLineBytes-1))[:maxGLRLineBytes-1]
+	src := []byte("# H\n\n" + longLine + "\n")
+	doc, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	for _, d := range doc.Diagnostics() {
+		if d.Code == "MDPP-PARSE-004" {
+			t.Errorf("unexpected MDPP-PARSE-004 for line of length %d (threshold %d)", len(longLine), maxGLRLineBytes)
+		}
+	}
+}
+
+// TestGLRGuard_JustOverThreshold verifies that a line of maxGLRLineBytes+1
+// bytes with inline-ambiguous chars triggers the guard and emits MDPP-PARSE-004.
+func TestGLRGuard_JustOverThreshold(t *testing.T) {
+	// Build a line of maxGLRLineBytes+1 bytes with inline-ambiguous chars.
+	unit := "*_"
+	base := strings.Repeat(unit, (maxGLRLineBytes+1)/len(unit)+1)
+	longLine := base[:maxGLRLineBytes+1]
+	src := []byte("# H\n\n" + longLine + "\n")
+	doc, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	found := false
+	for _, d := range doc.Diagnostics() {
+		if d.Code == "MDPP-PARSE-004" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("want MDPP-PARSE-004 for line of length %d (threshold %d); got: %v",
+			len(longLine), maxGLRLineBytes, doc.Diagnostics())
+	}
+}
+
+// TestGLRGuard_LongPlainTextLine verifies that a very long plain-text line
+// (no inline-ambiguous chars) is NOT blocked by the guard. This covers the
+// case of a large paragraph of space-separated plain words.
+func TestGLRGuard_LongPlainTextLine(t *testing.T) {
+	// 50 KB of plain words — same shape as TestCorpus_StressHugeParagraph.
+	words := make([]string, 10_000)
+	for i := range words {
+		words[i] = "word"
+	}
+	longLine := strings.Join(words, " ")
+	src := []byte(longLine + "\n")
+	doc, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	for _, d := range doc.Diagnostics() {
+		if d.Code == "MDPP-PARSE-004" {
+			t.Errorf("unexpected MDPP-PARSE-004 for plain-text long line")
+		}
+	}
+}

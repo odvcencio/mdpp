@@ -293,6 +293,45 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 			return doc, nil
 		}
 	}
+
+	// GLR complexity guard: the inline-markdown GLR parser has a near-
+	// discontinuous parse-stack explosion on single lines that are long AND
+	// dense with inline-ambiguous characters (*, _, [, ], {, }, ", -->, …).
+	// Above ~25 KB on such a line the parse can run for minutes and allocate
+	// multiple gigabytes (hotspots: mergeStacksWithScratch, applyReduceAction-
+	// FromGSS). Apply a pre-guard: if any single line exceeds maxGLRLineByte
+	// bytes of non-whitespace-only content, skip the GLR parser and treat the
+	// whole document as raw text with a diagnostic. The threshold is generous
+	// (~16 KB) — no plausible hand-authored paragraph reaches that length —
+	// but still well below the cliff (~25 KB) where the pathology becomes
+	// unbounded.
+	if hasProblematicLongLine(source, maxGLRLineBytes) {
+		releasePrev()
+		root := &Node{
+			Type:  NodeDocument,
+			Range: sourceRange(source, 0, len(source)),
+			Children: []*Node{{
+				Type:    NodeParagraph,
+				Literal: string(source),
+				Range:   sourceRange(source, 0, len(source)),
+			}},
+		}
+		doc := &Document{
+			Root:   root,
+			Source: source,
+			diagnostics: []Diagnostic{{
+				Code:     "MDPP-PARSE-004",
+				Severity: SeverityWarning,
+				Message:  "parse aborted: input contains a line exceeding the GLR complexity limit; treated as raw text",
+				Range:    sourceRange(source, 0, len(source)),
+			}},
+		}
+		if topLevel && ctx != nil {
+			ctx.cache.pruneNotIn(ctx.seen)
+		}
+		return doc, nil
+	}
+
 	parseSource, headingRepairs := protectSlowATXHeadingPunctuation(source)
 
 	lang := blockLang()
@@ -502,6 +541,41 @@ func stripBlockquoteMarker(line string) (string, bool) {
 }
 
 const segmentedDocumentMinBytes = 2048
+
+// maxGLRLineBytes is the per-line byte threshold above which mdpp checks for
+// inline-ambiguous density. The GLR engine's parse-stack explodes on a long
+// line that is dense with inline-ambiguous characters; 16 384 bytes is well
+// below the observed ~25 KB cliff.
+const maxGLRLineBytes = 16384
+
+// glrAmbiguousChars is the set of byte values that feed GLR ambiguity in the
+// inline-markdown grammar. A line that is long AND contains a high density of
+// these characters can cause near-unbounded parse-stack growth.
+// Note: '-' is included because "-->" is a common trigger.
+const glrAmbiguousChars = "*_[]{}\"'-<>"
+
+// hasProblematicLongLine reports whether source contains any
+// newline-delimited line that (a) exceeds limit bytes and (b) has at least
+// one inline-ambiguous character. Plain-text-only long lines (e.g. a 50 KB
+// single paragraph of space-separated words) are not affected by the GLR
+// cliff and are allowed through.
+func hasProblematicLongLine(source []byte, limit int) bool {
+	start := 0
+	for i := 0; i <= len(source); i++ {
+		if i == len(source) || source[i] == '\n' {
+			lineLen := i - start
+			if lineLen > limit {
+				// Check for any inline-ambiguous character.
+				line := source[start:i]
+				if bytes.ContainsAny(line, glrAmbiguousChars) {
+					return true
+				}
+			}
+			start = i + 1
+		}
+	}
+	return false
+}
 
 type blockChunk struct {
 	start int
