@@ -180,6 +180,12 @@ type parseCtx struct {
 	// cannot blow the stack via unbounded re-entry through
 	// parseContainerChildrenCtx → parseBodyChunkCtx → parseDocumentCtx.
 	containerDepth int
+	// inlineTimeoutOccurred is set when the inline GLR parser hits its
+	// per-parse timeout on a pathologically ambiguous span. The block-level
+	// parse reads this after convertBlockCtx returns and attaches a
+	// MDPP-PARSE-005 diagnostic so callers know some inline content was
+	// rendered as raw text rather than fully parsed.
+	inlineTimeoutOccurred bool
 }
 
 // maxContainerDepth caps recursive container-directive body parsing. Real

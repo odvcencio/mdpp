@@ -370,6 +370,18 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 	}
 	repairProtectedHeadings(root, headingRepairs)
 	doc := &Document{Root: root, Source: source}
+	// If any inline span timed out during convertBlockCtx, attach a
+	// MDPP-PARSE-005 diagnostic so callers know some inline content was
+	// rendered as raw text rather than fully parsed. This covers the
+	// sub-16384-byte GLR grind case (bug #2 backstop).
+	if ctx != nil && ctx.inlineTimeoutOccurred {
+		doc.diagnostics = append(doc.diagnostics, Diagnostic{
+			Code:     "MDPP-PARSE-005",
+			Severity: SeverityWarning,
+			Message:  "inline parse aborted: one or more spans exceeded the GLR complexity time limit; affected spans treated as raw text",
+			Range:    sourceRange(source, 0, len(source)),
+		})
+	}
 	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode())
 	doc.extractFrontmatter()
 	postProcess(doc)
@@ -798,7 +810,7 @@ func fastHeadingNode(source []byte, line sourceLine) *Node {
 		Attrs: map[string]string{"level": levelStr(fastHeadingLevel(line.text))},
 		Range: sourceRange(source, line.start, line.end),
 	}
-	heading.Children = parseInlineAt(line.text[textStart:textEnd], source, line.start+textStart)
+	heading.Children = parseInlineAt(line.text[textStart:textEnd], source, line.start+textStart, nil)
 	return heading
 }
 
@@ -866,7 +878,7 @@ func fastTableNode(source []byte, lines []sourceLine, start int) (*Node, int) {
 			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start, lines[i].end)}
 			cell = strings.TrimSpace(cell)
 			if cell != "" {
-				c.Children = parseInlineAt(cell, source, -1)
+				c.Children = parseInlineAt(cell, source, -1, nil)
 			}
 			row.Children = append(row.Children, c)
 		}
@@ -924,7 +936,7 @@ func fastListNode(source []byte, lines []sourceLine, start int) (*Node, int) {
 		}
 		item := &Node{Type: NodeListItem, Range: sourceRange(source, lines[i].start, lines[i].end)}
 		para := &Node{Type: NodeParagraph, Range: item.Range}
-		para.Children = parseInlineAt(itemText, source, -1)
+		para.Children = parseInlineAt(itemText, source, -1, nil)
 		item.Children = []*Node{para}
 		list.Children = append(list.Children, item)
 		list.Range.EndByte = lines[i].end
@@ -1017,7 +1029,7 @@ func fastParagraphNode(source []byte, lines []sourceLine, start int) (*Node, int
 		end++
 	}
 	para := &Node{Type: NodeParagraph, Range: sourceRange(source, lines[start].start, lines[end-1].end)}
-	para.Children = parseInlineAt(text.String(), source, lines[start].start)
+	para.Children = parseInlineAt(text.String(), source, lines[start].start, nil)
 	return para, end
 }
 
@@ -2017,7 +2029,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 			}
 			heading.Attrs["level"] = levelStr(level)
 			if text, start, ok := extractHeadingTextSpan(bt, n); ok && text != "" {
-				heading.Children = append(heading.Children, parseInlineAt(text, source, start)...)
+				heading.Children = append(heading.Children, parseInlineAt(text, source, start, ctx)...)
 			}
 			ctx.cache.put(key, &cacheEntry{root: cloneForCache(heading, int(n.StartByte())), baseStart: int(n.StartByte())})
 			return heading
@@ -2029,7 +2041,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 		}
 		heading.Attrs["level"] = levelStr(level)
 		if text, start, ok := extractHeadingTextSpan(bt, n); ok && text != "" {
-			heading.Children = append(heading.Children, parseInlineAt(text, source, start)...)
+			heading.Children = append(heading.Children, parseInlineAt(text, source, start, ctx)...)
 		}
 		return heading
 
@@ -2083,12 +2095,12 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 			if childStart > cursor {
 				gap := nodeText[cursor:childStart]
 				if gap != "" {
-					para.Children = append(para.Children, parseInlineAt(gap, source, int(nodeStart+childStart))...)
+					para.Children = append(para.Children, parseInlineAt(gap, source, int(nodeStart+childStart), ctx)...)
 				}
 			}
 
 			if bt.NodeType(child) == "inline" {
-				para.Children = append(para.Children, parseInlineAt(bt.NodeText(child), source, int(child.StartByte()))...)
+				para.Children = append(para.Children, parseInlineAt(bt.NodeText(child), source, int(child.StartByte()), ctx)...)
 			}
 			if childEnd > cursor {
 				cursor = childEnd
@@ -2098,7 +2110,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 		if cursor < textLen {
 			gap := nodeText[cursor:]
 			if strings.TrimSpace(gap) != "" {
-				para.Children = append(para.Children, parseInlineAt(gap, source, int(nodeStart+cursor))...)
+				para.Children = append(para.Children, parseInlineAt(gap, source, int(nodeStart+cursor), ctx)...)
 			}
 		}
 		// Split text nodes on newlines → insert NodeSoftBreak
@@ -2388,7 +2400,7 @@ func convertTable(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []byt
 					start, end := trimSpaceSpan(raw)
 					text := raw[start:end]
 					if text != "" {
-						c.Children = append(c.Children, parseInlineAt(text, source, int(cell.StartByte())+start)...)
+						c.Children = append(c.Children, parseInlineAt(text, source, int(cell.StartByte())+start, nil)...)
 					}
 					row.Children = append(row.Children, c)
 				}
@@ -2442,10 +2454,10 @@ func readDelimiterRowAligns(bt *gotreesitter.BoundTree, delim *gotreesitter.Node
 
 // parseInline parses inline markdown text using the markdown_inline grammar.
 func parseInline(text string, source []byte) []*Node {
-	return parseInlineAt(text, source, -1)
+	return parseInlineAt(text, source, -1, nil)
 }
 
-func parseInlineAt(text string, source []byte, baseOffset int) []*Node {
+func parseInlineAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
 	if !needsInlineTreeParser(text) {
 		return splitTextNewlines([]*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))})
 	}
@@ -2462,13 +2474,13 @@ func parseInlineAt(text string, source []byte, baseOffset int) []*Node {
 				if baseOffset >= 0 {
 					chunkBase = baseOffset + offset
 				}
-				nodes = append(nodes, parseInlineWithRecoveryAt(chunk, source, chunkBase, true)...)
+				nodes = append(nodes, parseInlineWithRecoveryAt(chunk, source, chunkBase, true, ctx)...)
 				offset += len(chunk)
 			}
 			return nodes
 		}
 	}
-	return parseInlineWithRecoveryAt(text, source, baseOffset, true)
+	return parseInlineWithRecoveryAt(text, source, baseOffset, true, ctx)
 }
 
 const maxInlineParseChunk = 320
@@ -2848,18 +2860,25 @@ func countUnescaped(text string, marker byte) int {
 }
 
 func parseInlineWithRecovery(text string, source []byte, recoverSuffix bool) []*Node {
-	return parseInlineWithRecoveryAt(text, source, -1, recoverSuffix)
+	return parseInlineWithRecoveryAt(text, source, -1, recoverSuffix, nil)
 }
 
-func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recoverSuffix bool) []*Node {
-	lang := inlineLang()
-	if lang == nil {
+func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recoverSuffix bool, ctx *parseCtx) []*Node {
+	if inlineLang() == nil {
 		return []*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))}
 	}
 
 	src := []byte(text)
-	tree, err := parsePooled(lang, mdInlineEntry, src)
-	if err != nil || tree == nil {
+	tree, timedOut, err := parsePooledInline(src)
+	if err != nil || tree == nil || timedOut {
+		// On timeout, record it in the parse context so the surrounding block
+		// parse can attach a MDPP-PARSE-005 diagnostic to the document.
+		if timedOut && ctx != nil {
+			ctx.inlineTimeoutOccurred = true
+		}
+		if tree != nil {
+			tree.Release()
+		}
 		return []*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))}
 	}
 	defer tree.Release()
@@ -2881,7 +2900,7 @@ func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recov
 				if baseOffset >= 0 {
 					suffixBase = baseOffset + end
 				}
-				nodes = append(nodes, parseInlineWithRecoveryAt(suffix, source, suffixBase, false)...)
+				nodes = append(nodes, parseInlineWithRecoveryAt(suffix, source, suffixBase, false, ctx)...)
 			} else {
 				appendTextRange(&nodes, suffix, inlineSpanRange(source, baseOffset, end, len(src)))
 			}
@@ -3030,12 +3049,12 @@ func appendLooseBlockText(nodes *[]*Node, text string, attach bool, source []byt
 		}
 		if attach && i == 0 && len(*nodes) > 0 && (*nodes)[len(*nodes)-1].Type == NodeParagraph {
 			last := (*nodes)[len(*nodes)-1]
-			last.Children = append(last.Children, parseInline(segment, source)...)
+			last.Children = append(last.Children, parseInlineAt(segment, source, -1, ctx)...)
 			last.Children = splitTextNewlines(last.Children)
 			continue
 		}
 		para := newNode(NodeParagraph)
-		para.Children = append(para.Children, parseInline(trimmed, source)...)
+		para.Children = append(para.Children, parseInlineAt(trimmed, source, -1, ctx)...)
 		para.Children = splitTextNewlines(para.Children)
 		*nodes = append(*nodes, para)
 	}
@@ -3240,7 +3259,7 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 				if baseOffset >= 0 {
 					childBase = baseOffset + int(child.StartByte())
 				}
-				link.Children = append(link.Children, parseInlineAt(bt.NodeText(child), source, childBase)...)
+				link.Children = append(link.Children, parseInlineAt(bt.NodeText(child), source, childBase, nil)...)
 			case "link_destination":
 				link.Attrs["href"] = bt.NodeText(child)
 			case "link_title":
@@ -3263,7 +3282,7 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 		}
 		if text, ref, ok := referenceLinkParts(raw, typ); ok {
 			childBase := addBaseOffset(baseOffset, int(n.StartByte())+1)
-			link.Children = append(link.Children, parseInlineAt(text, source, childBase)...)
+			link.Children = append(link.Children, parseInlineAt(text, source, childBase, nil)...)
 			if ref != "" {
 				link.Attrs["ref"] = ref
 			}
@@ -3279,7 +3298,7 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 				if baseOffset >= 0 {
 					childBase = baseOffset + int(child.StartByte())
 				}
-				link.Children = append(link.Children, parseInlineAt(bt.NodeText(child), source, childBase)...)
+				link.Children = append(link.Children, parseInlineAt(bt.NodeText(child), source, childBase, nil)...)
 			case "link_label":
 				link.Attrs["ref"] = bt.NodeText(child)
 			}
@@ -3633,7 +3652,7 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 						start, end := trimSpaceSpan(raw)
 						text := raw[start:end]
 						if text != "" {
-							c.Children = append(c.Children, parseInlineAt(text, source, int(cell.StartByte())+start)...)
+							c.Children = append(c.Children, parseInlineAt(text, source, int(cell.StartByte())+start, nil)...)
 						}
 						row.Children = append(row.Children, c)
 					}
@@ -3668,7 +3687,7 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 	if allInlineOrSkip && hasInline {
 		para := newNodeFromTree(NodeParagraph, n)
 		sectionText := strings.TrimRight(bt.NodeText(n), "\n")
-		para.Children = append(para.Children, parseInlineAt(sectionText, source, int(n.StartByte()))...)
+		para.Children = append(para.Children, parseInlineAt(sectionText, source, int(n.StartByte()), nil)...)
 		return para
 	}
 

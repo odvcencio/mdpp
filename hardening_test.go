@@ -713,3 +713,146 @@ func TestGLRGuard_LongPlainTextLine(t *testing.T) {
 		}
 	}
 }
+
+// --- GLR inline timeout guard (bug #2 sub-threshold backstop) ---
+//
+// A line that is under the maxGLRLineBytes pre-guard (16 384) but still dense
+// with inline-ambiguous characters AND has no spaces (so the chunk-splitter
+// cannot help) can grind the inline GLR engine for minutes. The per-parse
+// timeout on the inline parser pool is the backstop.
+//
+// The repro pattern uses characters that appear in the 12 KB JSON-blob case
+// from the hypha CLI: interspersed *, _, [, ], (, ), {, }, ", ->, with no
+// spaces. This prevents splitInlineParseChunks from finding a safe split point
+// (it needs a space-separated boundary), so the whole span reaches
+// parseInlineWithRecoveryAt as one 12 KB chunk where the GLR engine grinds.
+const glrSubThresholdRepeatUnit = `a*b_[c](d){e}"f"-->`
+
+// TestGLRInlineTimeout_12KB verifies that a ~12 KB space-free inline-ambiguous
+// single-line input is aborted by the inline parse timeout and returns in under
+// 5 seconds with a MDPP-PARSE-005 diagnostic.
+func TestGLRInlineTimeout_12KB(t *testing.T) {
+	const targetBytes = 12_000
+	unit := glrSubThresholdRepeatUnit
+	repeat := (targetBytes / len(unit)) + 1
+	longLine := strings.Repeat(unit, repeat)[:targetBytes]
+	src := []byte("# H\n\n" + longLine + "\n")
+
+	start := time.Now()
+	doc, err := Parse(src)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Parse returned unexpected error: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("Parse returned nil document")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Parse took %v — should be <5s (inline timeout not firing?)", elapsed)
+	}
+
+	// Expect the MDPP-PARSE-005 diagnostic from the inline timeout backstop.
+	found := false
+	for _, d := range doc.Diagnostics() {
+		if d.Code == "MDPP-PARSE-005" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("want MDPP-PARSE-005 diagnostic for %d-byte ambiguous line; got: %v", targetBytes, doc.Diagnostics())
+	}
+}
+
+// TestGLRInlineTimeout_13KB mirrors TestGLRInlineTimeout_12KB at 13 KB — the
+// upper end of the hypha CLI's observed spore-body size.
+func TestGLRInlineTimeout_13KB(t *testing.T) {
+	const targetBytes = 13_000
+	unit := glrSubThresholdRepeatUnit
+	repeat := (targetBytes / len(unit)) + 1
+	longLine := strings.Repeat(unit, repeat)[:targetBytes]
+	src := []byte("# H\n\n" + longLine + "\n")
+
+	start := time.Now()
+	doc, err := Parse(src)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Parse returned unexpected error: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("Parse returned nil document")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Parse took %v — should be <5s (inline timeout not firing?)", elapsed)
+	}
+
+	found := false
+	for _, d := range doc.Diagnostics() {
+		if d.Code == "MDPP-PARSE-005" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("want MDPP-PARSE-005 diagnostic for %d-byte ambiguous line; got: %v", targetBytes, doc.Diagnostics())
+	}
+}
+
+// TestGLRInlineTimeout_6KB verifies that a ~6 KB space-free inline-ambiguous
+// line returns in under 5 seconds regardless of whether the inline timeout
+// fires. (6 KB is below the observed grind cliff; behaviour is best-effort.)
+func TestGLRInlineTimeout_6KB(t *testing.T) {
+	const targetBytes = 6_000
+	unit := glrSubThresholdRepeatUnit
+	repeat := (targetBytes / len(unit)) + 1
+	longLine := strings.Repeat(unit, repeat)[:targetBytes]
+	src := []byte("# H\n\n" + longLine + "\n")
+
+	start := time.Now()
+	doc, err := Parse(src)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Parse returned unexpected error: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("Parse returned nil document")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Parse took %v — should be <5s", elapsed)
+	}
+}
+
+// TestGLRInlineTimeout_NormalDocUnchanged verifies that normal documents —
+// including ones with moderate inline markdown — are not affected by the inline
+// timeout. The timeout is 2 s per inline span; legitimate content parses in
+// milliseconds.
+func TestGLRInlineTimeout_NormalDocUnchanged(t *testing.T) {
+	src := `# Hello
+
+This is a **normal** paragraph with _emphasis_, ` + "`code`" + `, and a [link](https://example.com).
+
+- Item one with *some* inline
+- Item two
+
+## Section
+
+| A | B |
+|---|---|
+| x | y |
+`
+	doc, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("Parse returned nil")
+	}
+	for _, d := range doc.Diagnostics() {
+		if d.Code == "MDPP-PARSE-005" {
+			t.Errorf("unexpected MDPP-PARSE-005 on normal document; diagnostics: %v", doc.Diagnostics())
+		}
+	}
+}
