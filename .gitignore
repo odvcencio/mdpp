@@ -3,3 +3,4 @@ dist/
 /mdpp-lsp
 *.prof
 *.test
+docs/superpowers/
