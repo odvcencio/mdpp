@@ -103,6 +103,37 @@ func TestSlideKeepsDocumentFrontmatter(t *testing.T) {
 	}
 }
 
+// SplitSlides must be idempotent: a second call on an already-split document
+// must NOT re-wrap the existing slides into a nested slide layer. Two consumers
+// of the same *Document (e.g. a deck compiler calling SplitSlides and a caller
+// using Document.Slides) must not corrupt the tree.
+func TestSplitSlidesIdempotent(t *testing.T) {
+	doc, err := Parse([]byte("a\n\n---\n\nb\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	SplitSlides(doc)
+	first := DumpTreeForSnapshot(doc.AST())
+	SplitSlides(doc) // second call must be a no-op
+	second := DumpTreeForSnapshot(doc.AST())
+	want := strings.Join([]string{
+		`(Document)`,
+		`  (Slide)`,
+		`    (Paragraph)`,
+		`      (Text "a")`,
+		`  (Slide)`,
+		`    (Paragraph)`,
+		`      (Text "b")`,
+		``,
+	}, "\n")
+	if first != want {
+		t.Errorf("first split drifted\n--- want\n%s\n--- got\n%s", want, first)
+	}
+	if second != first {
+		t.Errorf("SplitSlides not idempotent: second call changed the tree\n--- after 1\n%s\n--- after 2\n%s", first, second)
+	}
+}
+
 // Per-slide frontmatter: a YAML block immediately after a separator becomes
 // that slide's frontmatter, stored in Attrs["frontmatter"], not a child.
 func TestSlidePerSlideFrontmatter(t *testing.T) {

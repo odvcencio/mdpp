@@ -18,22 +18,29 @@ import "strings"
 
 // SplitSlides reinterprets a parsed document into a deck: it groups the
 // document's top-level children into NodeSlide containers (see processSlides).
-// It mutates and returns the same Document for chaining. Calling it more than
-// once is a no-op after the first call (the body is already a run of slides,
-// and there are no top-level thematic breaks left to split on, so the whole
-// thing collapses back into a single slide — callers should split exactly
-// once on a freshly parsed document).
+// It mutates and returns the same Document for chaining, and is idempotent — a
+// second call on an already-split document is a no-op (it does not re-wrap the
+// existing slides), so SplitSlides and Document.Slides are safe to mix on the
+// same document.
+//
+// A leading YAML/YML fenced code block on a slide is lifted into that slide's
+// per-slide frontmatter (Attrs["frontmatter"]) and removed from its rendered
+// children; deck-level frontmatter stays a document-level NodeFrontmatter
+// sibling ahead of the first slide. See processSlides for the full rules.
 func SplitSlides(doc *Document) *Document {
-	if doc == nil {
+	if doc == nil || doc.Root == nil {
 		return doc
 	}
-	processSlides(doc.Root)
+	if !documentHasSlides(doc.Root) {
+		processSlides(doc.Root)
+	}
 	return doc
 }
 
 // Slides returns the deck's top-level NodeSlide nodes, splitting the document
 // in place on first use. If the document has already been split it returns the
-// existing slides without re-splitting.
+// existing slides without re-splitting. As with SplitSlides, a leading YAML/YML
+// fence on a slide is lifted into Attrs["frontmatter"] (see processSlides).
 func (d *Document) Slides() []*Node {
 	if d == nil || d.Root == nil {
 		return nil
@@ -101,22 +108,18 @@ func processSlides(root *Node) {
 	// Group the body into slides, splitting on top-level thematic breaks.
 	var slides []*Node
 	cur := newSlide()
-	curHasContent := false
 	for _, child := range body {
 		if child != nil && child.Type == NodeThematicBreak {
 			slides = append(slides, finalizeSlide(cur))
 			cur = newSlide()
-			curHasContent = false
 			continue
 		}
 		cur.Children = append(cur.Children, child)
-		curHasContent = true
 	}
 	// Always emit the trailing slide. A document that is only frontmatter
 	// (no body) yields a single empty slide, keeping the layer uniform; a
 	// trailing separator likewise yields a final (empty) slide so authors can
 	// end a deck on a blank slide deliberately.
-	_ = curHasContent
 	slides = append(slides, finalizeSlide(cur))
 
 	root.Children = append(preamble, slides...)
