@@ -50,6 +50,15 @@ func postProcess(doc *Document) {
 
 	// TOC runs last so every heading in the final AST is accounted for.
 	processTOC(doc)
+
+	// gosx-slides inline parse seams (Track D). These only fire on unambiguous
+	// MDX constructs (uppercase-led tags, single-level brace interpolation), so
+	// ordinary Markdown is untouched and existing output is unchanged.
+	// Components run before expressions so component props are not scanned as
+	// interpolations. Slide splitting is deliberately NOT here — it changes the
+	// document shape and is opt-in via SplitSlides / Document.Slides.
+	processComponents(doc.Root)
+	processExpressions(doc.Root)
 }
 
 // processReferenceLinks walks the AST and, for every NodeLink that has a
