@@ -48,6 +48,11 @@ const (
 	NodeEmoji
 	NodeDiagram
 	NodeContainerDirective
+	// gosx-slides parse seams (Track D). Produced post-parse by reinterpreting
+	// already-parsed nodes; the grammar is unchanged.
+	NodeSlide      // a deck slide: top-level content grouped between `---` separators
+	NodeComponent  // an inline GoSX component: <Name .../> or <Name>…</Name>
+	NodeExpression // an inline expression interpolation: {expr}
 )
 
 // Node is a single element in the Markdown AST.

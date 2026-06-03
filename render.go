@@ -390,6 +390,49 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString(src)
 		b.WriteString("</a></div>\n")
 
+	case NodeSlide:
+		b.WriteString("<section class=\"slide\"")
+		if fm := n.Attrs["frontmatter"]; fm != "" {
+			b.WriteString(` data-frontmatter="`)
+			b.WriteString(html.EscapeString(fm))
+			b.WriteByte('"')
+		}
+		writeSourceAttrs(r, b, n)
+		b.WriteString(">\n")
+		renderChildrenInto(r, b, n)
+		b.WriteString("</section>\n")
+
+	case NodeComponent:
+		// A GoSX component placeholder. The deck compiler replaces these with
+		// rendered island output; the standalone HTML renderer emits a stable
+		// custom-element host carrying the component name and props so the
+		// document is still inspectable without the island runtime.
+		name := n.Attrs["name"]
+		b.WriteString("<gosx-component data-name=\"")
+		b.WriteString(html.EscapeString(name))
+		b.WriteByte('"')
+		if props := n.Attrs["props"]; props != "" {
+			b.WriteString(` data-props="`)
+			b.WriteString(html.EscapeString(props))
+			b.WriteByte('"')
+		}
+		writeSourceAttrs(r, b, n)
+		if len(n.Children) == 0 {
+			b.WriteString("></gosx-component>")
+			return
+		}
+		b.WriteByte('>')
+		renderChildrenInto(r, b, n)
+		b.WriteString("</gosx-component>")
+
+	case NodeExpression:
+		// An interpolation hole. The deck compiler evaluates n.Literal against
+		// the island scope; the standalone renderer emits a stable host so the
+		// expression source survives a plain render.
+		b.WriteString(`<gosx-expr>`)
+		b.WriteString(html.EscapeString(n.Literal))
+		b.WriteString("</gosx-expr>")
+
 	default:
 		renderChildrenInto(r, b, n)
 	}

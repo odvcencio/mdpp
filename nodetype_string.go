@@ -81,6 +81,12 @@ func (t NodeType) String() string {
 		return "Diagram"
 	case NodeContainerDirective:
 		return "ContainerDirective"
+	case NodeSlide:
+		return "Slide"
+	case NodeComponent:
+		return "Component"
+	case NodeExpression:
+		return "Expression"
 	default:
 		return "Unknown"
 	}
