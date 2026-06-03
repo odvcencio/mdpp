@@ -1842,6 +1842,22 @@ func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ stri
 			} else {
 				cb.Attrs["language"] = strings.TrimSpace(bt.NodeText(child))
 			}
+			// gosx-slides (Track D): lift a `{…}` highlight block out of the
+			// full info string into Attrs["highlights"], e.g. `go {1-3|5}`
+			// yields language="go", highlights="1-3|5". The language token is
+			// the info string's first whitespace-delimited token, so an info
+			// string that is ONLY a brace block leaves no language behind.
+			lang, highlights := parseFenceInfo(bt.NodeText(child))
+			if highlights != "" {
+				cb.Attrs["highlights"] = highlights
+				// Repair the no-language case where the `language` child
+				// captured part of the brace block (e.g. ```{1,4}).
+				if lang == "" {
+					delete(cb.Attrs, "language")
+				} else if cb.Attrs["language"] == "" {
+					cb.Attrs["language"] = lang
+				}
+			}
 		case "code_fence_content":
 			cb.Literal = bt.NodeText(child)
 		}
@@ -1850,6 +1866,35 @@ func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ stri
 		cb.Literal = stripIndentedCodeBlock(bt.NodeText(n))
 	}
 	return codeBlockToDiagram(cb)
+}
+
+// fenceHighlightRe captures the inner content of the first `{…}` block in a
+// fence info string. The content excludes braces so a malformed nested block
+// does not run away.
+var fenceHighlightRe = regexp.MustCompile(`\{([^{}]*)\}`)
+
+// parseFenceInfo splits a code-fence info string into the language token (the
+// first whitespace-delimited token, with any trailing `{…}` block removed) and
+// the inner content of the first `{…}` highlight block. Either result may be
+// empty: an info string of just `{1,4}` yields ("", "1,4"); `go {1-3|5}`
+// yields ("go", "1-3|5"); a plain `go` yields ("go", "").
+func parseFenceInfo(info string) (lang, highlights string) {
+	info = strings.TrimSpace(info)
+	if m := fenceHighlightRe.FindStringSubmatch(info); m != nil {
+		highlights = strings.TrimSpace(m[1])
+		// Remove the brace block so it cannot leak into the language token.
+		info = strings.TrimSpace(fenceHighlightRe.ReplaceAllString(info, ""))
+	}
+	if info == "" {
+		return "", highlights
+	}
+	// Language is the first whitespace-delimited token of what remains.
+	if idx := strings.IndexAny(info, " \t"); idx >= 0 {
+		lang = info[:idx]
+	} else {
+		lang = info
+	}
+	return lang, highlights
 }
 
 // stripIndentedCodeBlock removes the 4-space (or tab) indent from each line
