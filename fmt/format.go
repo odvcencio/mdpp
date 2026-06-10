@@ -182,7 +182,7 @@ func Format(src []byte) ([]byte, error) {
 		out = append(out, formattedLine{text: line, sourceLine: i + 1})
 	}
 
-	out = unwrapSimpleParagraphs(doc.Root, out, lines)
+	out = unwrapSimpleParagraphs(doc.Root, out, lines, doc.Source)
 	out = rewriteOrderedListNumbers(doc.Root, out)
 	out = rewriteCanonicalBlocks(doc.Root, out, lines, src)
 	out = normalizeBlankLineEntries(out)
@@ -871,7 +871,7 @@ func sourceLineIndex(lines []formattedLine, sourceLine int) int {
 	return -1
 }
 
-func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []string) []formattedLine {
+func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []string, src []byte) []formattedLine {
 	if root == nil {
 		return lines
 	}
@@ -899,9 +899,31 @@ func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []str
 				prefix = line[:n.Range.StartCol-1]
 			}
 		}
+		// Neither Range.EndLine nor Range.EndByte is reliable across
+		// paragraph shapes: blank-line-terminated paragraphs report an
+		// exclusive EndLine while lazy continuations report an inclusive one
+		// (trusting EndLine-1 then leaves the true last line behind, and
+		// every format pass appends another copy of it), and EndByte can
+		// overshoot into nested list children. For the paragraphs this pass
+		// unwraps — text and soft-break children only, guaranteed by
+		// canUnwrapParagraph — each soft break followed by more text starts
+		// one more physical line. A trailing soft break (e.g. before a
+		// nested list) does not.
+		endLine := n.Range.StartLine
+		lastText := -1
+		for i, child := range n.Children {
+			if child.Type == mdpp.NodeText && strings.TrimSpace(child.Literal) != "" {
+				lastText = i
+			}
+		}
+		for i, child := range n.Children {
+			if i < lastText && child.Type == mdpp.NodeSoftBreak {
+				endLine++
+			}
+		}
 		spans = append(spans, span{
 			startLine: n.Range.StartLine,
-			endLine:   n.Range.EndLine - 1,
+			endLine:   endLine,
 			text:      prefix + text,
 		})
 		return true
