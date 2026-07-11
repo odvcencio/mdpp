@@ -7,6 +7,7 @@ import (
 	stdfmt "fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"m31labs.dev/mdpp"
@@ -510,8 +511,39 @@ func writeFilePreservingMode(path string, data []byte) error {
 	if err != nil {
 		return stdfmt.Errorf("stat %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, data, info.Mode().Perm()); err != nil {
-		return stdfmt.Errorf("write %s: %w", path, err)
+	// Rename the resolved target rather than replacing a symlink supplied by
+	// the caller. This preserves the CLI's existing follow-symlink behavior.
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return stdfmt.Errorf("resolve %s: %w", path, err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".mdpp-*.tmp")
+	if err != nil {
+		return stdfmt.Errorf("create temporary file for %s: %w", path, err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}()
+	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+		return stdfmt.Errorf("set mode on temporary file for %s: %w", path, err)
+	}
+	written, err := tmp.Write(data)
+	if err != nil {
+		return stdfmt.Errorf("write temporary file for %s: %w", path, err)
+	}
+	if written != len(data) {
+		return stdfmt.Errorf("write temporary file for %s: %w", path, io.ErrShortWrite)
+	}
+	if err := tmp.Sync(); err != nil {
+		return stdfmt.Errorf("sync temporary file for %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return stdfmt.Errorf("close temporary file for %s: %w", path, err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return stdfmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
 }

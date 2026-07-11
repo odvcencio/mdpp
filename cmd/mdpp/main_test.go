@@ -105,11 +105,16 @@ func TestFormatWriteAliasesAreIdempotentAndPreserveMode(t *testing.T) {
 	for _, writeFlag := range []string{"-w", "--write"} {
 		writeFlag := writeFlag
 		t.Run(writeFlag, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "document.md")
+			dir := t.TempDir()
+			path := filepath.Join(dir, "document.md")
 			if err := os.WriteFile(path, input, 0o750); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Chmod(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			originalInfo, err := os.Stat(path)
+			if err != nil {
 				t.Fatal(err)
 			}
 
@@ -134,6 +139,16 @@ func TestFormatWriteAliasesAreIdempotentAndPreserveMode(t *testing.T) {
 			}
 			if got, wantMode := info.Mode().Perm(), os.FileMode(0o750); got != wantMode {
 				t.Fatalf("formatted file mode = %o, want %o", got, wantMode)
+			}
+			if os.SameFile(originalInfo, info) {
+				t.Fatal("formatted file was modified in place, want atomic replacement")
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+				t.Fatalf("temporary files remain after atomic replacement: %v", entries)
 			}
 
 			stdout.Reset()
@@ -160,6 +175,38 @@ func TestFormatWriteAliasesAreIdempotentAndPreserveMode(t *testing.T) {
 				t.Fatalf("check after write: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func TestFormatWriteFollowsSymlinkWithoutReplacingIt(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.md")
+	link := filepath.Join(dir, "document.md")
+	if err := os.WriteFile(target, []byte("Title\n=====\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"fmt", "--write", link}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr.String())
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("write replaced symlink: mode=%v", info.Mode())
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []byte("# Title\n"); !bytes.Equal(got, want) {
+		t.Fatalf("formatted symlink target = %q, want %q", got, want)
 	}
 }
 
