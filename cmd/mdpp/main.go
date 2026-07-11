@@ -68,6 +68,9 @@ func runRender(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 	wrapEmoji := fs.Bool("emoji", false, "wrap emoji in accessible spans")
 	mathMode := fs.String("math", "server", "math rendering mode: server, raw, omit")
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return exitOK
+		}
 		return exitError
 	}
 	if fs.NArg() > 1 {
@@ -125,6 +128,9 @@ func runParse(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 	pretty := fs.Bool("pretty", true, "pretty-print JSON")
 	diagnosticsOnly := fs.Bool("diagnostics-only", false, "emit only diagnostics, suppressing the AST")
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return exitOK
+		}
 		return exitError
 	}
 	if fs.NArg() > 1 {
@@ -170,6 +176,13 @@ func runFormat(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 	diff := fs.Bool("diff", false, "print a simple before/after diff for unformatted files")
 	stdinFilepath := fs.String("stdin-filepath", "", "path to use for stdin diagnostics")
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return exitOK
+		}
+		return exitError
+	}
+	if boolCount(*write, *check, *diff) > 1 {
+		stdfmt.Fprintln(stderr, "mdpp fmt: --write, --check, and --diff are mutually exclusive")
 		return exitError
 	}
 	paths := fs.Args()
@@ -213,18 +226,24 @@ func runFormat(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 			stdfmt.Fprintf(stderr, "mdpp fmt: %v\n", err)
 			return exitError
 		}
-		if bytes.Equal(src, formatted) {
-			continue
-		}
-		changed = true
+		fileChanged := !bytes.Equal(src, formatted)
+		changed = changed || fileChanged
 		if *check {
-			stdfmt.Fprintln(stdout, name)
+			if fileChanged {
+				stdfmt.Fprintln(stdout, name)
+			}
 			continue
 		}
 		if *diff {
-			writeSimpleDiff(stdout, name, src, formatted)
+			if fileChanged {
+				writeSimpleDiff(stdout, name, src, formatted)
+			}
 			continue
 		}
+		// Normal formatting is a source-to-source filter. Always emit the
+		// formatted document, including when the input was already canonical;
+		// suppressing unchanged input makes repeated pipelines produce an empty
+		// document even though formatting succeeded.
 		if _, err := stdout.Write(formatted); err != nil {
 			stdfmt.Fprintf(stderr, "mdpp fmt: write stdout: %v\n", err)
 			return exitError
@@ -248,6 +267,9 @@ func runLint(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 	fs.Bool("no-color", false, "accepted for compatibility; output is currently plain")
 	fix := fs.Bool("fix", false, "apply available single-edit fixes to files")
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return exitOK
+		}
 		return exitError
 	}
 	outputFormat := strings.ToLower(*format)
@@ -278,7 +300,7 @@ func runLint(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 		paths = []string{"-"}
 	}
 
-	var all []jsonLintDiagnostic
+	all := make([]jsonLintDiagnostic, 0)
 	for _, path := range paths {
 		src, name, err := readInput(path, stdin)
 		if err != nil {
@@ -315,8 +337,8 @@ func runLint(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 				stdfmt.Fprintf(stderr, "mdpp lint: fix %s: %v\n", name, err)
 				return exitError
 			}
-			if err := os.WriteFile(path, fixed, 0o644); err != nil {
-				stdfmt.Fprintf(stderr, "mdpp lint: write %s: %v\n", name, err)
+			if err := writeFilePreservingMode(path, fixed); err != nil {
+				stdfmt.Fprintf(stderr, "mdpp lint: %v\n", err)
 				return exitError
 			}
 		}
@@ -345,7 +367,7 @@ func printUsage(w io.Writer) {
 	stdfmt.Fprint(w, `Usage:
   mdpp render [flags] [file]
   mdpp parse --json [file]
-  mdpp fmt [-w] [file...]
+  mdpp fmt [--write|--check|--diff] [file...]
   mdpp lint [--json] [file...]
   mdpp version
 
@@ -477,14 +499,31 @@ func formatFile(path string) (bool, error) {
 	if bytes.Equal(src, formatted) {
 		return false, nil
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return false, stdfmt.Errorf("stat %s: %w", path, err)
-	}
-	if err := os.WriteFile(path, formatted, info.Mode().Perm()); err != nil {
+	if err := writeFilePreservingMode(path, formatted); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func writeFilePreservingMode(path string, data []byte) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return stdfmt.Errorf("stat %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, data, info.Mode().Perm()); err != nil {
+		return stdfmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
 }
 
 func writeSimpleDiff(w io.Writer, name string, before []byte, after []byte) {

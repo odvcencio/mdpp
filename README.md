@@ -36,12 +36,20 @@ Render HTML:
 mdpp render README.md -o README.html
 ```
 
-Format and lint:
+Format to stdout, update a file, or use the formatter and linter as CI gates:
 
 ```bash
+mdpp fmt README.md > README.formatted.md
+mdpp fmt --write README.md
 mdpp fmt --check README.md
 mdpp lint README.md
 ```
+
+Plain `mdpp fmt` is a source-to-source filter: it always writes one complete
+formatted document for every input, including input that is already canonical.
+`--write` (or `-w`), `--check`, and `--diff` are mutually exclusive. Formatter
+and linter checks return `0` when clean, `1` when they report findings, and `2`
+for invalid usage or an I/O/processing error.
 
 Parse to JSON:
 

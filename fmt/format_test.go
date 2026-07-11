@@ -17,6 +17,59 @@ func TestFormatCanonicalizesHeadingsListsAndDirectives(t *testing.T) {
 	}
 }
 
+func TestFormatConvergesAfterSetextRewriteRevealsParagraph(t *testing.T) {
+	input := []byte("0\n0\n0\n-")
+	want := []byte("0 0\n## 0\n")
+	once, err := Format(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, want) {
+		t.Fatalf("Format() = %q, want %q", once, want)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
+	}
+}
+
+func TestFormatCanonicalizesATXHeadingWhitespaceIdempotently(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "empty heading", input: "#\n00", want: "#\n00\n"},
+		{name: "heading trailing spaces", input: "# Title  \nNext\n", want: "# Title\nNext\n"},
+		{name: "empty heading trailing spaces", input: "##  \nNext\n", want: "##\nNext\n"},
+		{name: "hash paragraph", input: "#0\n00", want: "#0 00\n"},
+		{name: "non-closing hash", input: "# Title#\n", want: "# Title#\n"},
+		{name: "indented code", input: "    # code\n", want: "    # code\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			once, err := Format([]byte(tt.input))
+			if err != nil {
+				t.Fatalf("Format: %v", err)
+			}
+			if string(once) != tt.want {
+				t.Fatalf("Format() = %q, want %q", once, tt.want)
+			}
+			twice, err := Format(once)
+			if err != nil {
+				t.Fatalf("Format twice: %v", err)
+			}
+			if !bytes.Equal(once, twice) {
+				t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
+			}
+		})
+	}
+}
+
 func TestFormatPreservesFenceBodyBytes(t *testing.T) {
 	src := []byte("```Go\nfmt.Println(\"hi\")  \n\n\t// keep\n```\n")
 	got, err := Format(src)
@@ -26,6 +79,24 @@ func TestFormatPreservesFenceBodyBytes(t *testing.T) {
 	want := "``` go\nfmt.Println(\"hi\")  \n\n\t// keep\n```\n"
 	if string(got) != want {
 		t.Fatalf("Format() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatLeavesNULSourceUntouched(t *testing.T) {
+	input := []byte{'0', '\n', '0', '\n', 0}
+	once, err := Format(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, input) {
+		t.Fatalf("Format() = %q, want untouched %q", once, input)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
 	}
 }
 
@@ -50,6 +121,44 @@ func TestFormatCanonicalizesListEmphasisAndTasks(t *testing.T) {
 	want := "- *one*\n- [x] **two**\n- [x] three\n"
 	if string(got) != want {
 		t.Fatalf("Format() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatPreservesCanonicalListMarkerWhenUnwrapping(t *testing.T) {
+	input := []byte("* 00\n0")
+	want := []byte("- 00 0\n")
+	once, err := Format(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, want) {
+		t.Fatalf("Format() = %q, want %q", once, want)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
+	}
+}
+
+func TestFormatDoesNotDoubleIndentCompactNestedList(t *testing.T) {
+	input := []byte("* * \n0")
+	want := []byte("- *\\\n0\n")
+	once, err := Format(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, want) {
+		t.Fatalf("Format() = %q, want %q", once, want)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
 	}
 }
 
@@ -175,6 +284,44 @@ func TestFormatCanonicalizesContainerFences(t *testing.T) {
 	}
 }
 
+func TestFormatContainerTitleQuotingIsIdempotent(t *testing.T) {
+	input := []byte(":::DETAILS \"Tr\f\f\f\f\face\"\nBody\n:::\n")
+	want := []byte(":::details \"Tr\f\f\f\f\face\"\nBody\n:::\n")
+	once, err := Format(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, want) {
+		t.Fatalf("Format() = %q, want %q", once, want)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
+	}
+}
+
+func TestFormatDoesNotCreateContainerFromWrappedParagraph(t *testing.T) {
+	input := []byte(":::\nA")
+	want := []byte(":::\nA\n")
+	once, err := Format(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, want) {
+		t.Fatalf("Format() = %q, want %q", once, want)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
+	}
+}
+
 func TestFormatCanonicalizesFenceAttrs(t *testing.T) {
 	src := []byte("```Go Key=VALUE Foo=Bar\nx\n```\n")
 	got, err := Format(src)
@@ -195,6 +342,14 @@ func FuzzFormat(f *testing.F) {
 		[]byte("> [!WARNING]  Heads up\n>  body\n"),
 		[]byte(":::DETAILS \"Trace\"\nBody\n:::\n"),
 		[]byte("```Go Key=VALUE\nx\n```\n"),
+		[]byte("#\n00"),
+		[]byte("#0\n00"),
+		[]byte("* 00\n0"),
+		[]byte("* * \n0"),
+		[]byte(":::\nA"),
+		[]byte{'0', '\n', '0', '\n', 0},
+		[]byte("0\n0\n0\n-"),
+		[]byte(":::DETAILS \"Tr\f\f\f\f\face\"\nBody\n:::\n"),
 	} {
 		f.Add(seed)
 	}

@@ -4,6 +4,7 @@ package fmt
 import (
 	"bufio"
 	"bytes"
+	stdfmt "fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -36,8 +37,34 @@ type collectedDef struct {
 	line  string
 }
 
-// Format reformats src into canonical Markdown++ form.
+const maxFormatPasses = 8
+
+// Format reformats src into canonical Markdown++ form. Some block rewrites
+// intentionally expose a simpler AST to later passes (for example, converting
+// a setext heading can reveal the preceding wrapped paragraph), so formatting
+// runs to a bounded fixed point before returning.
 func Format(src []byte) ([]byte, error) {
+	current := src
+	for pass := 1; pass <= maxFormatPasses; pass++ {
+		next, err := formatPass(current)
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(next, current) {
+			return next, nil
+		}
+		current = next
+	}
+	return nil, stdfmt.Errorf("formatter did not converge after %d passes", maxFormatPasses)
+}
+
+func formatPass(src []byte) ([]byte, error) {
+	if bytes.IndexByte(src, 0) >= 0 {
+		// NUL is not Markdown text, and the grammar may recover around it with
+		// overlapping synthetic ranges. A source formatter must never duplicate
+		// or discard bytes in that case, so leave binary-looking input untouched.
+		return bytes.Clone(src), nil
+	}
 	doc, err := mdpp.Parse(src)
 	if err != nil {
 		return nil, err
@@ -172,7 +199,13 @@ func Format(src []byte) ([]byte, error) {
 			footnotes = append(footnotes, collectedDef{label: strings.ToLower(match[1]), line: "[^" + match[1] + "]: " + strings.TrimSpace(match[2])})
 			continue
 		} else {
-			line = canonicalHeadingLine(line)
+			if heading, ok := canonicalHeadingLine(line); ok {
+				line = heading
+				// Trailing spaces on an ATX heading are closing-marker padding,
+				// not an inline hard break. Do not let canonicalization turn them
+				// into a literal backslash in the heading text.
+				hadTrailingWhitespace = false
+			}
 			line = canonicalUnorderedListMarker(line)
 			line = canonicalOrderedListMarker(line)
 			line = canonicalTaskMarker(line)
@@ -182,9 +215,9 @@ func Format(src []byte) ([]byte, error) {
 		out = append(out, formattedLine{text: line, sourceLine: i + 1})
 	}
 
-	out = unwrapSimpleParagraphs(doc.Root, out, lines, doc.Source)
+	out = unwrapSimpleParagraphs(doc.Root, out, lines)
 	out = rewriteOrderedListNumbers(doc.Root, out)
-	out = rewriteCanonicalBlocks(doc.Root, out, lines, src)
+	out = rewriteCanonicalBlocks(doc.Root, out, src)
 	out = normalizeBlankLineEntries(out)
 	out = appendDefinitions(out, refs, footnotes)
 	return []byte(joinFormattedLines(out)), nil
@@ -364,22 +397,34 @@ func canonicalTildeFenceBlock(lines []string, start int) ([]formattedLine, int) 
 	return out, closeIdx
 }
 
-func canonicalHeadingLine(line string) string {
+func canonicalHeadingLine(line string) (string, bool) {
 	trimmed := strings.TrimLeft(line, " ")
-	if !strings.HasPrefix(trimmed, "#") {
-		return line
+	if len(line)-len(trimmed) > 3 || !strings.HasPrefix(trimmed, "#") {
+		return line, false
 	}
 	i := 0
 	for i < len(trimmed) && trimmed[i] == '#' {
 		i++
 	}
 	if i == 0 || i > 6 {
-		return line
+		return line, false
+	}
+	if i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' {
+		return line, false
 	}
 	text := strings.TrimSpace(trimmed[i:])
-	text = strings.TrimRight(text, "#")
-	text = strings.TrimSpace(text)
-	return strings.Repeat("#", i) + " " + text
+	closingStart := len(text)
+	for closingStart > 0 && text[closingStart-1] == '#' {
+		closingStart--
+	}
+	if closingStart < len(text) && (closingStart == 0 || text[closingStart-1] == ' ' || text[closingStart-1] == '\t') {
+		text = strings.TrimSpace(text[:closingStart])
+	}
+	marker := strings.Repeat("#", i)
+	if text == "" {
+		return marker, true
+	}
+	return marker + " " + text, true
 }
 
 func canonicalOrderedListMarker(line string) string {
@@ -470,10 +515,10 @@ func canonicalEmphasis(line string) string {
 	return line
 }
 
-func rewriteCanonicalBlocks(root *mdpp.Node, lines []formattedLine, source []string, src []byte) []formattedLine {
+func rewriteCanonicalBlocks(root *mdpp.Node, lines []formattedLine, src []byte) []formattedLine {
 	lines = rewriteSimplePipeTables(root, lines, src)
 	lines = rewriteContainerFences(lines, root)
-	lines = rewriteNestedListIndentation(root, lines, source)
+	lines = rewriteNestedListIndentation(root, lines)
 	return lines
 }
 
@@ -669,7 +714,11 @@ func canonicalContainerOpenLine(line string, n *mdpp.Node) (string, bool) {
 	}
 	var parts []string
 	if title := strings.TrimSpace(n.Attr("title")); title != "" {
-		parts = append(parts, strconv.Quote(title))
+		// Container titles are literal quoted text; the parser does not decode
+		// Go escape sequences. strconv.Quote would therefore double every
+		// backslash on subsequent passes (and turn control bytes into growing
+		// \f-style sequences).
+		parts = append(parts, `"`+title+`"`)
 	}
 	var attrs []string
 	if id := strings.TrimSpace(n.Attr("id")); id != "" {
@@ -719,10 +768,11 @@ func canonicalContainerCloseLineText(line string) (string, bool) {
 	return strings.Repeat(":", i), true
 }
 
-func rewriteNestedListIndentation(root *mdpp.Node, lines []formattedLine, source []string) []formattedLine {
+func rewriteNestedListIndentation(root *mdpp.Node, lines []formattedLine) []formattedLine {
 	if root == nil {
 		return lines
 	}
+	rewrittenLines := make(map[int]struct{})
 	var walk func(n *mdpp.Node, depth int, inItem bool)
 	walk = func(n *mdpp.Node, depth int, inItem bool) {
 		if n == nil {
@@ -733,7 +783,7 @@ func rewriteNestedListIndentation(root *mdpp.Node, lines []formattedLine, source
 				if child == nil || (child.Type != mdpp.NodeListItem && child.Type != mdpp.NodeTaskListItem) {
 					continue
 				}
-				rewriteListItemIndentation(lines, source, child, depth)
+				rewriteListItemIndentation(lines, child, depth, rewrittenLines)
 				for _, grand := range child.Children {
 					if grand == nil {
 						continue
@@ -766,8 +816,15 @@ func rewriteNestedListIndentation(root *mdpp.Node, lines []formattedLine, source
 	return lines
 }
 
-func rewriteListItemIndentation(lines []formattedLine, source []string, item *mdpp.Node, depth int) {
+func rewriteListItemIndentation(lines []formattedLine, item *mdpp.Node, depth int, rewrittenLines map[int]struct{}) {
 	if item == nil || item.Range.StartLine == 0 {
+		return
+	}
+	if _, ok := rewrittenLines[item.Range.StartLine]; ok {
+		// Malformed compact constructs can expose an outer and nested list item
+		// on the same physical line. The outer item owns that line; applying the
+		// nested depth afterward introduces indentation that reparses as a
+		// different shape on the next formatter pass.
 		return
 	}
 	idx := sourceLineIndex(lines, item.Range.StartLine)
@@ -783,6 +840,7 @@ func rewriteListItemIndentation(lines []formattedLine, source []string, item *md
 		return
 	}
 	lines[idx].text = strings.Repeat("  ", depth) + trimmed
+	rewrittenLines[item.Range.StartLine] = struct{}{}
 }
 
 func linePrefixIsPlainWhitespace(line string) bool {
@@ -871,7 +929,7 @@ func sourceLineIndex(lines []formattedLine, sourceLine int) int {
 	return -1
 }
 
-func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []string, src []byte) []formattedLine {
+func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []string) []formattedLine {
 	if root == nil {
 		return lines
 	}
@@ -882,11 +940,19 @@ func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []str
 	}
 	var spans []span
 	root.Walk(func(n *mdpp.Node) bool {
-		if n.Type != mdpp.NodeParagraph || n.Range.StartLine == 0 || n.Range.EndLine <= n.Range.StartLine {
+		if n.Type != mdpp.NodeParagraph || n.Range.StartLine == 0 {
 			return true
 		}
 		if !canUnwrapParagraph(n) {
 			return true
+		}
+		if n.Range.StartLine-1 < len(source) {
+			if _, bareContainerFence := canonicalContainerCloseLineText(source[n.Range.StartLine-1]); bareContainerFence {
+				// Joining a bare ::: line with the next text line manufactures a
+				// container opener ("::: kind") from an ordinary paragraph and
+				// changes both the AST and rendered output.
+				return true
+			}
 		}
 		text := unwrapParagraphText(n)
 		if text == "" {
@@ -895,6 +961,12 @@ func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []str
 		prefix := ""
 		if n.Range.StartCol > 1 && n.Range.StartLine-1 < len(source) {
 			line := source[n.Range.StartLine-1]
+			// Use the already-canonicalized physical line when available so
+			// paragraph unwrapping does not restore an original list marker such
+			// as "* " after the lexical pass has rewritten it to "- ".
+			if lineIdx := sourceLineIndex(lines, n.Range.StartLine); lineIdx >= 0 {
+				line = lines[lineIdx].text
+			}
 			if n.Range.StartCol-1 <= len(line) {
 				prefix = line[:n.Range.StartCol-1]
 			}
