@@ -6,4 +6,4 @@
     (Paragraph)
       (Text "Body line one.")
       (SoftBreak)
-      (Text "> Body line two.")
+      (Text "Body line two.")

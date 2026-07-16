@@ -540,6 +540,30 @@ func parseSimpleBlockquoteDocument(source []byte) *Document {
 	return doc
 }
 
+// stripQuoteContinuationMarkers removes blockquote continuation markers
+// (`> ` after up to three spaces of indent) from the START of every text node
+// that directly follows a soft or hard break anywhere under a converted
+// blockquote. See the block_quote case in convertBlockCtx for why these leak
+// and why the position makes the strip unambiguous. Nested NodeBlockquote
+// children are skipped — their own conversion already ran this pass, and a
+// second strip could eat legitimate prose.
+func stripQuoteContinuationMarkers(n *Node) {
+	for i, child := range n.Children {
+		if child.Type == NodeBlockquote {
+			continue
+		}
+		if child.Type == NodeText && i > 0 {
+			prev := n.Children[i-1].Type
+			if prev == NodeSoftBreak || prev == NodeHardBreak {
+				if content, ok := stripBlockquoteMarker(child.Literal); ok {
+					child.Literal = content
+				}
+			}
+		}
+		stripQuoteContinuationMarkers(child)
+	}
+}
+
 func stripBlockquoteMarker(line string) (string, bool) {
 	trimmed := strings.TrimLeft(line, " \t")
 	if !strings.HasPrefix(trimmed, ">") {
@@ -2181,6 +2205,14 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 				bq.Children = append(bq.Children, converted)
 			}
 		}
+		// The grammar's block_quote_marker/block_continuation tokens cover only
+		// the FIRST line's marker; continuation-line `> ` prefixes sit inside
+		// the paragraph's inline byte range and leak into its text nodes
+		// ("and\n> **b**" -> text "> " after the soft break). Strip them here,
+		// where the blockquote context is known: after a soft/hard break inside
+		// a blockquote, a leading marker can only be a continuation (a real
+		// nested `>` is a nested block_quote node, converted separately).
+		stripQuoteContinuationMarkers(bq)
 		return bq
 
 	case "list":
