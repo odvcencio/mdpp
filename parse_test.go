@@ -209,6 +209,17 @@ func TestContainerDirectiveParseAttrsAndNestedContent(t *testing.T) {
 	}
 }
 
+func TestContainerDirectiveUnquotesCanonicalTitleEscapes(t *testing.T) {
+	doc := MustParse([]byte(":::note \"line\\n\\x84\"\n"))
+	container := findFirstNodeOfType(doc.Root, NodeContainerDirective)
+	if container == nil {
+		t.Fatal("expected container directive")
+	}
+	if got, want := container.Attr("title"), "line\n\x84"; got != want {
+		t.Fatalf("title = %q, want %q", got, want)
+	}
+}
+
 func TestContainerDirectiveUnclosedDiagnostic(t *testing.T) {
 	doc := MustParse([]byte(":::note\nBody\n"))
 	if len(doc.Diagnostics()) != 1 {

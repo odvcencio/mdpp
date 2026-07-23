@@ -103,6 +103,57 @@ func TestFormatIdempotent(t *testing.T) {
 	}
 }
 
+func TestFormatEmptyHeadingIsIdempotent(t *testing.T) {
+	once, err := Format([]byte("#\n00"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
+	}
+	if want := "#\n00\n"; string(once) != want {
+		t.Fatalf("Format() = %q, want %q", once, want)
+	}
+}
+
+func TestFormatHashPrefixedParagraphIsIdempotent(t *testing.T) {
+	once, err := Format([]byte("#0\n000000000000000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
+	}
+	if want := "#0 000000000000000\n"; string(once) != want {
+		t.Fatalf("Format() = %q, want %q", once, want)
+	}
+}
+
+func TestFormatUnwrappedListMarkerIsIdempotent(t *testing.T) {
+	once, err := Format([]byte("* 00\n0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("Format not idempotent:\nonce:  %q\ntwice: %q", once, twice)
+	}
+	if want := "- 00 0\n"; string(once) != want {
+		t.Fatalf("Format() = %q, want %q", once, want)
+	}
+}
+
 func TestFormatCanonicalizesSafeTildeFence(t *testing.T) {
 	src := []byte("~~~Go\nfmt.Println(\"hi\")\n~~~\n")
 	got, err := Format(src)

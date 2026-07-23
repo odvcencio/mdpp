@@ -1414,7 +1414,12 @@ func parseContainerInfoAttrs(attrs map[string]string, raw string) {
 	}
 	if strings.HasPrefix(rest, "\"") {
 		if end := strings.Index(rest[1:], "\""); end >= 0 {
-			attrs["title"] = rest[1 : end+1]
+			quoted := rest[:end+2]
+			if title, err := strconv.Unquote(quoted); err == nil {
+				attrs["title"] = title
+			} else {
+				attrs["title"] = rest[1 : end+1]
+			}
 			rest = strings.TrimSpace(rest[end+2:])
 		}
 	}

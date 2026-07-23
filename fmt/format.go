@@ -38,6 +38,25 @@ type collectedDef struct {
 
 // Format reformats src into canonical Markdown++ form.
 func Format(src []byte) ([]byte, error) {
+	current := src
+	// AST-aware rewrites can expose syntax to a later pass (for example,
+	// unwrapping a paragraph can create a list-marker line). Iterate to the
+	// formatter's fixed point so one public call always returns canonical,
+	// idempotent output.
+	for i := 0; i < 32; i++ {
+		next, err := formatOnce(current)
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(next, current) {
+			return next, nil
+		}
+		current = next
+	}
+	return current, nil
+}
+
+func formatOnce(src []byte) ([]byte, error) {
 	doc, err := mdpp.Parse(src)
 	if err != nil {
 		return nil, err
@@ -185,9 +204,30 @@ func Format(src []byte) ([]byte, error) {
 	out = unwrapSimpleParagraphs(doc.Root, out, lines, doc.Source)
 	out = rewriteOrderedListNumbers(doc.Root, out)
 	out = rewriteCanonicalBlocks(doc.Root, out, lines, src)
+	out = canonicalizeRewrittenLines(out)
 	out = normalizeBlankLineEntries(out)
 	out = appendDefinitions(out, refs, footnotes)
 	return []byte(joinFormattedLines(out)), nil
+}
+
+// canonicalizeRewrittenLines closes the formatter's own transformation
+// boundary. AST-driven rewrites such as paragraph unwrapping can bring a
+// heading or list marker together with following text; canonicalize that new
+// line in the same pass so the next Format call cannot reinterpret it and
+// change the output again.
+func canonicalizeRewrittenLines(lines []formattedLine) []formattedLine {
+	for i := range lines {
+		if lines[i].protected {
+			continue
+		}
+		line := canonicalHeadingLine(lines[i].text)
+		line = canonicalUnorderedListMarker(line)
+		line = canonicalOrderedListMarker(line)
+		line = canonicalTaskMarker(line)
+		line = canonicalEmphasis(line)
+		lines[i].text = line
+	}
+	return lines
 }
 
 func normalizeLineEndings(src []byte) []byte {
@@ -376,9 +416,15 @@ func canonicalHeadingLine(line string) string {
 	if i == 0 || i > 6 {
 		return line
 	}
+	if i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' {
+		return line
+	}
 	text := strings.TrimSpace(trimmed[i:])
 	text = strings.TrimRight(text, "#")
 	text = strings.TrimSpace(text)
+	if text == "" {
+		return strings.Repeat("#", i)
+	}
 	return strings.Repeat("#", i) + " " + text
 }
 
