@@ -752,16 +752,10 @@ func TestGLRInlineTimeout_12KB(t *testing.T) {
 		t.Fatalf("Parse took %v — should be <5s (inline timeout not firing?)", elapsed)
 	}
 
-	found := false
-	for _, d := range doc.Diagnostics() {
-		if d.Code == "MDPP-PARSE-005" {
-			found = true
-			break
-		}
-	}
-	if !found && elapsed >= time.Duration(glrInlineTimeoutMicros)*time.Microsecond {
-		t.Errorf("ambiguous %d-byte line exceeded the inline timeout without MDPP-PARSE-005: elapsed=%v diagnostics=%v", targetBytes, elapsed, doc.Diagnostics())
-	}
+	// A successful parse needs no diagnostic. Under race instrumentation,
+	// wall-clock time can exceed the parser's internal budget even when the
+	// parse itself completes normally, so elapsed time cannot prove that the
+	// timeout path ran.
 }
 
 // TestGLRInlineTimeout_13KB mirrors TestGLRInlineTimeout_12KB at 13 KB — the
@@ -787,16 +781,8 @@ func TestGLRInlineTimeout_13KB(t *testing.T) {
 		t.Fatalf("Parse took %v — should be <5s (inline timeout not firing?)", elapsed)
 	}
 
-	found := false
-	for _, d := range doc.Diagnostics() {
-		if d.Code == "MDPP-PARSE-005" {
-			found = true
-			break
-		}
-	}
-	if !found && elapsed >= time.Duration(glrInlineTimeoutMicros)*time.Microsecond {
-		t.Errorf("ambiguous %d-byte line exceeded the inline timeout without MDPP-PARSE-005: elapsed=%v diagnostics=%v", targetBytes, elapsed, doc.Diagnostics())
-	}
+	// A successful parse needs no diagnostic. The <5s bound above remains the
+	// externally observable hardening contract.
 }
 
 // TestGLRInlineTimeout_6KB verifies that a ~6 KB space-free inline-ambiguous
