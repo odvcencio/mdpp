@@ -116,15 +116,16 @@ func TestBackcompatAngleComparisons(t *testing.T) {
 	}
 }
 
-// A lowercase HTML tag is ordinary HTML, never a GoSX component. The opening
-// tag remains Text (tree-sitter's choice) and the closing remains HTMLInline;
-// neither becomes a NodeComponent.
+// A lowercase HTML tag is ordinary HTML, never a GoSX component. Both tags may
+// be represented as HTMLInline as the grammar improves; neither may become a
+// NodeComponent.
 func TestBackcompatLowercaseHTMLTag(t *testing.T) {
 	got := parseDump(t, `<span class="x">hi</span>`+"\n")
 	want := strings.Join([]string{
 		`(Document)`,
 		`  (Paragraph)`,
-		`    (Text "<span class=\"x\">hi")`,
+		`    (HTMLInline "<span class=\"x\">")`,
+		`    (Text "hi")`,
 		`    (HTMLInline "</span>")`,
 		``,
 	}, "\n")
