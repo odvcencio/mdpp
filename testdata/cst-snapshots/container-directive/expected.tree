@@ -5,5 +5,4 @@
         (Text "Body")
       (Text " of the directive.")
     (Paragraph)
-      (Text "Multiple paragraphs")
-      (Text ".")
+      (Text "Multiple paragraphs.")

@@ -250,6 +250,10 @@ type cacheEntry struct {
 	// where the cached subtree was originally rooted. Reusers compute
 	// delta = newStart - baseStart and shift ranges accordingly.
 	baseStart int
+	// baseLine/baseCol anchor cached chunk entries whose byte ranges are
+	// relative while their line/column ranges remain source-absolute.
+	baseLine int
+	baseCol  int
 }
 
 func newParseCache() *parseCache {
@@ -346,6 +350,109 @@ func cloneAndShift(root *Node, delta int, source []byte) *Node {
 		}
 	}
 	return n
+}
+
+// cloneAndShiftFromTreeNode copies a content-identical cached subtree and
+// relocates it from the cached root position to the current tree-sitter node.
+// Unlike cloneAndShift(..., source), this never rescans source from byte zero
+// for every descendant range. Lines after the root's first line keep their
+// content-relative columns; nodes on the first line shift from the new root
+// column.
+func cloneAndShiftFromTreeNode(root *Node, delta int, current *gotreesitter.Node) *Node {
+	if root == nil || current == nil {
+		return cloneAndShift(root, delta, nil)
+	}
+	start := current.StartPoint()
+	return cloneAndShiftAnchored(
+		root,
+		delta,
+		root.Range.StartLine,
+		root.Range.StartCol,
+		int(start.Row)+1,
+		int(start.Column)+1,
+	)
+}
+
+func cloneAndShiftFromAnchor(root *Node, delta, oldLine, oldCol, newLine, newCol int) *Node {
+	if root == nil || oldLine == 0 || newLine == 0 {
+		return cloneAndShift(root, delta, nil)
+	}
+	return cloneAndShiftAnchored(root, delta, oldLine, oldCol, newLine, newCol)
+}
+
+func cloneAndShiftAnchored(root *Node, delta, oldRootLine, oldRootCol, newRootLine, newRootCol int) *Node {
+	if root == nil {
+		return nil
+	}
+	n := &Node{
+		Type:    root.Type,
+		Literal: root.Literal,
+		Range: shiftRangeAnchored(
+			root.Range,
+			delta,
+			oldRootLine,
+			oldRootCol,
+			newRootLine,
+			newRootCol,
+		),
+	}
+	if root.Attrs != nil {
+		n.Attrs = make(map[string]string, len(root.Attrs))
+		for k, v := range root.Attrs {
+			n.Attrs[k] = v
+		}
+	}
+	if len(root.Children) > 0 {
+		n.Children = make([]*Node, len(root.Children))
+		for i, child := range root.Children {
+			n.Children[i] = cloneAndShiftAnchored(
+				child,
+				delta,
+				oldRootLine,
+				oldRootCol,
+				newRootLine,
+				newRootCol,
+			)
+		}
+	}
+	return n
+}
+
+func shiftNodeRangesFromAnchor(root *Node, delta, oldRootLine, oldRootCol, newRootLine, newRootCol int) {
+	walkNodes(root, func(n *Node, _ *Node, _ int) bool {
+		n.Range = shiftRangeAnchored(
+			n.Range,
+			delta,
+			oldRootLine,
+			oldRootCol,
+			newRootLine,
+			newRootCol,
+		)
+		return true
+	})
+}
+
+func shiftRangeAnchored(r Range, delta, oldRootLine, oldRootCol, newRootLine, newRootCol int) Range {
+	if r.StartLine == 0 && r.StartByte == 0 && r.EndByte == 0 {
+		return r
+	}
+	shiftPoint := func(line, col int) (int, int) {
+		lineDelta := line - oldRootLine
+		if lineDelta == 0 {
+			return newRootLine, newRootCol + col - oldRootCol
+		}
+		return newRootLine + lineDelta, col
+	}
+	startLine, startCol := shiftPoint(r.StartLine, r.StartCol)
+	endLine, endCol := shiftPoint(r.EndLine, r.EndCol)
+	return Range{
+		StartByte: r.StartByte + delta,
+		EndByte:   r.EndByte + delta,
+		StartLine: startLine,
+		StartCol:  startCol,
+		EndLine:   endLine,
+		EndCol:    endCol,
+	}
 }
 
 // cloneForCache returns a deep copy of n suitable for storing in the parse

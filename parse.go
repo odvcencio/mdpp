@@ -614,8 +614,10 @@ func hasProblematicLongLine(source []byte, limit int) bool {
 }
 
 type blockChunk struct {
-	start int
-	end   int
+	start     int
+	end       int
+	startLine int
+	startCol  int
 }
 
 func parseSegmentedDocumentCtx(source []byte, ctx *parseCtx) *Document {
@@ -628,7 +630,7 @@ func parseSegmentedDocumentCtx(source []byte, ctx *parseCtx) *Document {
 	var diagnostics []Diagnostic
 	linkRefs := make(map[string]linkRefDef)
 	for _, chunk := range chunks {
-		children = appendParsedSegmentCtx(children, &diagnostics, linkRefs, source, chunk.start, chunk.end, ctx)
+		children = appendParsedSegmentCtx(children, &diagnostics, linkRefs, source, chunk, ctx)
 	}
 	if len(children) == 0 {
 		return nil
@@ -653,9 +655,9 @@ func topLevelHeadingChunks(source []byte) []blockChunk {
 		return nil
 	}
 
-	starts := make([]int, 0, 8)
+	starts := make([]blockChunk, 0, 8)
 	inFence := false
-	for _, line := range lines {
+	for lineIndex, line := range lines {
 		trimmed := strings.TrimSpace(line.text)
 		if isMarkdownFenceLine(trimmed) {
 			inFence = !inFence
@@ -664,24 +666,29 @@ func topLevelHeadingChunks(source []byte) []blockChunk {
 		if inFence || !isTopLevelATXHeadingLine(line.text) {
 			continue
 		}
-		starts = append(starts, line.start)
+		starts = append(starts, blockChunk{
+			start:     line.start,
+			startLine: lineIndex + 1,
+			startCol:  1,
+		})
 	}
 	if len(starts) < 3 {
 		return nil
 	}
-	if starts[0] != 0 {
-		starts = append([]int{0}, starts...)
+	if starts[0].start != 0 {
+		starts = append([]blockChunk{{start: 0, startLine: 1, startCol: 1}}, starts...)
 	}
 	chunks := make([]blockChunk, 0, len(starts))
 	for i, start := range starts {
 		end := len(source)
 		if i+1 < len(starts) {
-			end = starts[i+1]
+			end = starts[i+1].start
 		}
-		if strings.TrimSpace(string(source[start:end])) == "" {
+		if strings.TrimSpace(string(source[start.start:end])) == "" {
 			continue
 		}
-		chunks = append(chunks, blockChunk{start: start, end: end})
+		start.end = end
+		chunks = append(chunks, start)
 	}
 	if len(chunks) < 2 {
 		return nil
@@ -696,28 +703,36 @@ func isTopLevelATXHeadingLine(line string) bool {
 	return isATXHeadingLine([]byte(line))
 }
 
-func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRefs map[string]linkRefDef, source []byte, start int, end int, ctx *parseCtx) []*Node {
-	chunk := source[start:end]
-	if strings.TrimSpace(string(chunk)) == "" {
+func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRefs map[string]linkRefDef, source []byte, chunk blockChunk, ctx *parseCtx) []*Node {
+	start, end := chunk.start, chunk.end
+	chunkSource := source[start:end]
+	if strings.TrimSpace(string(chunkSource)) == "" {
 		return children
 	}
 
-	if ctx != nil && len(chunk) > 0 {
-		key := hashContent(roleChunk, chunk)
+	if ctx != nil && len(chunkSource) > 0 {
+		key := hashContent(roleChunk, chunkSource)
 		ctx.recordSeen(key)
 		if e, ok := ctx.cache.get(key); ok {
 			ctx.hits++
 			for _, child := range e.children {
-				children = append(children, cloneAndShift(child, start-e.baseStart, source))
+				children = append(children, cloneAndShiftFromAnchor(
+					child,
+					start-e.baseStart,
+					e.baseLine,
+					e.baseCol,
+					chunk.startLine,
+					chunk.startCol,
+				))
 			}
 			return children
 		}
 		ctx.misses++
 	}
 
-	doc, ok := parseFastBlockChunk(chunk)
+	doc, ok := parseFastBlockChunk(chunkSource)
 	if !ok {
-		doc = parseDocumentCtx(chunk, ctx)
+		doc = parseDocumentCtx(chunkSource, ctx)
 	}
 	if doc == nil || doc.Root == nil {
 		return children
@@ -734,15 +749,20 @@ func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRef
 		cachedChildren = make([]*Node, 0, len(doc.Root.Children))
 	}
 	for _, child := range doc.Root.Children {
-		shiftNodeRanges(child, source, start)
+		shiftNodeRangesFromAnchor(child, start, 1, 1, chunk.startLine, chunk.startCol)
 		children = append(children, child)
 		if ctx != nil {
 			cachedChildren = append(cachedChildren, cloneAndShift(child, -start, nil))
 		}
 	}
 	if ctx != nil {
-		key := hashContent(roleChunk, chunk)
-		ctx.cache.put(key, &cacheEntry{children: cachedChildren, baseStart: 0})
+		key := hashContent(roleChunk, chunkSource)
+		ctx.cache.put(key, &cacheEntry{
+			children:  cachedChildren,
+			baseStart: 0,
+			baseLine:  chunk.startLine,
+			baseCol:   chunk.startCol,
+		})
 	}
 	return children
 }
@@ -1394,7 +1414,12 @@ func parseContainerInfoAttrs(attrs map[string]string, raw string) {
 	}
 	if strings.HasPrefix(rest, "\"") {
 		if end := strings.Index(rest[1:], "\""); end >= 0 {
-			attrs["title"] = rest[1 : end+1]
+			quoted := rest[:end+2]
+			if title, err := strconv.Unquote(quoted); err == nil {
+				attrs["title"] = title
+			} else {
+				attrs["title"] = rest[1 : end+1]
+			}
 			rest = strings.TrimSpace(rest[end+2:])
 		}
 	}
@@ -2088,7 +2113,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 			if e, ok := ctx.cache.get(key); ok {
 				ctx.hits++
 				newStart := int(n.StartByte())
-				return cloneAndShift(e.root, newStart-e.baseStart, source)
+				return cloneAndShiftFromTreeNode(e.root, newStart-e.baseStart, n)
 			}
 			ctx.misses++
 			heading := newNodeFromTree(NodeHeading, n)
@@ -2130,7 +2155,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 			if e, ok := ctx.cache.get(key); ok {
 				ctx.hits++
 				newStart := int(n.StartByte())
-				return cloneAndShift(e.root, newStart-e.baseStart, source)
+				return cloneAndShiftFromTreeNode(e.root, newStart-e.baseStart, n)
 			}
 			ctx.misses++
 		}
