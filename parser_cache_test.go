@@ -1,6 +1,7 @@
 package mdpp
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -103,10 +104,50 @@ func TestParserIncrementalReusesCachedParagraphs(t *testing.T) {
 	if got, want := countHeadings(doc2.Root), countHeadings(fresh.Root); got != want {
 		t.Fatalf("heading count mismatch: incremental=%d fresh=%d", got, want)
 	}
+	if !reflect.DeepEqual(doc2.Root, fresh.Root) {
+		t.Fatal("incremental cached AST ranges differ from fresh parse")
+	}
 
 	// Edited paragraph should contain the newly-inserted 'z'.
 	if !strings.Contains(doc2.Root.Text(), "Paragraph twoz") {
 		t.Fatalf("edited paragraph did not include inserted byte; full text = %q", doc2.Root.Text())
+	}
+}
+
+func TestParserSegmentedCachePreservesRangesAcrossInsertedLine(t *testing.T) {
+	source, sites := makeMarkdownEditorBenchmarkSource(8 << 10)
+	insertAt := sites[len(sites)/3]
+	next := make([]byte, 0, len(source)+1)
+	next = append(next, source[:insertAt]...)
+	next = append(next, '\n')
+	next = append(next, source[insertAt:]...)
+
+	start := markdownEditorPointForOffset(source, insertAt)
+	edit := gotreesitter.InputEdit{
+		StartByte:   uint32(insertAt),
+		OldEndByte:  uint32(insertAt),
+		NewEndByte:  uint32(insertAt + 1),
+		StartPoint:  start,
+		OldEndPoint: start,
+		NewEndPoint: gotreesitter.Point{Row: start.Row + 1, Column: 0},
+	}
+
+	parser := NewParser()
+	defer parser.Close()
+	if _, err := parser.Parse(source); err != nil {
+		t.Fatalf("initial parse: %v", err)
+	}
+	incremental, err := parser.ParseIncremental(next, edit)
+	if err != nil {
+		t.Fatalf("incremental parse: %v", err)
+	}
+	hits, _ := parser.LastStats()
+	if hits == 0 {
+		t.Fatal("expected segmented cache hits after inserted line")
+	}
+	fresh := MustParse(next)
+	if !reflect.DeepEqual(incremental.Root, fresh.Root) {
+		t.Fatal("segmented cached AST ranges differ from fresh parse after inserted line")
 	}
 }
 
