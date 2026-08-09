@@ -606,10 +606,18 @@ func canonicalSimplePipeTableRow(row *mdpp.Node, source []byte, lineText string)
 		return "", "", false
 	}
 	cells := make([]string, 0, len(row.Children))
+	prevStart, prevEnd := -1, -1
 	for _, cell := range row.Children {
 		if cell == nil || cell.Type != mdpp.NodeTableCell || cell.Range.StartLine == 0 || cell.Range.StartLine != cell.Range.EndLine {
 			return "", "", false
 		}
+		// Cells that share one byte range signal a corrupt AST (each
+		// "cell" would render as the whole row and multiply the table on
+		// every pass). Leave such tables untouched.
+		if cell.Range.StartByte == prevStart && cell.Range.EndByte == prevEnd {
+			return "", "", false
+		}
+		prevStart, prevEnd = cell.Range.StartByte, cell.Range.EndByte
 		raw := sourceNodeText(source, cell.Range.StartByte, cell.Range.EndByte)
 		cells = append(cells, strings.TrimSpace(raw))
 	}
