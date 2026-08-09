@@ -57,11 +57,14 @@ func Format(src []byte) ([]byte, error) {
 }
 
 func formatOnce(src []byte) ([]byte, error) {
+	// Normalize before parsing: the AST's byte and line ranges must be
+	// computed against the same bytes the line rewrites read, or CRLF and
+	// BOM inputs shift every range.
+	src = bytes.TrimPrefix(normalizeLineEndings(src), []byte{0xEF, 0xBB, 0xBF})
 	doc, err := mdpp.Parse(src)
 	if err != nil {
 		return nil, err
 	}
-	src = bytes.TrimPrefix(normalizeLineEndings(src), []byte{0xEF, 0xBB, 0xBF})
 	lines := scanLines(src)
 	containerStarts := map[int]*mdpp.Node{}
 	containerEnds := map[int]struct{}{}
