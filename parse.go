@@ -917,12 +917,16 @@ func fastTableNode(source []byte, lines []sourceLine, start int) (*Node, int) {
 			continue
 		}
 		row := &Node{Type: NodeTableRow, Range: sourceRange(source, lines[i].start, lines[i].end)}
-		cells := splitFastTableCells(lines[i].text)
-		for _, cell := range cells {
-			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start, lines[i].end)}
-			cell = strings.TrimSpace(cell)
-			if cell != "" {
-				c.Children = parseInlineAt(cell, source, -1, nil)
+		// Each cell carries its own byte span within the row. Sharing the
+		// row's range across cells corrupts consumers that read cell text
+		// through Range: the fmt table rewriter turned every cell into
+		// the whole row, multiplying tables by their column count on
+		// every pass.
+		for _, cell := range splitFastTableCellSpans(lines[i].text) {
+			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start+cell.start, lines[i].start+cell.end)}
+			text := strings.TrimSpace(cell.text)
+			if text != "" {
+				c.Children = parseInlineAt(text, source, -1, nil)
 			}
 			row.Children = append(row.Children, c)
 		}
@@ -957,6 +961,36 @@ func splitFastTableCells(line string) []string {
 	line = strings.TrimPrefix(line, "|")
 	line = strings.TrimSuffix(line, "|")
 	return strings.Split(line, "|")
+}
+
+// fastCellSpan is one table cell plus its byte span relative to the
+// start of the raw line.
+type fastCellSpan struct {
+	text  string
+	start int
+	end   int
+}
+
+// splitFastTableCellSpans splits like splitFastTableCells but keeps each
+// cell's offsets so cell nodes can carry true ranges.
+func splitFastTableCellSpans(line string) []fastCellSpan {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	base := len(line) - len(trimmedLeft)
+	body := strings.TrimRight(trimmedLeft, " \t\r\n")
+	if strings.HasPrefix(body, "|") {
+		base++
+		body = body[1:]
+	}
+	body = strings.TrimSuffix(body, "|")
+	var spans []fastCellSpan
+	cellStart := 0
+	for i := 0; i <= len(body); i++ {
+		if i == len(body) || body[i] == '|' {
+			spans = append(spans, fastCellSpan{text: body[cellStart:i], start: base + cellStart, end: base + i})
+			cellStart = i + 1
+		}
+	}
+	return spans
 }
 
 func fastListNode(source []byte, lines []sourceLine, start int) (*Node, int) {
