@@ -932,6 +932,21 @@ func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []str
 	if root == nil {
 		return lines
 	}
+	listParagraphs := make(map[*mdpp.Node]struct{})
+	var collectListParagraphs func(*mdpp.Node, bool)
+	collectListParagraphs = func(n *mdpp.Node, inListItem bool) {
+		if n == nil {
+			return
+		}
+		inListItem = inListItem || n.Type == mdpp.NodeListItem || n.Type == mdpp.NodeTaskListItem
+		if inListItem && n.Type == mdpp.NodeParagraph {
+			listParagraphs[n] = struct{}{}
+		}
+		for _, child := range n.Children {
+			collectListParagraphs(child, inListItem)
+		}
+	}
+	collectListParagraphs(root, false)
 	type span struct {
 		startLine int
 		endLine   int
@@ -945,7 +960,7 @@ func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []str
 		if !canUnwrapParagraph(n) {
 			return true
 		}
-		text := unwrapParagraphText(n)
+		text := unwrapParagraphText(n, src)
 		if text == "" {
 			return true
 		}
@@ -955,6 +970,18 @@ func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []str
 			if n.Range.StartCol-1 <= len(line) {
 				prefix = line[:n.Range.StartCol-1]
 			}
+		}
+		// A segmented fast parse can attach a lazy list continuation as a
+		// separate paragraph whose first source line is indented. Unwrapping
+		// that paragraph currently trims the indentation, which leaves the
+		// preceding list paragraph and this one adjacent in rendered text
+		// (for example, "Metal" + "variants"). Keep one separator when the
+		// source proves this is a single physical soft-break boundary. Do not
+		// infer a separator from AST adjacency alone: same-line fragments and
+		// hard-break syntax must retain their existing semantics.
+		_, isListParagraph := listParagraphs[n]
+		if prefix == "" && isListParagraph && paragraphStartsWithImplicitSoftBreak(n, src) {
+			prefix = " "
 		}
 		// Neither Range.EndLine nor Range.EndByte is reliable across
 		// paragraph shapes: blank-line-terminated paragraphs report an
@@ -1032,20 +1059,80 @@ func canUnwrapParagraph(n *mdpp.Node) bool {
 	return hasSoftBreak
 }
 
-func unwrapParagraphText(n *mdpp.Node) string {
+func unwrapParagraphText(n *mdpp.Node, source []byte) string {
 	var parts []string
+	var previousText *mdpp.Node
 	for _, child := range n.Children {
 		switch child.Type {
 		case mdpp.NodeText:
+			if previousText != nil && textChildrenCrossSoftBreak(previousText, child, source) {
+				parts = append(parts, " ")
+			}
 			parts = append(parts, child.Literal)
+			previousText = child
 		case mdpp.NodeSoftBreak:
 			parts = append(parts, " ")
+			previousText = nil
+		default:
+			previousText = nil
 		}
 	}
 	text := strings.Join(parts, "")
 	text = strings.TrimSpace(text)
 	text = strings.Join(strings.Fields(text), " ")
 	return text
+}
+
+// paragraphStartsWithImplicitSoftBreak reports the segmented-parser shape in
+// which an indented continuation paragraph starts on the physical line after
+// non-blank prose. The source check deliberately rejects blank-line gaps and
+// Markdown hard-break markers; only a single ordinary line ending is treated
+// as a word-separating soft break.
+func paragraphStartsWithImplicitSoftBreak(n *mdpp.Node, source []byte) bool {
+	if n == nil || n.Range.StartLine <= 1 || n.Range.StartByte <= 0 || n.Range.StartByte > len(source) {
+		return false
+	}
+	lineStart := n.Range.StartByte
+	for lineStart > 0 && source[lineStart-1] != '\n' {
+		lineStart--
+	}
+	if lineStart >= len(source) || (source[lineStart] != ' ' && source[lineStart] != '\t') {
+		return false
+	}
+	prevEnd := lineStart - 1
+	prevStart := prevEnd
+	for prevStart > 0 && source[prevStart-1] != '\n' {
+		prevStart--
+	}
+	prevLine := string(source[prevStart:prevEnd])
+	if strings.TrimSpace(prevLine) == "" {
+		return false
+	}
+	trimmedPrev := strings.TrimRight(prevLine, " \t")
+	if strings.HasSuffix(trimmedPrev, "\\") || len(prevLine)-len(trimmedPrev) >= 2 {
+		return false
+	}
+	return true
+}
+
+// textChildrenCrossSoftBreak detects a missing explicit NodeSoftBreak from
+// source ranges. It only joins text children separated by exactly one ordinary
+// physical newline; same-line fragments, blank-line paragraph boundaries, and
+// hard-break syntax are intentionally excluded.
+func textChildrenCrossSoftBreak(previous, current *mdpp.Node, source []byte) bool {
+	if previous == nil || current == nil || previous.Range.StartLine == 0 || current.Range.StartLine == 0 ||
+		previous.Range.StartByte < 0 || previous.Range.EndByte < 0 || current.Range.StartByte < 0 || current.Range.EndByte < 0 ||
+		previous.Range.StartByte > len(source) || previous.Range.EndByte > len(source) ||
+		current.Range.StartByte > len(source) || current.Range.EndByte > len(source) ||
+		previous.Range.EndByte < previous.Range.StartByte || current.Range.EndByte < current.Range.StartByte ||
+		current.Range.StartByte < previous.Range.EndByte {
+		return false
+	}
+	gap := source[previous.Range.EndByte:current.Range.StartByte]
+	if bytes.Count(gap, []byte{'\n'}) != 1 || bytes.Contains(gap, []byte("  \n")) || bytes.Contains(gap, []byte("\\\n")) {
+		return false
+	}
+	return true
 }
 
 func appendDefinitions(lines []formattedLine, refs []collectedDef, footnotes []collectedDef) []formattedLine {
