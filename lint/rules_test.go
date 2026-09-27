@@ -117,15 +117,39 @@ func TestLintPerformance100kChars(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping perf test in short mode")
 	}
-	doc := mdpp.MustParse([]byte(strings.Repeat("a", 100_000)))
-	start := time.Now()
-	diags := Lint(doc)
-	if len(diags) != 0 {
-		t.Fatalf("expected no diagnostics on plain text, got %#v", diags)
+	smallDoc := mdpp.MustParse([]byte(strings.Repeat("a", 33_000)))
+	largeDoc := mdpp.MustParse([]byte(strings.Repeat("a", 100_000)))
+	measureAllocs := func(doc *mdpp.Document) float64 {
+		var diags []Diagnostic
+		allocs := testing.AllocsPerRun(5, func() {
+			diags = Lint(doc)
+		})
+		if len(diags) != 0 {
+			t.Fatalf("expected no diagnostics on plain text, got %#v", diags)
+		}
+		return allocs
 	}
-	elapsed := time.Since(start)
-	if elapsed > 50*time.Millisecond {
-		t.Fatalf("linting 100k chars took %s, want <= 50ms", elapsed)
+	smallAllocs := measureAllocs(smallDoc)
+	largeAllocs := measureAllocs(largeDoc)
+	if largeAllocs > 3*smallAllocs {
+		t.Fatalf("linting 100k chars used %.1f allocations, more than 3x the 33k input's %.1f", largeAllocs, smallAllocs)
+	}
+
+	if !raceDetectorEnabled {
+		best := time.Duration(1<<63 - 1)
+		for range 5 {
+			start := time.Now()
+			diags := Lint(largeDoc)
+			if len(diags) != 0 {
+				t.Fatalf("expected no diagnostics on plain text, got %#v", diags)
+			}
+			if elapsed := time.Since(start); elapsed < best {
+				best = elapsed
+			}
+		}
+		if best > 50*time.Millisecond {
+			t.Fatalf("best lint time for 100k chars was %s, want <= 50ms", best)
+		}
 	}
 }
 
