@@ -2124,6 +2124,61 @@ func inlineSpanRange(source []byte, baseOffset int, start int, end int) Range {
 	return sourceRange(source, baseOffset+start, baseOffset+end)
 }
 
+func nonEmptySourceRange(source []byte, start, end int) Range {
+	if len(source) == 0 {
+		return Range{}
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(source) {
+		start = len(source) - 1
+	}
+	if end < start {
+		end = start
+	}
+	if end > len(source) {
+		end = len(source)
+	}
+	if end == start {
+		end++
+	}
+	return sourceRange(source, start, end)
+}
+
+func inlineDiagnosticRange(source []byte, text string, baseOffset, start, end int) Range {
+	if len(source) == 0 {
+		return Range{}
+	}
+	if baseOffset >= 0 {
+		absoluteStart, absoluteEnd := baseOffset+start, baseOffset+end
+		if absoluteStart >= 0 && absoluteStart <= len(source) && absoluteEnd >= absoluteStart && absoluteEnd <= len(source) {
+			return nonEmptySourceRange(source, absoluteStart, absoluteEnd)
+		}
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		end = start
+	}
+	if end > len(text) {
+		end = len(text)
+	}
+	if start > len(text) {
+		start = len(text)
+	}
+	if offset := bytes.Index(source, []byte(text)); offset >= 0 {
+		return nonEmptySourceRange(source, offset+start, offset+end)
+	}
+	if end > start {
+		if offset := bytes.Index(source, []byte(text[start:end])); offset >= 0 {
+			return nonEmptySourceRange(source, offset, offset+end-start)
+		}
+	}
+	return nonEmptySourceRange(source, start, end)
+}
+
 func textSliceRange(base Range, text string, start int, end int) Range {
 	if base.StartLine == 0 || start < 0 || end < start {
 		return Range{}
@@ -2380,8 +2435,256 @@ func fallbackErrorBlock(n *gotreesitter.Node, source []byte, ctx *parseCtx) *Nod
 		paragraph.Children = parseInlineAt(recovered, source, start+leading+contentStart, ctx)
 		return paragraph
 	}
+	if chunks := recoveryErrorBlockChunks(source, start, end); len(chunks) > 1 {
+		document := &Node{Type: NodeDocument, Range: sourceRange(source, start, end)}
+		for _, chunk := range chunks {
+			piece := source[chunk.start:chunk.end]
+			parsed := parseDocumentCtx(piece, ctx)
+			if parsed == nil || parsed.Root == nil {
+				appendParseErrorDiagnostic(ctx, source, chunk.start, chunk.end, "unrecognized block syntax")
+				document.Children = append(document.Children, &Node{
+					Type:    NodeParagraph,
+					Literal: string(piece),
+					Range:   sourceRange(source, chunk.start, chunk.end),
+				})
+				continue
+			}
+			for _, diagnostic := range parsed.diagnostics {
+				diagnostic.Range = sourceRange(source,
+					chunk.start+diagnostic.Range.StartByte,
+					chunk.start+diagnostic.Range.EndByte,
+				)
+				if ctx != nil {
+					ctx.recoveryDiagnostics = append(ctx.recoveryDiagnostics, diagnostic)
+				}
+			}
+			blocks := parsed.Root.Children
+			if parsed.Root.Type != NodeDocument {
+				blocks = []*Node{parsed.Root}
+			}
+			for _, block := range blocks {
+				shiftNodeRanges(block, source, chunk.start)
+				appendBlockNode(&document.Children, block)
+			}
+		}
+		return document
+	}
 	appendParseErrorDiagnostic(ctx, source, start, end, "unrecognized block syntax")
 	return &Node{Type: NodeParagraph, Literal: raw, Range: sourceRange(source, start, end)}
+}
+
+// recoveryErrorBlockChunks finds candidate blank-line block boundaries inside
+// an ERROR span. It tracks only fences, container directives, and list
+// continuation; the normal parser remains responsible for structuring each
+// resulting piece.
+func recoveryErrorBlockChunks(source []byte, start, end int) []blockChunk {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(source) {
+		end = len(source)
+	}
+	if end <= start {
+		return nil
+	}
+	lines := sourceLines(source[start:end])
+	var chunks []blockChunk
+	chunkStart := start
+	chunkStartLine := 0
+	fenceChar, fenceLength := byte(0), 0
+	containerFenceLength, containerDepth := 0, 0
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if strings.TrimSpace(line.text) == "" && fenceLength == 0 && containerDepth == 0 {
+			next := i + 1
+			for next < len(lines) && strings.TrimSpace(lines[next].text) == "" {
+				next++
+			}
+			if next < len(lines) && !recoveryListContinues(lines, i, next, chunkStartLine) {
+				pieceEnd := start + line.start
+				if strings.TrimSpace(string(source[chunkStart:pieceEnd])) != "" {
+					chunks = append(chunks, blockChunk{start: chunkStart, end: pieceEnd})
+				}
+				chunkStart = start + lines[next].start
+				chunkStartLine = next
+				i = next - 1
+				continue
+			}
+		}
+
+		if marker, run, rest, ok := recoveryFenceMarker(line.text); ok {
+			if fenceLength > 0 {
+				if marker == fenceChar && run >= fenceLength && strings.TrimSpace(rest) == "" {
+					fenceChar, fenceLength = 0, 0
+				}
+				continue
+			}
+			fenceChar, fenceLength = marker, run
+			continue
+		}
+		if fenceLength > 0 {
+			continue
+		}
+
+		if info, ok := parseContainerOpenLine(line.text); ok {
+			if containerDepth == 0 {
+				containerFenceLength = info.fenceLen
+				containerDepth = 1
+			} else if info.fenceLen == containerFenceLength {
+				containerDepth++
+			}
+			continue
+		}
+		if containerDepth > 0 && isContainerCloseLine(line.text, containerFenceLength) {
+			containerDepth--
+			if containerDepth == 0 {
+				containerFenceLength = 0
+			}
+		}
+	}
+	if strings.TrimSpace(string(source[chunkStart:end])) != "" {
+		chunks = append(chunks, blockChunk{start: chunkStart, end: end})
+	}
+	if len(chunks) < 2 {
+		return nil
+	}
+	return chunks
+}
+
+func recoveryFenceMarker(line string) (byte, int, string, bool) {
+	for {
+		line = strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(line, ">") {
+			break
+		}
+		line = line[1:]
+		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			line = line[1:]
+		}
+	}
+	line = strings.TrimLeft(line, " \t")
+	if line == "" || (line[0] != '`' && line[0] != '~') {
+		return 0, 0, "", false
+	}
+	marker := line[0]
+	run := 0
+	for run < len(line) && line[run] == marker {
+		run++
+	}
+	if run < 3 {
+		return 0, 0, "", false
+	}
+	return marker, run, line[run:], true
+}
+
+func recoveryListContinues(lines []sourceLine, blank, next, chunkStartLine int) bool {
+	previous := blank - 1
+	for previous >= chunkStartLine && strings.TrimSpace(lines[previous].text) == "" {
+		previous--
+	}
+	if previous < chunkStartLine {
+		return false
+	}
+	markerIndent, contentIndent, markerKind, found := recoveryPreviousListMarker(lines, previous, chunkStartLine)
+	if !found {
+		return false
+	}
+	if nextIndent, _, nextKind, ok := recoveryListMarker(lines[next].text); ok {
+		if nextIndent == markerIndent && nextKind != markerKind {
+			return false
+		}
+		return true
+	}
+	nextIndent, _ := recoveryIndent(lines[next].text)
+	return nextIndent >= contentIndent && nextIndent > markerIndent
+}
+
+func recoveryPreviousListMarker(lines []sourceLine, previous, chunkStartLine int) (int, int, byte, bool) {
+	for i := previous; i >= chunkStartLine; i-- {
+		line := lines[i].text
+		if indent, content, kind, ok := recoveryListMarker(line); ok {
+			return indent, content, kind, true
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent, _ := recoveryIndent(line)
+		trimmed := strings.TrimSpace(line)
+		if indent > 0 {
+			continue
+		}
+		if strings.HasPrefix(trimmed, ">") || isMarkdownFenceLine(trimmed) {
+			return 0, 0, 0, false
+		}
+		if isATXHeadingLine([]byte(line)) || recoveryThematicBreak(trimmed) ||
+			strings.HasPrefix(trimmed, "|") || strings.HasPrefix(line, ":::") {
+			return 0, 0, 0, false
+		}
+		// An unindented paragraph line can be a lazy continuation of the
+		// preceding list item, so keep looking for its list marker.
+	}
+	return 0, 0, 0, false
+}
+
+func recoveryThematicBreak(line string) bool {
+	line = strings.ReplaceAll(line, " ", "")
+	line = strings.ReplaceAll(line, "\t", "")
+	if len(line) < 3 {
+		return false
+	}
+	for _, marker := range []byte{'*', '-', '_'} {
+		if line[0] != marker {
+			continue
+		}
+		if strings.Trim(line, string(marker)) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func recoveryListMarker(line string) (int, int, byte, bool) {
+	indent, index := recoveryIndent(line)
+	if index >= len(line) {
+		return 0, 0, 0, false
+	}
+	markerEnd := index
+	kind := line[index]
+	switch line[index] {
+	case '-', '+', '*':
+		markerEnd++
+	default:
+		for markerEnd < len(line) && line[markerEnd] >= '0' && line[markerEnd] <= '9' {
+			markerEnd++
+		}
+		if markerEnd == index || markerEnd-index > 9 || markerEnd >= len(line) || (line[markerEnd] != '.' && line[markerEnd] != ')') {
+			return 0, 0, 0, false
+		}
+		kind = line[markerEnd]
+		markerEnd++
+	}
+	if markerEnd >= len(line) || (line[markerEnd] != ' ' && line[markerEnd] != '\t') {
+		return 0, 0, 0, false
+	}
+	contentIndent := indent + markerEnd - index + 1
+	return indent, contentIndent, kind, true
+}
+
+func recoveryIndent(line string) (int, int) {
+	columns, index := 0, 0
+	for index < len(line) {
+		switch line[index] {
+		case ' ':
+			columns++
+		case '\t':
+			columns += 4 - columns%4
+		default:
+			return columns, index
+		}
+		index++
+	}
+	return columns, index
 }
 
 func recoverEscapedLinkParagraph(raw string) (string, int, bool) {
@@ -2412,7 +2715,7 @@ func recoverEscapedLinkParagraph(raw string) (string, int, bool) {
 }
 
 func appendParseErrorDiagnostic(ctx *parseCtx, source []byte, start, end int, message string) {
-	if ctx == nil {
+	if ctx == nil || len(source) == 0 {
 		return
 	}
 	if start < 0 {
@@ -2428,7 +2731,7 @@ func appendParseErrorDiagnostic(ctx *parseCtx, source []byte, start, end int, me
 		Code:     "MDPP-PARSE-006",
 		Severity: SeverityWarning,
 		Message:  message + "; preserved source as text",
-		Range:    sourceRange(source, start, end),
+		Range:    nonEmptySourceRange(source, start, end),
 	})
 }
 
@@ -3033,7 +3336,7 @@ func parseInlineAt(text string, source []byte, baseOffset int, ctx *parseCtx) []
 	}
 	needsTextFallback, codeSpanLinkSyntax := malformedLinkNeedsTextFallback(text)
 	if needsTextFallback {
-		r := inlineSpanRange(source, baseOffset, 0, len(text))
+		r := inlineDiagnosticRange(source, text, baseOffset, 0, len(text))
 		if ctx != nil {
 			ctx.recoveryDiagnostics = append(ctx.recoveryDiagnostics, Diagnostic{
 				Code:     "MDPP-PARSE-006",
@@ -3477,7 +3780,7 @@ func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recov
 	root := bt.RootNode()
 	if errors := inlineErrorNodes(root); len(errors) > 0 {
 		for _, node := range errors {
-			appendInlineParseErrorDiagnostic(ctx, source, baseOffset, int(node.StartByte()), int(node.EndByte()))
+			appendInlineParseErrorDiagnostic(ctx, source, text, baseOffset, int(node.StartByte()), int(node.EndByte()))
 		}
 		return []*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))}
 	}
@@ -3881,15 +4184,15 @@ func missingTreeNodes(root *gotreesitter.Node) []*gotreesitter.Node {
 	return missing
 }
 
-func appendInlineParseErrorDiagnostic(ctx *parseCtx, source []byte, baseOffset, start, end int) {
-	if ctx == nil {
+func appendInlineParseErrorDiagnostic(ctx *parseCtx, source []byte, text string, baseOffset, start, end int) {
+	if ctx == nil || len(source) == 0 {
 		return
 	}
 	ctx.recoveryDiagnostics = append(ctx.recoveryDiagnostics, Diagnostic{
 		Code:     "MDPP-PARSE-006",
 		Severity: SeverityWarning,
 		Message:  "unrecognized inline syntax; preserved source as text",
-		Range:    inlineSpanRange(source, baseOffset, start, end),
+		Range:    inlineDiagnosticRange(source, text, baseOffset, start, end),
 	})
 }
 
