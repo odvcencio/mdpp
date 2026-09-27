@@ -2,25 +2,29 @@ package mdpp
 
 import (
 	"sync"
+	"sync/atomic"
+	"time"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
 
-// glrInlineTimeoutMicros is the per-parse timeout applied to the inline
-// markdown GLR parser. The inline grammar's parse-stack can grow super-linearly
-// on a long, break-free span of inline-ambiguous characters (e.g. a 12 KB JSON
-// blob on a single line with no spaces). 2 000 000 µs (2 s) is generous for
-// any legitimate inline span — real authored content parses in milliseconds —
-// but tight enough to abort pathological inputs before they consume significant
-// CPU or memory.
-//
-// The existing length pre-guard (maxGLRLineBytes = 16 384) handles inputs above
-// ~16 KB before they reach inline parsing. This timeout is the backstop for
-// sub-threshold inputs that are still dense enough to grind the GLR engine.
+// glrInlineTimeoutMicros bounds unbudgeted inline-parser calls. Normal document
+// parsing uses the deterministic work budget and document-wide deadline.
 const glrInlineTimeoutMicros = 2_000_000 // 2 seconds
 
 var parserPools sync.Map
+
+type budgetedParserPoolKey struct {
+	language      *gotreesitter.Language
+	timeoutMicros uint64
+}
+
+// ParserPool accepts a fixed timeout for every checkout. Budgeted parses use
+// one-second timeout buckets so their parsers can be reused. Caller-selected
+// tighter deadlines and contexts with cancellation use a direct parser so the
+// pool's timeout rounding cannot extend the requested deadline.
+var budgetedParserPools sync.Map
 
 // inlinePool is the parser pool used exclusively for the markdown_inline
 // grammar.  It is configured with a per-parse timeout so pathologically
@@ -56,6 +60,27 @@ func parserPoolFor(lang *gotreesitter.Language) *gotreesitter.ParserPool {
 	return actual.(*gotreesitter.ParserPool)
 }
 
+func budgetedParserPoolFor(lang *gotreesitter.Language, timeout time.Duration) *gotreesitter.ParserPool {
+	if lang == nil || timeout <= 0 {
+		return nil
+	}
+	seconds := timeout / time.Second
+	if timeout%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	timeoutMicros := uint64(seconds) * 1_000_000
+	key := budgetedParserPoolKey{language: lang, timeoutMicros: timeoutMicros}
+	if pool, ok := budgetedParserPools.Load(key); ok {
+		return pool.(*gotreesitter.ParserPool)
+	}
+	pool := gotreesitter.NewParserPool(lang, gotreesitter.WithParserPoolTimeoutMicros(timeoutMicros))
+	actual, _ := budgetedParserPools.LoadOrStore(key, pool)
+	return actual.(*gotreesitter.ParserPool)
+}
+
 func parsePooled(lang *gotreesitter.Language, entry *grammars.LangEntry, source []byte) (*gotreesitter.Tree, error) {
 	pool := parserPoolFor(lang)
 	if pool == nil {
@@ -68,21 +93,143 @@ func parsePooled(lang *gotreesitter.Language, entry *grammars.LangEntry, source 
 	return pool.Parse(source)
 }
 
-// parsePooledInline parses source using the timeout-configured inline language
-// pool.  It returns the tree and whether the parse was stopped early due to
-// complexity (timeout or iteration limit).  On early stop the tree may be nil
-// or partial; callers must fall back to raw text.
-//
-// Two stop reasons both indicate "GLR engine aborted early":
-//   - ParseStopTimeout: the per-parse wall-clock timeout fired.
-//   - ParseStopIterationLimit: gotreesitter's built-in iteration cap fired
-//     (sourceLen*30 iterations).  For the inline grammar this is reached only
-//     on pathologically dense, space-free input; legitimate markdown parses
-//     well within the limit.
-//
-// Both cases produce a partial tree that does not cover the full input, so
-// both are routed to the raw-text fallback in parseInlineWithRecoveryAt.
-func parsePooledInline(source []byte) (*gotreesitter.Tree, bool, error) {
+func parsePooledWithBudget(lang *gotreesitter.Language, entry *grammars.LangEntry, source []byte, budget *parseBudget, timeoutCap time.Duration) (*gotreesitter.Tree, error) {
+	if budget == nil {
+		return parsePooled(lang, entry, source)
+	}
+	if lang == nil {
+		return nil, gotreesitter.ErrNoLanguage
+	}
+	if (budget.ctx == nil || budget.ctx.Done() == nil) && !budget.exactDeadline {
+		timeout := budget.remaining()
+		if timeoutCap > 0 && timeoutCap < timeout {
+			timeout = timeoutCap
+		}
+		if timeoutCap <= 0 && !budget.reserveParserWork(len(source)) {
+			return nil, nil
+		}
+		if timeoutCap <= 0 {
+			if timeout <= 0 {
+				budget.check()
+				return nil, nil
+			}
+			pool := budgetedParserPoolFor(lang, timeout)
+			if pool == nil {
+				return nil, gotreesitter.ErrNoLanguage
+			}
+			if entry != nil && entry.TokenSourceFactory != nil {
+				ts := entry.TokenSourceFactory(source, lang)
+				return pool.ParseWithTokenSource(source, ts)
+			}
+			return pool.Parse(source)
+		}
+	}
+	parser := gotreesitter.NewParser(lang)
+	return parseWithBudgetParser(parser, entry, source, budget, timeoutCap)
+}
+
+func parseWithBudgetParser(parser *gotreesitter.Parser, entry *grammars.LangEntry, source []byte, budget *parseBudget, timeoutCap time.Duration) (*gotreesitter.Tree, error) {
+	if budget == nil {
+		return nil, gotreesitter.ErrNoLanguage
+	}
+	if !budget.reserveParserWork(len(source)) {
+		return nil, nil
+	}
+	if parser == nil {
+		return nil, gotreesitter.ErrNoLanguage
+	}
+	stopBudgetWatch := configureParserBudget(parser, budget, timeoutCap)
+	defer stopBudgetWatch()
+	if entry != nil && entry.TokenSourceFactory != nil {
+		ts := entry.TokenSourceFactory(source, parser.Language())
+		return parser.ParseWithTokenSource(source, ts)
+	}
+	return parser.Parse(source)
+}
+
+func parseIncrementalFromTreeWithBudget(lang *gotreesitter.Language, entry *grammars.LangEntry, source []byte, oldTree *gotreesitter.Tree, budget *parseBudget) (*gotreesitter.Tree, error) {
+	if budget == nil {
+		return parseIncrementalFromTree(lang, entry, source, oldTree)
+	}
+	if !budget.reserveParserWork(len(source)) {
+		return nil, nil
+	}
+	if lang == nil {
+		return nil, gotreesitter.ErrNoLanguage
+	}
+	parser := gotreesitter.NewParser(lang)
+	stopBudgetWatch := configureParserBudget(parser, budget, 0)
+	defer stopBudgetWatch()
+	if entry != nil && entry.TokenSourceFactory != nil {
+		ts := entry.TokenSourceFactory(source, lang)
+		return parser.ParseIncrementalWithTokenSource(source, oldTree, ts)
+	}
+	return parser.ParseIncremental(source, oldTree)
+}
+
+func configureParserBudget(parser *gotreesitter.Parser, budget *parseBudget, timeoutCap time.Duration) func() {
+	if parser == nil || budget == nil {
+		return func() {}
+	}
+	timeout := budget.remaining()
+	if timeoutCap > 0 && timeoutCap < timeout {
+		timeout = timeoutCap
+	}
+	if timeout <= 0 {
+		budget.check()
+		return func() {}
+	}
+	micros := uint64(timeout / time.Microsecond)
+	if micros == 0 {
+		micros = 1
+	}
+	parser.SetTimeoutMicros(micros)
+	if budget.ctx == nil || budget.ctx.Done() == nil {
+		return func() {}
+	}
+
+	var cancelled uint32
+	parser.SetCancellationFlag(&cancelled)
+	stop := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-budget.ctx.Done():
+			atomic.StoreUint32(&cancelled, 1)
+		case <-stop:
+		}
+	}()
+	return func() {
+		parser.SetCancellationFlag(nil)
+		close(stop)
+		<-watchDone
+	}
+}
+
+// parsePooledInline parses source under the document's deterministic work
+// budget and wall-clock backstop. It returns whether parsing stopped early;
+// callers must then fall back to raw text.
+func parsePooledInline(source []byte, contexts ...*parseCtx) (*gotreesitter.Tree, bool, error) {
+	var ctx *parseCtx
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
+	if ctx != nil && ctx.budget != nil {
+		tree, err := parsePooledWithBudget(inlineLang(), mdInlineEntry, source, ctx.budget, 0)
+		if err != nil || tree == nil {
+			ctx.budget.check()
+			return nil, false, err
+		}
+		ctx.budget.noteTreeStop(tree)
+		if tree.ParseStopReason() == gotreesitter.ParseStopTimeout {
+			return tree, true, nil
+		}
+		if ctx.budget.hit != "" {
+			return tree, true, nil
+		}
+		return tree, false, nil
+	}
 	pool := inlineParserPool()
 	if pool == nil {
 		return nil, false, gotreesitter.ErrNoLanguage

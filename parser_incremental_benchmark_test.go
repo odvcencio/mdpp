@@ -242,3 +242,16 @@ func markdownEditorPointForOffset(source []byte, offset int) gotreesitter.Point 
 	}
 	return point
 }
+
+func BenchmarkParse10000ShortParagraphs(b *testing.B) {
+	source := makeShortParagraphDocument(10_000)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(source)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		doc, err := Parse(source)
+		if err != nil || doc == nil || doc.Root == nil {
+			b.Fatalf("Parse failed: doc=%v err=%v", doc != nil, err)
+		}
+	}
+}

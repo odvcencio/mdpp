@@ -79,6 +79,7 @@ func (p *Parser) Parse(source []byte) (*Document, error) {
 		}()
 		ctx := &parseCtx{cache: p.cache}
 		doc, tree = parseDocumentRetainTreeCtx(source, nil, ctx)
+		doc, tree = finishBudgetedParse(doc, tree, source, ctx)
 		p.lastHits, p.lastMisses = ctx.stats()
 	}()
 	p.prevTree = tree
@@ -126,6 +127,7 @@ func (p *Parser) ParseIncremental(source []byte, edit gotreesitter.InputEdit) (*
 		}
 		ctx := &parseCtx{cache: p.cache}
 		doc, tree = parseDocumentRetainTreeCtx(source, prev, ctx)
+		doc, tree = finishBudgetedParse(doc, tree, source, ctx)
 		p.lastHits, p.lastMisses = ctx.stats()
 	}()
 	p.prevTree = tree
@@ -162,7 +164,10 @@ func (p *Parser) Close() {
 // consumed during the current parse so stale entries can be evicted
 // afterwards.
 type parseCtx struct {
-	cache *parseCache
+	// budget is shared by every chunk and inline reparse in one document so
+	// recursive paths cannot reset the work or deadline limits.
+	budget *parseBudget
+	cache  *parseCache
 	// suppressLooseRecovery prevents recursive loose-block reparsing when
 	// a recovery parse itself produces loose fallback text.
 	suppressLooseRecovery bool
@@ -180,11 +185,9 @@ type parseCtx struct {
 	// cannot blow the stack via unbounded re-entry through
 	// parseContainerChildrenCtx → parseBodyChunkCtx → parseDocumentCtx.
 	containerDepth int
-	// inlineTimeoutOccurred is set when the inline GLR parser hits its
-	// per-parse timeout on a pathologically ambiguous span. The block-level
-	// parse reads this after convertBlockCtx returns and attaches a
-	// MDPP-PARSE-005 diagnostic so callers know some inline content was
-	// rendered as raw text rather than fully parsed.
+	// inlineTimeoutOccurred is set when inline parsing stops on its work or
+	// deadline budget. The block-level parse reads it after convertBlockCtx
+	// returns and attaches an MDPP-PARSE-005 diagnostic.
 	inlineTimeoutOccurred bool
 	// recoveryDiagnostics collects tree-sitter ERROR and MISSING recovery
 	// findings while a document is converted. The owning parse attaches and
