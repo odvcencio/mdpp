@@ -4,6 +4,9 @@ package fmt
 import (
 	"bufio"
 	"bytes"
+	"errors"
+	stdfmt "fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -13,27 +16,18 @@ import (
 )
 
 var (
-	tocDirectiveLineRe   = regexp.MustCompile(`^\s*\[\[\s*([Tt][Oo][Cc])\s*\]\]\s*$`)
-	embedDirectiveLineRe = regexp.MustCompile(`^\s*\[\[\s*([Ee][Mm][Bb][Ee][Dd])\s*:\s*(.*?)\s*\]\]\s*$`)
-	admonitionLineRe     = regexp.MustCompile(`^([ \t]*>)([ \t]*)\[!([A-Za-z][A-Za-z0-9_-]*)\](?:[ \t]+(.*))?$`)
-	setextH1Re           = regexp.MustCompile(`^\s*=+\s*$`)
-	setextH2Re           = regexp.MustCompile(`^\s*-+\s*$`)
-	footnoteDefLineRe    = regexp.MustCompile(`^ {0,3}\[\^([A-Za-z0-9_-]+)\]:[ \t]*(.+)$`)
-	refDefLineRe         = regexp.MustCompile(`^ {0,3}\[([^\]\^][^\]]*)\]:[ \t]*(\S.*)$`)
-	orderedListLineRe    = regexp.MustCompile(`^([ \t]*)([0-9]+)([.)])([ \t]+)(.*)$`)
-	strongUnderscoreRe   = regexp.MustCompile(`(^|[^[:alnum:]_])__([^_\n][^_\n]*?)__([^[:alnum:]_]|$)`)
-	emUnderscoreRe       = regexp.MustCompile(`(^|[^[:alnum:]_])_([^_\n][^_\n]*?)_([^[:alnum:]_]|$)`)
+	// ErrMeaningChanged reports that formatting would violate the meaning-preservation contract.
+	ErrMeaningChanged     = errors.New("formatter changed document meaning")
+	whitespaceBetweenTags = regexp.MustCompile(`>\s+<`)
+	setextH1Re            = regexp.MustCompile(`^\s*=+\s*$`)
+	setextH2Re            = regexp.MustCompile(`^\s*-+\s*$`)
+	orderedListLineRe     = regexp.MustCompile(`^([ \t]*)([0-9]+)([.)])([ \t]+)(.*)$`)
 )
 
 type formattedLine struct {
 	text       string
 	protected  bool
 	sourceLine int
-}
-
-type collectedDef struct {
-	label string
-	line  string
 }
 
 // Format reformats src into canonical Markdown++ form.
@@ -49,11 +43,207 @@ func Format(src []byte) ([]byte, error) {
 			return nil, err
 		}
 		if bytes.Equal(next, current) {
+			if difference := meaningDifference(src, next); difference != "" {
+				return append([]byte(nil), src...), stdfmt.Errorf("%w: %s", ErrMeaningChanged, difference)
+			}
 			return next, nil
 		}
 		current = next
 	}
+	if difference := meaningDifference(src, current); difference != "" {
+		return append([]byte(nil), src...), stdfmt.Errorf("%w: %s", ErrMeaningChanged, difference)
+	}
 	return current, nil
+}
+
+func meaningDifference(before, after []byte) string {
+	if bytes.Equal(before, after) {
+		return ""
+	}
+	beforeDoc, err := mdpp.Parse(before)
+	if err != nil {
+		return "could not parse input"
+	}
+	afterDoc, err := mdpp.Parse(after)
+	if err != nil {
+		return "could not parse formatted output"
+	}
+	if !reflect.DeepEqual(beforeDoc.Frontmatter(), afterDoc.Frontmatter()) {
+		return "frontmatter metadata changed"
+	}
+	beforeFrontmatter := frontmatterBytes(beforeDoc, before)
+	afterFrontmatter := frontmatterBytes(afterDoc, after)
+	if !bytes.Equal(beforeFrontmatter, afterFrontmatter) {
+		return "frontmatter bytes changed"
+	}
+	beforeCode, err := protectedCodeSignature(beforeDoc, before)
+	if err != nil {
+		return "could not inspect protected code in input"
+	}
+	afterCode, err := protectedCodeSignature(afterDoc, after)
+	if err != nil {
+		return "could not inspect protected code in formatted output"
+	}
+	if !reflect.DeepEqual(beforeCode, afterCode) {
+		return "code span text or code block info/body changed"
+	}
+	for _, opts := range []mdpp.RenderOptions{{}, {UnsafeHTML: true, HeadingIDs: true}} {
+		beforeHTML, err := mdpp.Render(beforeDoc, opts)
+		if err != nil {
+			return "could not render input"
+		}
+		afterHTML, err := mdpp.Render(afterDoc, opts)
+		if err != nil {
+			return "could not render formatted output"
+		}
+		if normalizeHTML(string(beforeHTML)) != normalizeHTML(string(afterHTML)) {
+			return "rendered HTML changed"
+		}
+	}
+	return ""
+}
+
+type codeSignature struct {
+	kind string
+	info string
+	body string
+}
+
+func frontmatterBytes(doc *mdpp.Document, source []byte) []byte {
+	if doc == nil || doc.Root == nil {
+		return nil
+	}
+	var result []byte
+	doc.Root.Walk(func(n *mdpp.Node) bool {
+		if n.Type != mdpp.NodeFrontmatter {
+			return true
+		}
+		start, end, ok := rawFrontmatterRange(source, n.Range.StartByte, n.Range.EndByte)
+		if ok {
+			result = append([]byte(nil), source[start:end]...)
+		}
+		return false
+	})
+	return result
+}
+
+func protectedCodeSignature(doc *mdpp.Document, source []byte) ([]codeSignature, error) {
+	if doc == nil || doc.Root == nil {
+		return nil, nil
+	}
+	var result []codeSignature
+	var rangeErr error
+	doc.Root.Walk(func(n *mdpp.Node) bool {
+		switch n.Type {
+		case mdpp.NodeCodeSpan:
+			result = append(result, codeSignature{kind: "span", body: n.Literal})
+		case mdpp.NodeCodeBlock, mdpp.NodeDiagram:
+			info, body, err := exactCodeBlock(n, source)
+			if err != nil {
+				rangeErr = err
+				return false
+			}
+			result = append(result, codeSignature{kind: "block", info: info, body: body})
+		}
+		return true
+	})
+	return result, rangeErr
+}
+
+func rawFrontmatterRange(source []byte, start, end int) (int, int, bool) {
+	if start < 0 || end < start {
+		return 0, 0, false
+	}
+	rawStart := rawOffsetForNormalizedSource(source, start)
+	rawEnd := rawOffsetForNormalizedSource(source, end)
+	if rawStart < 0 || rawEnd < rawStart || rawEnd > len(source) {
+		return 0, 0, false
+	}
+	return rawStart, rawEnd, true
+}
+
+func rawOffsetForNormalizedSource(source []byte, target int) int {
+	if target <= 0 {
+		return 0
+	}
+	normalized := 0
+	for raw := 0; raw < len(source); raw++ {
+		if source[raw] == '\r' {
+			if raw+1 < len(source) && source[raw+1] == '\n' {
+				raw++
+			}
+			normalized++
+		} else {
+			normalized++
+		}
+		if normalized == target {
+			return raw + 1
+		}
+	}
+	if normalized < target {
+		return len(source)
+	}
+	return -1
+}
+
+func exactCodeBlock(n *mdpp.Node, source []byte) (string, string, error) {
+	lines := bytes.SplitAfter(source, []byte("\n"))
+	if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
+		lines = lines[:len(lines)-1]
+	}
+	start, end := n.Range.StartLine-1, n.Range.EndLine-1
+	if start < 0 || end < start || start >= len(lines) {
+		return "", "", stdfmt.Errorf("invalid code block line range %d-%d", n.Range.StartLine, n.Range.EndLine)
+	}
+	open := stripBlockquotePrefix(bytes.TrimLeft(lines[start], " \t"))
+	if len(open) > 0 && (open[0] == '`' || open[0] == '~') {
+		marker := open[0]
+		run := 0
+		for run < len(open) && open[run] == marker {
+			run++
+		}
+		info := bytes.TrimSuffix(bytes.TrimSuffix(open[run:], []byte("\n")), []byte("\r"))
+		last := min(end+1, len(lines)-1)
+		for closeLine := start + 1; closeLine <= last; closeLine++ {
+			if fenceLineCloses(lines[closeLine], marker, run) {
+				return string(info), string(bytes.Join(lines[start+1:closeLine], nil)), nil
+			}
+		}
+		return "", "", stdfmt.Errorf("missing closing fence for code block at lines %d-%d", n.Range.StartLine, n.Range.EndLine)
+	}
+	last := min(end, len(lines)-1)
+	if n.Range.EndCol == 1 && last > start {
+		last--
+	}
+	if last < start {
+		last = start
+	}
+	return "", string(bytes.Join(lines[start:last+1], nil)), nil
+}
+
+func stripBlockquotePrefix(line []byte) []byte {
+	for {
+		line = bytes.TrimLeft(line, " \t")
+		if len(line) == 0 || line[0] != '>' {
+			return line
+		}
+		line = bytes.TrimPrefix(line[1:], []byte(" "))
+	}
+}
+
+func fenceLineCloses(line []byte, marker byte, minRun int) bool {
+	line = stripBlockquotePrefix(line)
+	i := 0
+	for i < len(line) && line[i] == marker {
+		i++
+	}
+	return i >= minRun && strings.TrimSpace(string(line[i:])) == ""
+}
+
+func normalizeHTML(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = whitespaceBetweenTags.ReplaceAllString(s, "><")
+	return strings.TrimSpace(s)
 }
 
 func formatOnce(src []byte) ([]byte, error) {
@@ -66,151 +256,132 @@ func formatOnce(src []byte) ([]byte, error) {
 		return nil, err
 	}
 	lines := scanLines(src)
-	containerStarts := map[int]*mdpp.Node{}
-	containerEnds := map[int]struct{}{}
-	if doc != nil && doc.Root != nil {
-		doc.Root.Walk(func(n *mdpp.Node) bool {
-			if n.Type == mdpp.NodeContainerDirective && n.Range.StartLine > 0 && n.Range.EndLine > 0 {
-				containerStarts[n.Range.StartLine] = n
-				containerEnds[n.Range.EndLine] = struct{}{}
-			}
-			return true
-		})
-	}
+	protectedLines := protectedSourceLines(doc.Root, src, lines)
+	setextHeadings := parsedTopLevelSetextHeadings(doc.Root, lines)
 	out := make([]formattedLine, 0, len(lines))
-	var refs, footnotes []collectedDef
-	inFence := false
-	fenceMarker := byte(0)
-	fenceMarkerLen := 0
-	inFrontmatter := false
-	inMathBlock := false
-	inAdmonitionBlock := false
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
-		trimmed := strings.TrimSpace(line)
 
-		if i == 0 && trimmed == "---" {
-			inFrontmatter = true
-			out = append(out, formattedLine{text: "---", protected: true, sourceLine: i + 1})
-			continue
-		}
-		if inFrontmatter {
-			out = append(out, formattedLine{text: line, protected: true, sourceLine: i + 1})
-			if trimmed == "---" {
-				inFrontmatter = false
-				if i+1 < len(lines) && strings.TrimSpace(lines[i+1]) != "" {
-					out = append(out, formattedLine{})
-				}
-			}
-			continue
-		}
-
-		if !inFence && strings.HasPrefix(trimmed, "~~~") {
-			block, nextIndex := canonicalTildeFenceBlock(lines, i)
-			out = append(out, block...)
-			i = nextIndex
-			continue
-		}
-
-		if !inFence && isFenceLine(trimmed) {
-			inFence = true
-			fenceMarker = trimmed[0]
-			fenceMarkerLen = fenceRunLength(trimmed)
-			out = append(out, formattedLine{text: canonicalFenceLine(line), protected: true, sourceLine: i + 1})
-			continue
-		}
-		if inFence {
-			out = append(out, formattedLine{text: line, protected: true, sourceLine: i + 1})
-			if isFenceCloseLine(trimmed, fenceMarker, fenceMarkerLen) {
-				inFence = false
-				fenceMarker = 0
-				fenceMarkerLen = 0
-			}
-			continue
-		}
-
-		if isDisplayMathDelimiter(trimmed) {
-			out = append(out, formattedLine{text: strings.TrimRight(line, " \t"), protected: true, sourceLine: i + 1})
-			inMathBlock = !inMathBlock
-			continue
-		}
-		if inMathBlock || isHTMLBlockLine(trimmed) {
+		if protectedLines[i] {
 			out = append(out, formattedLine{text: line, protected: true, sourceLine: i + 1})
 			continue
 		}
-
-		if node := containerStarts[i+1]; node != nil {
-			if line, ok := canonicalContainerOpenLine(line, node); ok {
-				out = append(out, formattedLine{text: line, sourceLine: i + 1})
-				continue
-			}
-		}
-		if _, ok := containerEnds[i+1]; ok {
-			if line, ok := canonicalContainerCloseLineText(line); ok {
-				out = append(out, formattedLine{text: line, sourceLine: i + 1})
-				continue
-			}
-		}
-
-		if inAdmonitionBlock {
-			if line, ok := canonicalAdmonitionBodyLine(line); ok {
-				out = append(out, formattedLine{text: line, sourceLine: i + 1})
-				continue
-			}
-			inAdmonitionBlock = false
-		}
-
-		if line, ok := canonicalAdmonitionLine(line); ok {
-			inAdmonitionBlock = true
-			out = append(out, formattedLine{text: line, sourceLine: i + 1})
+		if level := setextHeadings[i+1]; level > 0 {
+			out = append(out, formattedLine{text: strings.Repeat("#", level) + " " + line, sourceLine: i + 1})
+			i++
 			continue
 		}
 
-		if i+1 < len(lines) && strings.TrimSpace(line) != "" {
-			next := strings.TrimSpace(lines[i+1])
-			switch {
-			case setextH1Re.MatchString(next):
-				out = append(out, formattedLine{text: "# " + strings.TrimSpace(line)})
-				i++
-				continue
-			case setextH2Re.MatchString(next):
-				out = append(out, formattedLine{text: "## " + strings.TrimSpace(line)})
-				i++
-				continue
-			}
-		}
-
-		hadTrailingWhitespace := len(line) != len(strings.TrimRight(line, " \t"))
-		line = strings.TrimRight(line, " \t")
-		if match := tocDirectiveLineRe.FindStringSubmatch(line); match != nil {
-			line = "[[toc]]"
-		} else if match := embedDirectiveLineRe.FindStringSubmatch(line); match != nil {
-			line = "[[embed:" + match[2] + "]]"
-		} else if match := refDefLineRe.FindStringSubmatch(line); match != nil {
-			refs = append(refs, collectedDef{label: normalizeSortLabel(match[1]), line: "[" + strings.TrimSpace(match[1]) + "]: " + strings.TrimSpace(match[2])})
+		// Trailing whitespace can be a hard break in Markdown. Preserve its
+		// full source line when the AST does not give us a reliable range.
+		if strings.TrimRight(line, " \t") != line {
+			out = append(out, formattedLine{text: line, protected: true, sourceLine: i + 1})
 			continue
-		} else if match := footnoteDefLineRe.FindStringSubmatch(line); match != nil {
-			footnotes = append(footnotes, collectedDef{label: strings.ToLower(match[1]), line: "[^" + match[1] + "]: " + strings.TrimSpace(match[2])})
-			continue
-		} else {
-			line = canonicalHeadingLine(line)
-			line = canonicalUnorderedListMarker(line)
-			line = canonicalOrderedListMarker(line)
-			line = canonicalTaskMarker(line)
-			line = canonicalEmphasis(line)
-			line = canonicalHardBreakLine(line, hadTrailingWhitespace, i+1 < len(lines) && strings.TrimSpace(lines[i+1]) != "")
 		}
 		out = append(out, formattedLine{text: line, sourceLine: i + 1})
 	}
 
-	out = unwrapSimpleParagraphs(doc.Root, out, lines, doc.Source)
+	// Ordered markers are rewritten from their parsed list start value. Other
+	// canonical rewrites stay disabled until they can preserve AST boundaries.
 	out = rewriteOrderedListNumbers(doc.Root, out)
-	out = rewriteCanonicalBlocks(doc.Root, out, lines, src)
-	out = canonicalizeRewrittenLines(out)
-	out = normalizeBlankLineEntries(out)
-	out = appendDefinitions(out, refs, footnotes)
 	return []byte(joinFormattedLines(out)), nil
+}
+
+func parsedTopLevelSetextHeadings(root *mdpp.Node, lines []string) map[int]int {
+	starts := make(map[int]int)
+	if root == nil {
+		return starts
+	}
+	for _, node := range root.Children {
+		if node == nil || node.Type != mdpp.NodeHeading || node.Range.StartCol != 1 ||
+			node.Range.StartLine == 0 || node.Range.EndLine != node.Range.StartLine+2 {
+			continue
+		}
+		level, err := strconv.Atoi(node.Attr("level"))
+		if err != nil || (level != 1 && level != 2) {
+			continue
+		}
+		start := node.Range.StartLine - 1
+		if start < 0 || start+1 >= len(lines) || lines[start] == "" || lines[start] != strings.TrimSpace(lines[start]) {
+			continue
+		}
+		underline := strings.TrimSpace(lines[start+1])
+		if (level == 1 && setextH1Re.MatchString(underline)) || (level == 2 && setextH2Re.MatchString(underline)) {
+			starts[node.Range.StartLine] = level
+		}
+	}
+	return starts
+}
+
+func protectedSourceLines(root *mdpp.Node, source []byte, lines []string) []bool {
+	protected := make([]bool, len(lines))
+	if root == nil || len(lines) == 0 {
+		return protected
+	}
+	type lineRange struct{ start, end int }
+	lineRanges := make([]lineRange, len(lines))
+	offset := 0
+	for i, line := range lines {
+		start := offset
+		end := start + len(line)
+		if end > len(source) {
+			end = len(source)
+		}
+		if end < len(source) && source[end] == '\n' {
+			end++
+		}
+		lineRanges[i] = lineRange{start: start, end: end}
+		offset = end
+	}
+	var markRange func(start, end int)
+	markRange = func(start, end int) {
+		for i, lr := range lineRanges {
+			if start < lr.end && end > lr.start {
+				protected[i] = true
+			}
+		}
+	}
+	var markAll func()
+	markAll = func() {
+		for i := range protected {
+			protected[i] = true
+		}
+	}
+	var walk func(n *mdpp.Node, fallback *mdpp.Range)
+	walk = func(n *mdpp.Node, fallback *mdpp.Range) {
+		if n == nil {
+			return
+		}
+		isProtected := false
+		switch n.Type {
+		case mdpp.NodeFrontmatter, mdpp.NodeCodeSpan, mdpp.NodeCodeBlock, mdpp.NodeDiagram,
+			mdpp.NodeHardBreak, mdpp.NodeMathInline, mdpp.NodeMathBlock, mdpp.NodeHTMLBlock, mdpp.NodeHTMLInline,
+			mdpp.NodeContainerDirective:
+			isProtected = true
+		default:
+		}
+		r := n.Range
+		rangeValid := r.StartByte >= 0 && r.EndByte > r.StartByte && r.EndByte <= len(source)
+		if isProtected {
+			if rangeValid {
+				markRange(r.StartByte, r.EndByte)
+			} else if fallback != nil && fallback.StartByte >= 0 && fallback.EndByte > fallback.StartByte && fallback.EndByte <= len(source) {
+				markRange(fallback.StartByte, fallback.EndByte)
+			} else {
+				markAll()
+			}
+		}
+		nextFallback := fallback
+		if rangeValid {
+			nextFallback = &r
+		}
+		for _, child := range n.Children {
+			walk(child, nextFallback)
+		}
+	}
+	walk(root, nil)
+	return protected
 }
 
 // canonicalizeRewrittenLines closes the formatter's own transformation
@@ -224,10 +395,6 @@ func canonicalizeRewrittenLines(lines []formattedLine) []formattedLine {
 			continue
 		}
 		line := canonicalHeadingLine(lines[i].text)
-		line = canonicalUnorderedListMarker(line)
-		line = canonicalOrderedListMarker(line)
-		line = canonicalTaskMarker(line)
-		line = canonicalEmphasis(line)
 		lines[i].text = line
 	}
 	return lines
@@ -423,8 +590,13 @@ func canonicalHeadingLine(line string) string {
 		return line
 	}
 	text := strings.TrimSpace(trimmed[i:])
-	text = strings.TrimRight(text, "#")
-	text = strings.TrimSpace(text)
+	contentEnd := len(text)
+	for contentEnd > 0 && text[contentEnd-1] == '#' {
+		contentEnd--
+	}
+	if contentEnd > 0 && contentEnd < len(text) && (text[contentEnd-1] == ' ' || text[contentEnd-1] == '\t') {
+		text = strings.TrimSpace(text[:contentEnd])
+	}
 	if text == "" {
 		return strings.Repeat("#", i)
 	}
@@ -466,63 +638,9 @@ func canonicalTaskMarker(line string) string {
 	return line
 }
 
-func canonicalAdmonitionLine(line string) (string, bool) {
-	match := admonitionLineRe.FindStringSubmatch(line)
-	if match == nil {
-		return line, false
-	}
-	typ := strings.ToUpper(match[3])
-	switch typ {
-	case "NOTE", "WARNING", "TIP", "IMPORTANT", "CAUTION":
-	default:
-		return line, false
-	}
-	out := match[1] + " [!" + typ + "]"
-	if tail := strings.TrimSpace(match[4]); tail != "" {
-		out += " " + tail
-	}
-	return out, true
-}
-
-func canonicalAdmonitionBodyLine(line string) (string, bool) {
-	i := 0
-	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
-		i++
-	}
-	if i >= len(line) || line[i] != '>' {
-		return "", false
-	}
-	prefix := line[:i+1]
-	rest := strings.TrimLeft(line[i+1:], " \t")
-	if rest == "" {
-		return prefix, true
-	}
-	return prefix + " " + rest, true
-}
-
-func canonicalHardBreakLine(line string, hadTrailingWhitespace bool, nextNonBlank bool) string {
-	if !hadTrailingWhitespace || !nextNonBlank {
-		return line
-	}
-	if strings.TrimSpace(line) == "" {
-		return line
-	}
-	if strings.HasSuffix(line, "\\") {
-		return line
-	}
-	return line + "\\"
-}
-
-func canonicalEmphasis(line string) string {
-	line = strongUnderscoreRe.ReplaceAllString(line, "$1**$2**$3")
-	line = emUnderscoreRe.ReplaceAllString(line, "$1*$2*$3")
-	return line
-}
-
-func rewriteCanonicalBlocks(root *mdpp.Node, lines []formattedLine, source []string, src []byte) []formattedLine {
+func rewriteCanonicalBlocks(root *mdpp.Node, lines []formattedLine, src []byte) []formattedLine {
 	lines = rewriteSimplePipeTables(root, lines, src)
 	lines = rewriteContainerFences(lines, root)
-	lines = rewriteNestedListIndentation(root, lines, source)
 	return lines
 }
 
@@ -566,7 +684,7 @@ func rewriteSimplePipeTable(lines []formattedLine, table *mdpp.Node, source []by
 		return lines
 	}
 	headerIdx := sourceLineIndex(lines, headerLine)
-	if headerIdx < 0 {
+	if headerIdx < 0 || lines[headerIdx].protected {
 		return lines
 	}
 	headerText, headerPrefix, ok := canonicalSimplePipeTableRow(table.Children[0], source, lines[headerIdx].text)
@@ -581,7 +699,7 @@ func rewriteSimplePipeTable(lines []formattedLine, table *mdpp.Node, source []by
 	for _, row := range table.Children {
 		rowLine := row.Range.StartLine
 		rowIdx := sourceLineIndex(lines, rowLine)
-		if rowIdx < 0 {
+		if rowIdx < 0 || lines[rowIdx].protected {
 			return lines
 		}
 		rowText, rowPrefix, ok := canonicalSimplePipeTableRow(row, source, lines[rowIdx].text)
@@ -591,7 +709,7 @@ func rewriteSimplePipeTable(lines []formattedLine, table *mdpp.Node, source []by
 		lines[rowIdx].text = rowText
 	}
 	delimIdx := sourceLineIndex(lines, delimiterLine)
-	if delimIdx < 0 {
+	if delimIdx < 0 || lines[delimIdx].protected {
 		return lines
 	}
 	delimiterText, ok := canonicalSimplePipeTableDelimiter(table, indent)
@@ -690,7 +808,7 @@ func rewriteContainerFences(lines []formattedLine, root *mdpp.Node) []formattedL
 		}
 		openIdx := sourceLineIndex(lines, n.Range.StartLine)
 		closeIdx := sourceLineIndex(lines, n.Range.EndLine)
-		if openIdx < 0 || closeIdx < 0 {
+		if openIdx < 0 || closeIdx < 0 || lines[openIdx].protected || lines[closeIdx].protected {
 			return true
 		}
 		open, ok := canonicalContainerOpenLine(lines[openIdx].text, n)
@@ -828,7 +946,7 @@ func rewriteListItemIndentation(lines []formattedLine, source []string, item *md
 		return
 	}
 	idx := sourceLineIndex(lines, item.Range.StartLine)
-	if idx < 0 {
+	if idx < 0 || lines[idx].protected {
 		return
 	}
 	line := lines[idx].text
@@ -898,7 +1016,7 @@ func rewriteOrderedListNumbers(root *mdpp.Node, lines []formattedLine) []formatt
 				continue
 			}
 			lineIdx := sourceLineIndex(lines, child.Range.StartLine)
-			if lineIdx >= 0 {
+			if lineIdx >= 0 && !lines[lineIdx].protected {
 				lines[lineIdx].text = rewriteOrderedListLine(lines[lineIdx].text, next)
 			}
 			next++
@@ -913,7 +1031,7 @@ func rewriteOrderedListLine(line string, number int) string {
 	if match == nil {
 		return line
 	}
-	return match[1] + strconv.Itoa(number) + "." + match[4] + match[5]
+	return match[1] + strconv.Itoa(number) + match[3] + match[4] + match[5]
 }
 
 func sourceLineIndex(lines []formattedLine, sourceLine int) int {
@@ -928,10 +1046,25 @@ func sourceLineIndex(lines []formattedLine, sourceLine int) int {
 	return -1
 }
 
-func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []string, src []byte) []formattedLine {
+func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []string, src []byte, protected []bool) []formattedLine {
 	if root == nil {
 		return lines
 	}
+	listParagraphs := make(map[*mdpp.Node]struct{})
+	var collectListParagraphs func(*mdpp.Node, bool)
+	collectListParagraphs = func(n *mdpp.Node, inListItem bool) {
+		if n == nil {
+			return
+		}
+		inListItem = inListItem || n.Type == mdpp.NodeListItem || n.Type == mdpp.NodeTaskListItem
+		if inListItem && n.Type == mdpp.NodeParagraph {
+			listParagraphs[n] = struct{}{}
+		}
+		for _, child := range n.Children {
+			collectListParagraphs(child, inListItem)
+		}
+	}
+	collectListParagraphs(root, false)
 	type span struct {
 		startLine int
 		endLine   int
@@ -942,10 +1075,15 @@ func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []str
 		if n.Type != mdpp.NodeParagraph || n.Range.StartLine == 0 || n.Range.EndLine <= n.Range.StartLine {
 			return true
 		}
+		for line := n.Range.StartLine; line <= n.Range.EndLine && line <= len(protected); line++ {
+			if protected[line-1] {
+				return true
+			}
+		}
 		if !canUnwrapParagraph(n) {
 			return true
 		}
-		text := unwrapParagraphText(n)
+		text := unwrapParagraphText(n, src)
 		if text == "" {
 			return true
 		}
@@ -955,6 +1093,27 @@ func unwrapSimpleParagraphs(root *mdpp.Node, lines []formattedLine, source []str
 			if n.Range.StartCol-1 <= len(line) {
 				prefix = line[:n.Range.StartCol-1]
 			}
+		}
+		// A segmented fast parse can attach a lazy list continuation as a
+		// separate paragraph whose first source line is indented. Unwrapping
+		// that paragraph currently trims the indentation, which leaves the
+		// preceding list paragraph and this one adjacent in rendered text
+		// (for example, "Metal" + "variants"). Keep one separator when the
+		// source proves this is a single physical soft-break boundary. Do not
+		// infer a separator from AST adjacency alone: same-line fragments and
+		// hard-break syntax must retain their existing semantics.
+		_, isListParagraph := listParagraphs[n]
+		if isListParagraph {
+			return true
+		}
+		if !isListParagraph && n.Range.StartLine > 0 && n.Range.StartLine <= len(source) {
+			firstLine := source[n.Range.StartLine-1]
+			if strings.HasPrefix(firstLine, " ") || strings.HasPrefix(firstLine, "\t") {
+				return true
+			}
+		}
+		if prefix == "" && isListParagraph && paragraphStartsWithImplicitSoftBreak(n, src) {
+			prefix = " "
 		}
 		// Neither Range.EndLine nor Range.EndByte is reliable across
 		// paragraph shapes: blank-line-terminated paragraphs report an
@@ -1032,14 +1191,22 @@ func canUnwrapParagraph(n *mdpp.Node) bool {
 	return hasSoftBreak
 }
 
-func unwrapParagraphText(n *mdpp.Node) string {
+func unwrapParagraphText(n *mdpp.Node, source []byte) string {
 	var parts []string
+	var previousText *mdpp.Node
 	for _, child := range n.Children {
 		switch child.Type {
 		case mdpp.NodeText:
+			if previousText != nil && textChildrenCrossSoftBreak(previousText, child, source) {
+				parts = append(parts, " ")
+			}
 			parts = append(parts, child.Literal)
+			previousText = child
 		case mdpp.NodeSoftBreak:
 			parts = append(parts, " ")
+			previousText = nil
+		default:
+			previousText = nil
 		}
 	}
 	text := strings.Join(parts, "")
@@ -1048,33 +1215,56 @@ func unwrapParagraphText(n *mdpp.Node) string {
 	return text
 }
 
-func appendDefinitions(lines []formattedLine, refs []collectedDef, footnotes []collectedDef) []formattedLine {
-	sort.SliceStable(refs, func(i, j int) bool { return refs[i].label < refs[j].label })
-	sort.SliceStable(footnotes, func(i, j int) bool { return footnotes[i].label < footnotes[j].label })
-	if len(refs) > 0 {
-		lines = appendDefinitionBlock(lines, refs)
+// paragraphStartsWithImplicitSoftBreak reports the segmented-parser shape in
+// which an indented continuation paragraph starts on the physical line after
+// non-blank prose. The source check deliberately rejects blank-line gaps and
+// Markdown hard-break markers; only a single ordinary line ending is treated
+// as a word-separating soft break.
+func paragraphStartsWithImplicitSoftBreak(n *mdpp.Node, source []byte) bool {
+	if n == nil || n.Range.StartLine <= 1 || n.Range.StartByte <= 0 || n.Range.StartByte > len(source) {
+		return false
 	}
-	if len(footnotes) > 0 {
-		lines = appendDefinitionBlock(lines, footnotes)
+	lineStart := n.Range.StartByte
+	for lineStart > 0 && source[lineStart-1] != '\n' {
+		lineStart--
 	}
-	return lines
+	if lineStart >= len(source) || (source[lineStart] != ' ' && source[lineStart] != '\t') {
+		return false
+	}
+	prevEnd := lineStart - 1
+	prevStart := prevEnd
+	for prevStart > 0 && source[prevStart-1] != '\n' {
+		prevStart--
+	}
+	prevLine := string(source[prevStart:prevEnd])
+	if strings.TrimSpace(prevLine) == "" {
+		return false
+	}
+	trimmedPrev := strings.TrimRight(prevLine, " \t")
+	if strings.HasSuffix(trimmedPrev, "\\") || len(prevLine)-len(trimmedPrev) >= 2 {
+		return false
+	}
+	return true
 }
 
-func appendDefinitionBlock(lines []formattedLine, defs []collectedDef) []formattedLine {
-	for len(lines) > 0 && !lines[len(lines)-1].protected && strings.TrimSpace(lines[len(lines)-1].text) == "" {
-		lines = lines[:len(lines)-1]
+// textChildrenCrossSoftBreak detects a missing explicit NodeSoftBreak from
+// source ranges. It only joins text children separated by exactly one ordinary
+// physical newline; same-line fragments, blank-line paragraph boundaries, and
+// hard-break syntax are intentionally excluded.
+func textChildrenCrossSoftBreak(previous, current *mdpp.Node, source []byte) bool {
+	if previous == nil || current == nil || previous.Range.StartLine == 0 || current.Range.StartLine == 0 ||
+		previous.Range.StartByte < 0 || previous.Range.EndByte < 0 || current.Range.StartByte < 0 || current.Range.EndByte < 0 ||
+		previous.Range.StartByte > len(source) || previous.Range.EndByte > len(source) ||
+		current.Range.StartByte > len(source) || current.Range.EndByte > len(source) ||
+		previous.Range.EndByte < previous.Range.StartByte || current.Range.EndByte < current.Range.StartByte ||
+		current.Range.StartByte < previous.Range.EndByte {
+		return false
 	}
-	if len(lines) > 0 {
-		lines = append(lines, formattedLine{})
+	gap := source[previous.Range.EndByte:current.Range.StartByte]
+	if bytes.Count(gap, []byte{'\n'}) != 1 || bytes.Contains(gap, []byte("  \n")) || bytes.Contains(gap, []byte("\\\n")) {
+		return false
 	}
-	for _, def := range defs {
-		lines = append(lines, formattedLine{text: def.line})
-	}
-	return lines
-}
-
-func normalizeSortLabel(label string) string {
-	return strings.Join(strings.Fields(strings.ToLower(strings.Trim(label, "[]"))), " ")
+	return true
 }
 
 func joinFormattedLines(lines []formattedLine) string {

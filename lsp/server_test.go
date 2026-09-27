@@ -170,7 +170,7 @@ func TestServerPreviewRendersLargeSegmentedDocument(t *testing.T) {
 
 func TestServerJSONRPCHarness(t *testing.T) {
 	uri := DocumentURI("file:///doc.md")
-	src := "http://example.com\nTitle\n=====\n"
+	src := "http://example.com\n\nTitle\n=====\n\n3. First item\n1. Second item\n"
 
 	var input bytes.Buffer
 	writeRPCFrame(&input, rpcRequest(1, "initialize", InitializeParams{
