@@ -228,7 +228,13 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 	ctx.containerDepth++
 	defer func() { ctx.containerDepth-- }()
 	source = normalizeLineEndings(source)
-	source = lowerMarkdownPlusSource(source)
+	if _, frontmatterEnd, ok := parseFrontmatter(source, nil); ok {
+		body := lowerMarkdownPlusSource(source[frontmatterEnd:])
+		preserved := append([]byte(nil), source[:frontmatterEnd]...)
+		source = append(preserved, body...)
+	} else {
+		source = lowerMarkdownPlusSource(source)
+	}
 	// tree-sitter markdown requires a trailing newline for correct parsing.
 	if len(source) > 0 && source[len(source)-1] != '\n' {
 		source = append(source, '\n')

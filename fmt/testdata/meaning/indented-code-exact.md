@@ -1,0 +1,2 @@
+    __keep__  
+    * literal

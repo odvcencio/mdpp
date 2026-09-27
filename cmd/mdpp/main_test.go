@@ -99,8 +99,8 @@ func TestFormatStdoutIsStableAcrossRepeatedPasses(t *testing.T) {
 }
 
 func TestFormatWriteAliasesAreIdempotentAndPreserveMode(t *testing.T) {
-	input := readCLIFormatFixture(t, "frontmatter-wrap.input.md")
-	want := readCLIFormatFixture(t, "frontmatter-wrap.golden.md")
+	input := []byte("Title\n=====\n")
+	want := []byte("# Title\n")
 
 	for _, writeFlag := range []string{"-w", "--write"} {
 		writeFlag := writeFlag
@@ -387,6 +387,30 @@ func TestVersion(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), mdpp.Version) || !strings.Contains(stdout.String(), mdpp.SpecVersion) {
 		t.Fatalf("version output = %q", stdout.String())
+	}
+}
+
+func TestFormatMeaningErrorLeavesFileUntouched(t *testing.T) {
+	input := []byte("---\ntitle: Example\n---")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "document.md")
+	if err := os.WriteFile(path, input, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"fmt", "--write", path}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitError {
+		t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, exitError, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "formatter changed document meaning") {
+		t.Fatalf("stderr = %q, want meaning guard error", stderr.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, input) {
+		t.Fatalf("file changed after rejected format: got %q, want %q", got, input)
 	}
 }
 

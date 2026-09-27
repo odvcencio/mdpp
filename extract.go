@@ -119,30 +119,42 @@ func (d *Document) extractFrontmatter() {
 	if d.Source == nil {
 		return
 	}
-	src := d.Source
-	if !bytes.HasPrefix(src, []byte("---\n")) {
-		return
-	}
-	// Find the closing ---
-	rest := src[4:]
-	idx := bytes.Index(rest, []byte("\n---\n"))
-	closingLen := len("\n---\n")
-	if idx < 0 {
-		// Also handle --- at EOF without trailing newline
-		if bytes.HasSuffix(rest, []byte("\n---")) {
-			idx = len(rest) - 4
-			closingLen = len("\n---")
-		} else {
-			return
-		}
-	}
-	yamlBlock := rest[:idx]
 	var data map[string]any
-	if err := yaml.Unmarshal(yamlBlock, &data); err != nil {
+	yamlBlock, end, ok := parseFrontmatter(d.Source, &data)
+	if !ok {
 		return
 	}
 	d.frontmatterData = data
-	d.attachFrontmatterNode(yamlBlock, 4+idx+closingLen)
+	d.attachFrontmatterNode(yamlBlock, end)
+}
+
+// parseFrontmatter returns the YAML bytes and complete source range for a
+// valid leading frontmatter block. The parser and source transforms share
+// this detector so an indented YAML scalar line cannot become a delimiter.
+func parseFrontmatter(source []byte, data *map[string]any) ([]byte, int, bool) {
+	if !bytes.HasPrefix(source, []byte("---\n")) {
+		return nil, 0, false
+	}
+	rest := source[4:]
+	idx := bytes.Index(rest, []byte("\n---\n"))
+	closingLen := len("\n---\n")
+	if idx < 0 {
+		if bytes.HasSuffix(rest, []byte("\n---")) {
+			idx = len(rest) - len("\n---")
+			closingLen = len("\n---")
+		} else {
+			return nil, 0, false
+		}
+	}
+	yamlBlock := rest[:idx]
+	var parsed map[string]any
+	if err := yaml.Unmarshal(yamlBlock, &parsed); err != nil {
+		return nil, 0, false
+	}
+	if data != nil {
+		*data = parsed
+	}
+	return yamlBlock, 4 + idx + closingLen, true
 }
 
 func (d *Document) attachFrontmatterNode(yamlBlock []byte, end int) {
