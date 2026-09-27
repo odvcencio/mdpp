@@ -186,6 +186,10 @@ type parseCtx struct {
 	// MDPP-PARSE-005 diagnostic so callers know some inline content was
 	// rendered as raw text rather than fully parsed.
 	inlineTimeoutOccurred bool
+	// recoveryDiagnostics collects tree-sitter ERROR and MISSING recovery
+	// findings while a document is converted. The owning parse attaches and
+	// clears the slice before returning its Document.
+	recoveryDiagnostics []Diagnostic
 }
 
 // maxContainerDepth caps recursive container-directive body parsing. Real

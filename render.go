@@ -62,7 +62,13 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString("<p")
 		writeSourceAttrs(r, b, n)
 		b.WriteByte('>')
-		renderChildrenInto(r, b, n)
+		if len(n.Children) == 0 && n.Literal != "" {
+			// Parser budget fallbacks store their source in Literal. Keep it
+			// visible as escaped paragraph text instead of emitting an empty p.
+			b.WriteString(html.EscapeString(n.Literal))
+		} else {
+			renderChildrenInto(r, b, n)
+		}
 		b.WriteString("</p>\n")
 
 	case NodeCodeBlock:

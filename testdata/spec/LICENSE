@@ -1,0 +1,9 @@
+The files commonmark-0.31.2.json and gfm-0.29.json in this directory hold the
+examples extracted from the CommonMark Spec 0.31.2
+(https://spec.commonmark.org/0.31.2/, copyright John MacFarlane) and the GitHub
+Flavored Markdown Spec (https://github.github.com/gfm/, from cmark-gfm
+test/spec.txt). Both specs are licensed under the Creative Commons
+Attribution-ShareAlike 4.0 International License
+(https://creativecommons.org/licenses/by-sa/4.0/). The example text is
+unchanged; the JSON wrapper adds example numbers, section names, and line
+numbers, and replaces the spec's tab marker with a tab character.
