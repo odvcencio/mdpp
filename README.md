@@ -22,8 +22,8 @@ Extension source lives in [mdpp-vscode](https://github.com/odvcencio/mdpp-vscode
 For the CLI and language server:
 
 ```bash
-go install github.com/odvcencio/mdpp/cmd/mdpp@latest
-go install github.com/odvcencio/mdpp/cmd/mdpp-lsp@latest
+go install m31labs.dev/mdpp/cmd/mdpp@latest
+go install m31labs.dev/mdpp/cmd/mdpp-lsp@latest
 ```
 
 Pre-built binaries are published on GitHub Releases for macOS, Linux, and Windows.
@@ -67,14 +67,14 @@ html := mdpp.RenderString(source)
 The package exposes the parser, renderer, diagnostics, formatter, linter inputs, table of contents, frontmatter, and source ranges under one module:
 
 ```bash
-go get github.com/odvcencio/mdpp
+go get m31labs.dev/mdpp
 ```
 
 PDF rendering is intentionally split into an optional module so HTML-only
 consumers do not pay for browser dependencies:
 
 ```bash
-go get github.com/odvcencio/mdpp/pdf
+go get m31labs.dev/mdpp/pdf
 ```
 
 ```go
@@ -111,7 +111,7 @@ the policy stricter, but cannot re-enable a blocked scheme.
 | Formatter | Source-preserving canonical formatting for headings, lists, tables, directives, fences, references, and footnotes. |
 | Linter | Built-in Markdown++ rules with source ranges, fixes, and LSP diagnostics. |
 | LSP | Hover, definition, document symbols, formatting, completions, semantic tokens, code actions, and live-preview rendering. |
-| Output | HTML in core; PDF in `github.com/odvcencio/mdpp/pdf`. |
+| Output | HTML in core; PDF in `m31labs.dev/mdpp/pdf`. |
 
 ## Why It Is Different
 

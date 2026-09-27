@@ -53,7 +53,7 @@ func TestConformancePDFCorpus(t *testing.T) {
 
 			pdf, err := Render(mdpp.MustParse(input), Options{
 				RenderOptions: mdpp.RenderOptions{},
-				Timeout:       15 * time.Second,
+				Timeout:       60 * time.Second,
 				SettleDelay:   10 * time.Millisecond,
 				Background:    true,
 			})

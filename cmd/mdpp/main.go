@@ -81,7 +81,7 @@ func runRender(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 	switch strings.ToLower(*format) {
 	case "", "html":
 	case "pdf":
-		stdfmt.Fprintln(stderr, "mdpp render: PDF rendering moved to github.com/odvcencio/mdpp/pdf")
+		stdfmt.Fprintln(stderr, "mdpp render: PDF rendering moved to m31labs.dev/mdpp/pdf")
 		return exitError
 	case "slides":
 		stdfmt.Fprintln(stderr, "mdpp render: --format slides is reserved and not implemented")

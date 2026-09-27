@@ -22,7 +22,7 @@ shape to produce useful HTML, metadata, and editor affordances.
 
 Add the package to a Go project:
 
-` + "```bash\ngo get github.com/odvcencio/mdpp\n```" + `
+` + "```bash\ngo get m31labs.dev/mdpp\n```" + `
 
 Then parse and render a document:
 
