@@ -92,6 +92,7 @@ func processReferenceLinks(doc *Document) {
 		}
 		label = normalizeLinkLabel(label)
 		if def, ok := doc.linkRefDefs[label]; ok {
+			n.Attrs["resolved-ref"] = label
 			n.Attrs["href"] = def.href
 			if def.title != "" {
 				n.Attrs["title"] = def.title

@@ -53,6 +53,7 @@ const (
 	NodeSlide      // a deck slide: top-level content grouped between `---` separators
 	NodeComponent  // an inline GoSX component: <Name .../> or <Name>…</Name>
 	NodeExpression // an inline expression interpolation: {expr}
+	NodeLinkReferenceDefinition
 )
 
 // Node is a single element in the Markdown AST.
@@ -105,6 +106,14 @@ type Document struct {
 	frontmatterData map[string]any
 	linkRefDefs     map[string]linkRefDef
 	diagnostics     []Diagnostic
+	sourceHadCR     bool
+}
+
+// SourceHadCarriageReturns reports whether the input to Parse contained CR
+// bytes. Parse normalizes CRLF and lone CR to LF, so byte ranges cannot be
+// applied directly to the original byte slice when this returns true.
+func (d *Document) SourceHadCarriageReturns() bool {
+	return d != nil && d.sourceHadCR
 }
 
 // AST returns the root node.

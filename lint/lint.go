@@ -7,8 +7,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"m31labs.dev/mdpp"
+	mdppfmt "m31labs.dev/mdpp/fmt"
 )
 
 // Severity classifies a diagnostic.
@@ -129,22 +132,94 @@ func Lint(d *mdpp.Document) []Diagnostic {
 		}
 		return out[i].Range.StartByte < out[j].Range.StartByte
 	})
+	if len(d.Diagnostics()) > 0 || d.SourceHadCarriageReturns() || sourceHasUnsupportedControl(d.Source) {
+		// Parser recovery marks source whose syntax is ambiguous or malformed.
+		// Invalid UTF-8 and control characters beyond Markdown whitespace also
+		// make source edits unsafe. Normalized line endings change byte offsets
+		// from the input file. Keep findings, but withhold all edits.
+		for i := range out {
+			out[i].Fix = nil
+		}
+	} else if !fixesPreserveRenderedMeaning(d, out) {
+		for i := range out {
+			out[i].Fix = nil
+		}
+	}
 	return out
 }
 
+func fixesPreserveRenderedMeaning(before *mdpp.Document, diagnostics []Diagnostic) bool {
+	var edits []TextEdit
+	for _, diag := range diagnostics {
+		if diag.Fix != nil {
+			edits = append(edits, *diag.Fix)
+		}
+	}
+	if len(edits) == 0 {
+		return true
+	}
+	fixed, ok := applyLintTextEdits(before.Source, edits)
+	if !ok {
+		return false
+	}
+	after, err := mdpp.Parse(fixed)
+	if err != nil || after == nil || after.Root == nil {
+		return false
+	}
+	return mdppfmt.PreservesMeaning(before.Source, fixed)
+}
+
+func applyLintTextEdits(source []byte, edits []TextEdit) ([]byte, bool) {
+	sort.SliceStable(edits, func(i, j int) bool {
+		return edits[i].Range.StartByte < edits[j].Range.StartByte
+	})
+	out := make([]byte, 0, len(source))
+	previousEnd := 0
+	for _, edit := range edits {
+		start, end := edit.Range.StartByte, edit.Range.EndByte
+		if start < previousEnd || start < 0 || end < start || end > len(source) {
+			return nil, false
+		}
+		out = append(out, source[previousEnd:start]...)
+		out = append(out, edit.NewText...)
+		previousEnd = end
+	}
+	out = append(out, source[previousEnd:]...)
+	return out, true
+}
+
+func sourceHasUnsupportedControl(source []byte) bool {
+	for len(source) > 0 {
+		r, size := utf8.DecodeRune(source)
+		if r == utf8.RuneError && size == 1 {
+			return true
+		}
+		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+			return true
+		}
+		source = source[size:]
+	}
+	return false
+}
+
 type lintContext struct {
-	source            []byte
-	headings          map[string]*mdpp.Node
-	headingCounts     map[string]int
-	tableRanges       []mdpp.Range
-	footnoteDefs      map[string]*mdpp.Node
-	footnoteRefs      map[string][]*mdpp.Node
-	linkRefDefs       map[string]mdpp.Range
-	linkRefUses       map[string][]mdpp.Range
-	ignoredRanges     []mdpp.Range
-	fileSuppressions  map[string]bool
-	blockSuppressions map[int]map[string]bool
-	nextSuppressions  map[int]map[string]bool
+	source             []byte
+	headings           map[string]*mdpp.Node
+	headingCounts      map[string]int
+	tableRanges        []mdpp.Range
+	footnoteDefs       map[string]*mdpp.Node
+	footnoteRefs       map[string][]*mdpp.Node
+	linkRefDefs        map[string]mdpp.Range
+	linkRefUses        map[string][]mdpp.Range
+	linkDestRanges     []mdpp.Range
+	listItemRanges     []mdpp.Range
+	trailingTextRanges []mdpp.Range
+	softBreakRanges    []mdpp.Range
+	ignoredRanges      []mdpp.Range
+	hardBreakLines     map[int]bool
+	fileSuppressions   map[string]bool
+	blockSuppressions  map[int]map[string]bool
+	nextSuppressions   map[int]map[string]bool
 }
 
 func collectContext(d *mdpp.Document) *lintContext {
@@ -155,14 +230,12 @@ func collectContext(d *mdpp.Document) *lintContext {
 		tableRanges:       []mdpp.Range{},
 		footnoteDefs:      map[string]*mdpp.Node{},
 		footnoteRefs:      map[string][]*mdpp.Node{},
-		linkRefDefs:       collectReferenceDefinitions(d.Source),
+		linkRefDefs:       map[string]mdpp.Range{},
+		linkRefUses:       map[string][]mdpp.Range{},
+		hardBreakLines:    map[int]bool{},
 		fileSuppressions:  map[string]bool{},
 		blockSuppressions: map[int]map[string]bool{},
 		nextSuppressions:  map[int]map[string]bool{},
-	}
-	ctx.linkRefUses = collectReferenceUses(d.Source, ctx.linkRefDefs)
-	for _, r := range ctx.linkRefDefs {
-		ctx.ignoredRanges = append(ctx.ignoredRanges, r)
 	}
 	ctx.collectSuppressions(d)
 	d.Root.Walk(func(n *mdpp.Node) bool {
@@ -175,17 +248,56 @@ func collectContext(d *mdpp.Document) *lintContext {
 			}
 		case mdpp.NodeTable:
 			ctx.tableRanges = append(ctx.tableRanges, n.Range)
+		case mdpp.NodeListItem, mdpp.NodeTaskListItem:
+			ctx.listItemRanges = append(ctx.listItemRanges, n.Range)
+		case mdpp.NodeText:
+			if strings.TrimRight(n.Literal, " \t") != n.Literal {
+				ctx.trailingTextRanges = append(ctx.trailingTextRanges, n.Range)
+			}
+		case mdpp.NodeSoftBreak:
+			ctx.softBreakRanges = append(ctx.softBreakRanges, n.Range)
 		case mdpp.NodeFootnoteDef:
 			ctx.footnoteDefs[n.Attr("id")] = n
 		case mdpp.NodeFootnoteRef:
 			ctx.footnoteRefs[n.Attr("id")] = append(ctx.footnoteRefs[n.Attr("id")], n)
+		case mdpp.NodeLinkReferenceDefinition:
+			label := normalizeLabel(n.Attr("label"))
+			if label != "" {
+				r := n.Range
+				sourceEnd := len(d.Source)
+				if sourceEnd > 0 && d.Source[sourceEnd-1] == '\n' {
+					sourceEnd--
+				}
+				if r.EndByte > sourceEnd {
+					r = byteRange(d.Source, r.StartByte, sourceEnd)
+				} else if r.EndByte < sourceEnd && d.Source[r.EndByte] == '\n' {
+					r = byteRange(d.Source, r.StartByte, r.EndByte+1)
+				}
+				ctx.linkRefDefs[label] = r
+				ctx.ignoredRanges = append(ctx.ignoredRanges, r)
+			}
+		case mdpp.NodeHardBreak:
+			if n.Range.StartLine > 0 {
+				if n.Range.StartLine > 1 && n.Range.StartByte > 0 && n.Range.StartByte <= len(d.Source) && d.Source[n.Range.StartByte-1] == '\n' {
+					ctx.hardBreakLines[n.Range.StartLine-1] = true
+				} else {
+					ctx.hardBreakLines[n.Range.StartLine] = true
+				}
+			}
 		case mdpp.NodeCodeBlock, mdpp.NodeDiagram, mdpp.NodeCodeSpan, mdpp.NodeHTMLBlock, mdpp.NodeHTMLInline, mdpp.NodeMathInline, mdpp.NodeMathBlock, mdpp.NodeFrontmatter, mdpp.NodeAutoEmbed:
 			if n.Range.StartLine != 0 {
 				ctx.ignoredRanges = append(ctx.ignoredRanges, n.Range)
 			}
-		case mdpp.NodeLink:
-			if ref := normalizeLabel(n.Attr("ref")); ref != "" {
+		case mdpp.NodeLink, mdpp.NodeImage:
+			ref := n.Attr("ref")
+			if ref == "" {
+				ref = n.Attr("resolved-ref")
+			}
+			if ref = normalizeLabel(ref); ref != "" {
 				ctx.linkRefUses[ref] = append(ctx.linkRefUses[ref], n.Range)
+			}
+			if r, ok := linkDestinationRange(d.Source, n.Range); ok {
+				ctx.linkDestRanges = append(ctx.linkDestRanges, r)
 			}
 		}
 		return true
@@ -216,8 +328,10 @@ func lintAST(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 					emitDiag(emit, n.Range, SeverityError, "MDPP102", "broken intra-doc link #"+anchor)
 				}
 			}
-			if n.Attr("ref") != "" && href == "" {
-				emitDiag(emit, n.Range, SeverityError, "MDPP106", "reference link ["+n.Attr("ref")+"] has no definition")
+			if ref := normalizeLabel(n.Attr("ref")); ref != "" {
+				if _, ok := ctx.linkRefDefs[ref]; !ok {
+					emitDiag(emit, n.Range, SeverityError, "MDPP106", "reference link ["+n.Attr("ref")+"] has no definition")
+				}
 			}
 			if strings.TrimSpace(n.Text()) == "" && href != "" {
 				emitDiag(emit, n.Range, SeverityError, "MDPP202", "link text is empty")
@@ -266,12 +380,16 @@ func lintAST(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 	}
 	for label, r := range ctx.linkRefDefs {
 		if len(ctx.linkRefUses[label]) == 0 {
+			var fix *TextEdit
+			if !ctx.inListItem(r) && r.EndByte < len(ctx.source)-1 {
+				fix = &TextEdit{Range: r, NewText: ""}
+			}
 			emit(Diagnostic{
 				Range:    r,
 				Severity: SeverityWarning,
 				Code:     "MDPP105",
 				Message:  "link reference [" + label + "] is never used",
-				Fix:      &TextEdit{Range: r, NewText: ""},
+				Fix:      fix,
 			})
 		}
 	}
@@ -286,15 +404,30 @@ func lintSource(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 	listMarkers := map[string]bool{}
 	emStar := false
 	emUnderscore := false
-	fenceLangs := map[string]string{}
 	lineStart := 0
 	for i, line := range lines {
 		lineNo := i + 1
-		if strings.HasSuffix(line, " ") || strings.HasSuffix(line, "\t") {
-			r := lineRange(d.Source, lineNo, len(strings.TrimRight(line, " \t")), len(line))
-			emit(Diagnostic{Range: r, Severity: SeverityInfo, Code: "MD009", Message: "trailing whitespace", Fix: &TextEdit{Range: r, NewText: ""}})
+		lineWholeRange := byteRange(d.Source, lineStart, lineStart+len(line))
+		lineInProtected := ctx.ignored(lineWholeRange)
+		advanceLine := func() {
+			lineStart += len(line)
+			if i < len(lines)-1 {
+				lineStart++
+			}
 		}
-		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+
+		trailingStart := len(strings.TrimRight(line, " \t"))
+		if trailingStart < len(line) && !lineInProtected && !ctx.hardBreakLines[lineNo] {
+			r := byteRange(d.Source, lineStart+trailingStart, lineStart+len(line))
+			if !ctx.overlapsIgnored(r) {
+				var fix *TextEdit
+				if r.EndByte < len(d.Source)-1 && !ctx.inListItem(r) && !ctx.trailingWhitespaceIsRendered(r) {
+					fix = &TextEdit{Range: r, NewText: ""}
+				}
+				emit(Diagnostic{Range: r, Severity: SeverityInfo, Code: "MD009", Message: "trailing whitespace", Fix: fix})
+			}
+		}
+		if !lineInProtected && strings.HasPrefix(strings.TrimSpace(line), "```") {
 			trimmedFence := strings.TrimSpace(line)
 			lang := ""
 			langStart := -1
@@ -308,55 +441,58 @@ func lintSource(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 			if lang != "" {
 				lower := strings.ToLower(lang)
 				if lang != lower {
-					r := lineRange(d.Source, lineNo, langStart, langStart+len(lang))
-					emit(Diagnostic{Range: r, Severity: SeverityInfo, Code: "MDPP300", Message: "fence info-string should be lowercase", Fix: &TextEdit{Range: r, NewText: lower}})
+					r := byteRange(d.Source, lineStart+langStart, lineStart+langStart+len(lang))
+					if !ctx.overlapsIgnored(r) {
+						emit(Diagnostic{Range: r, Severity: SeverityInfo, Code: "MDPP300", Message: "fence info-string should be lowercase", Fix: &TextEdit{Range: r, NewText: lower}})
+					}
 				}
-				fenceLangs[lower] = lang
 			}
 		}
-		lineWholeRange := byteRange(d.Source, lineStart, lineStart+len(line))
-		if ctx.ignored(lineWholeRange) {
+		if lineInProtected {
 			blankRun = 0
-			lineStart += len(line)
-			if i < len(lines)-1 {
-				lineStart++
-			}
+			advanceLine()
 			continue
 		}
 		if strings.TrimSpace(line) == "" {
 			blankRun++
 			if blankRun >= 3 {
-				emitDiag(emit, lineRange(d.Source, lineNo, 0, len(line)), SeverityInfo, "MD012", "multiple consecutive blank lines")
+				r := byteRange(d.Source, lineStart, lineStart+len(line))
+				if !ctx.overlapsIgnored(r) {
+					emitDiag(emit, r, SeverityInfo, "MD012", "multiple consecutive blank lines")
+				}
 			}
-			lineStart += len(line)
-			if i < len(lines)-1 {
-				lineStart++
-			}
+			advanceLine()
 			continue
 		}
 		blankRun = 0
 		if isTableDelimiterRow(line) && !ctx.inTable(lineWholeRange) {
 			if next := nextNonBlankLine(lines, i+1); next > 0 && looksLikeTableRow(lines[next-1]) {
-				emitDiag(emit, lineRange(d.Source, lineNo, 0, len(line)), SeverityWarning, "MDPP203", "table without header row")
+				emitDiag(emit, lineWholeRange, SeverityWarning, "MDPP203", "table without header row")
 			}
 		}
-		if strings.ContainsAny(line, "*_") {
-			if strings.Contains(line, "*") && emStarRe.MatchString(line) {
+		for _, match := range emStarRe.FindAllStringIndex(line, -1) {
+			r := byteRange(d.Source, lineStart+match[0], lineStart+match[1])
+			if !ctx.overlapsIgnored(r) {
 				emStar = true
+				break
 			}
-			if strings.Contains(line, "_") && emUnderscoreRe.MatchString(line) {
+		}
+		for _, match := range emUnderscoreRe.FindAllStringIndex(line, -1) {
+			r := byteRange(d.Source, lineStart+match[0], lineStart+match[1])
+			if !ctx.overlapsIgnored(r) {
 				emUnderscore = true
+				break
 			}
 		}
 		trimmed := strings.TrimLeft(line, " ")
 		if len(trimmed) > 1 && strings.Contains("-*+", trimmed[:1]) && trimmed[1] == ' ' {
-			listMarkers[trimmed[:1]] = true
+			markerStart := lineStart + len(line) - len(trimmed)
+			if !ctx.overlapsIgnored(byteRange(d.Source, markerStart, markerStart+1)) {
+				listMarkers[trimmed[:1]] = true
+			}
 		}
 		if !strings.Contains(line, "http://") && !strings.Contains(line, "https://") {
-			lineStart += len(line)
-			if i < len(lines)-1 {
-				lineStart++
-			}
+			advanceLine()
 			continue
 		}
 		for _, match := range bareURLRe.FindAllStringIndex(line, -1) {
@@ -369,26 +505,24 @@ func lintSource(d *mdpp.Document, ctx *lintContext, emit func(Diagnostic)) {
 				after = line[match[1] : match[1]+1]
 			}
 			matchRange := byteRange(d.Source, lineStart+match[0], lineStart+match[1])
-			if before == "<" && after == ">" && !ctx.ignored(matchRange) {
+			if ctx.overlapsIgnored(matchRange) {
+				continue
+			}
+			inDestination := ctx.inLinkDestination(matchRange)
+			if !inDestination && before == "<" && after == ">" {
 				emitDiag(emit, matchRange, SeverityInfo, "MDPP201", "autolink URL should use descriptive link text")
 			}
-			if before != "<" && before != "(" && !ctx.ignored(matchRange) {
+			if before != "<" && before != "(" && !inDestination {
 				emitDiag(emit, matchRange, SeverityInfo, "MD034", "bare URL should use explicit link syntax")
 			}
 		}
-		lineStart += len(line)
-		if i < len(lines)-1 {
-			lineStart++
-		}
+		advanceLine()
 	}
 	if len(listMarkers) > 1 {
 		emitDiag(emit, mdpp.Range{StartByte: 0, EndByte: 1, StartLine: 1, StartCol: 1, EndLine: 1, EndCol: 2}, SeverityInfo, "MD004", "unordered list markers are inconsistent")
 	}
 	if emStar && emUnderscore {
 		emitDiag(emit, mdpp.Range{StartByte: 0, EndByte: 1, StartLine: 1, StartCol: 1, EndLine: 1, EndCol: 2}, SeverityInfo, "MD049", "emphasis styles are inconsistent")
-	}
-	for range fenceLangs {
-		break
 	}
 }
 
@@ -398,6 +532,67 @@ func (ctx *lintContext) ignored(r mdpp.Range) bool {
 	}
 	for _, ignored := range ctx.ignoredRanges {
 		if r.StartByte >= ignored.StartByte && r.EndByte <= ignored.EndByte {
+			return true
+		}
+	}
+	return false
+}
+
+func (ctx *lintContext) overlapsIgnored(r mdpp.Range) bool {
+	if ctx == nil || len(ctx.ignoredRanges) == 0 || r.StartLine == 0 {
+		return false
+	}
+	for _, ignored := range ctx.ignoredRanges {
+		if r.StartByte < ignored.EndByte && r.EndByte > ignored.StartByte {
+			return true
+		}
+		if r.StartByte == r.EndByte && r.StartByte >= ignored.StartByte && r.StartByte < ignored.EndByte {
+			return true
+		}
+	}
+	return false
+}
+
+func (ctx *lintContext) inLinkDestination(r mdpp.Range) bool {
+	if ctx == nil {
+		return false
+	}
+	for _, dest := range ctx.linkDestRanges {
+		if r.StartByte < dest.EndByte && r.EndByte > dest.StartByte {
+			return true
+		}
+	}
+	return false
+}
+
+func (ctx *lintContext) inListItem(r mdpp.Range) bool {
+	for _, item := range ctx.listItemRanges {
+		if r.StartByte >= item.StartByte && r.EndByte <= item.EndByte {
+			return true
+		}
+	}
+	return false
+}
+
+func (ctx *lintContext) trailingWhitespaceIsRendered(r mdpp.Range) bool {
+	for _, text := range ctx.trailingTextRanges {
+		if ((r.StartByte < text.EndByte && r.EndByte > text.StartByte) || r.EndByte == text.StartByte) && !ctx.softBreakFollows(text) {
+			return true
+		}
+	}
+	if r.StartCol == 1 {
+		for _, br := range ctx.softBreakRanges {
+			if r.StartByte < br.EndByte && r.EndByte > br.StartByte {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (ctx *lintContext) softBreakFollows(text mdpp.Range) bool {
+	for _, br := range ctx.softBreakRanges {
+		if br.StartByte == text.EndByte {
 			return true
 		}
 	}
@@ -486,46 +681,76 @@ var (
 	emStarRe       = regexp.MustCompile(`(^|[^*])\*[^*\s][^*]*\*`)
 	emUnderscoreRe = regexp.MustCompile(`(^|[^_])_[^_\s][^_]*_`)
 	bareURLRe      = regexp.MustCompile(`https?://[^\s<>()]+`)
-	refDefRe       = regexp.MustCompile(`(?m)^ {0,3}\[([^\]\^][^\]]*)\]:[ \t]*(\S+)`)
-	bracketTokenRe = regexp.MustCompile(`!?\[([^\]\n]+)\]`)
 )
-
-func collectReferenceDefinitions(src []byte) map[string]mdpp.Range {
-	out := map[string]mdpp.Range{}
-	for _, loc := range refDefRe.FindAllSubmatchIndex(src, -1) {
-		label := normalizeLabel(string(src[loc[2]:loc[3]]))
-		end := loc[1]
-		if end < len(src) && src[end] == '\n' {
-			end++
-		}
-		out[label] = byteRange(src, loc[0], end)
-	}
-	return out
-}
-
-func collectReferenceUses(src []byte, defs map[string]mdpp.Range) map[string][]mdpp.Range {
-	out := map[string][]mdpp.Range{}
-	if len(defs) == 0 {
-		return out
-	}
-	for _, loc := range bracketTokenRe.FindAllSubmatchIndex(src, -1) {
-		label := normalizeLabel(string(src[loc[2]:loc[3]]))
-		if _, ok := defs[label]; !ok {
-			continue
-		}
-		if loc[1] < len(src) {
-			switch src[loc[1]] {
-			case ':', '(', '[':
-				continue
-			}
-		}
-		out[label] = append(out[label], byteRange(src, loc[2], loc[3]))
-	}
-	return out
-}
 
 func normalizeLabel(label string) string {
 	return strings.Join(strings.Fields(strings.ToLower(strings.Trim(label, "[]"))), " ")
+}
+
+func linkDestinationRange(src []byte, nodeRange mdpp.Range) (mdpp.Range, bool) {
+	if nodeRange.StartByte < 0 || nodeRange.EndByte > len(src) || nodeRange.EndByte <= nodeRange.StartByte {
+		return mdpp.Range{}, false
+	}
+	raw := src[nodeRange.StartByte:nodeRange.EndByte]
+	closeLabel := strings.Index(string(raw), "](")
+	if closeLabel < 0 {
+		return mdpp.Range{}, false
+	}
+	start := closeLabel + 2
+	for start < len(raw) && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
+		start++
+	}
+	if start >= len(raw) {
+		return mdpp.Range{}, false
+	}
+	if raw[start] == '<' {
+		start++
+		end := start
+		for end < len(raw) && raw[end] != '>' && raw[end] != '\n' {
+			if raw[end] == '\\' && end+1 < len(raw) {
+				end += 2
+				continue
+			}
+			end++
+		}
+		if end > start {
+			return byteRange(src, nodeRange.StartByte+start, nodeRange.StartByte+end), true
+		}
+		return mdpp.Range{}, false
+	}
+	depth := 0
+	end := start
+	for end < len(raw) {
+		ch := raw[end]
+		if ch == '\\' && end+1 < len(raw) {
+			end += 2
+			continue
+		}
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			if depth == 0 {
+				if end > start {
+					return byteRange(src, nodeRange.StartByte+start, nodeRange.StartByte+end), true
+				}
+				return mdpp.Range{}, false
+			}
+			depth--
+		case ' ', '\t', '\n', '\r':
+			if depth == 0 {
+				if end > start {
+					return byteRange(src, nodeRange.StartByte+start, nodeRange.StartByte+end), true
+				}
+				return mdpp.Range{}, false
+			}
+		}
+		end++
+	}
+	if end > start {
+		return byteRange(src, nodeRange.StartByte+start, nodeRange.StartByte+end), true
+	}
+	return mdpp.Range{}, false
 }
 
 func byteRange(src []byte, start, end int) mdpp.Range {
@@ -541,18 +766,6 @@ func byteRange(src []byte, start, end int) mdpp.Range {
 	sl, sc := lineCol(src, start)
 	el, ec := lineCol(src, end)
 	return mdpp.Range{StartByte: start, EndByte: end, StartLine: sl, StartCol: sc, EndLine: el, EndCol: ec}
-}
-
-func lineRange(src []byte, lineNo int, startCol0 int, endCol0 int) mdpp.Range {
-	start := 0
-	line := 1
-	for start < len(src) && line < lineNo {
-		if src[start] == '\n' {
-			line++
-		}
-		start++
-	}
-	return byteRange(src, start+startCol0, start+endCol0)
 }
 
 func lineCol(src []byte, offset int) (int, int) {

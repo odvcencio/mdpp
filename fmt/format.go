@@ -103,6 +103,13 @@ func meaningDifference(before, after []byte) string {
 	return ""
 }
 
+// PreservesMeaning reports whether two Markdown sources have equivalent
+// frontmatter, protected code, and rendered HTML under the formatter's
+// meaning-preservation contract.
+func PreservesMeaning(before, after []byte) bool {
+	return meaningDifference(before, after) == ""
+}
+
 type codeSignature struct {
 	kind string
 	info string

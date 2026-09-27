@@ -348,7 +348,7 @@ func TestLintExitSemantics(t *testing.T) {
 
 func TestLintFixPreservesModeAndReportsOriginalFindings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "document.md")
-	if err := os.WriteFile(path, []byte("Text with trailing spaces.  \n"), 0o750); err != nil {
+	if err := os.WriteFile(path, []byte("Text with trailing spaces. \nNext line.\n"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(path, 0o750); err != nil {
@@ -367,7 +367,7 @@ func TestLintFixPreservesModeAndReportsOriginalFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []byte("Text with trailing spaces.\n"); !bytes.Equal(got, want) {
+	if want := []byte("Text with trailing spaces.\nNext line.\n"); !bytes.Equal(got, want) {
 		t.Fatalf("fixed file = %q, want %q", got, want)
 	}
 	info, err := os.Stat(path)

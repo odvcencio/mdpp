@@ -63,6 +63,7 @@ func inlineLang() *gotreesitter.Language {
 
 // Parse parses Markdown source into a Document AST.
 func Parse(source []byte) (doc *Document, err error) {
+	sourceHadCR := bytes.IndexByte(source, '\r') >= 0
 	defer func() {
 		if r := recover(); r != nil {
 			src := normalizeLineEndings(append([]byte(nil), source...))
@@ -72,8 +73,9 @@ func Parse(source []byte) (doc *Document, err error) {
 				Children: []*Node{textNodeRange(string(src), sourceRange(src, 0, len(src)))},
 			}
 			doc = &Document{
-				Root:   root,
-				Source: src,
+				Root:        root,
+				Source:      src,
+				sourceHadCR: sourceHadCR,
 				diagnostics: []Diagnostic{{
 					Code:     "MDPP-PARSE-000",
 					Severity: SeverityError,
@@ -84,7 +86,11 @@ func Parse(source []byte) (doc *Document, err error) {
 			err = nil
 		}
 	}()
-	return parseDocument(source), nil
+	doc = parseDocument(source)
+	if doc != nil {
+		doc.sourceHadCR = sourceHadCR
+	}
+	return doc, nil
 }
 
 // MustParse parses Markdown source and panics only if Parse returns an error.
@@ -102,6 +108,7 @@ func MustParse(source []byte) *Document {
 // Callers that receive a non-nil Tree must eventually call tree.Release()
 // (or feed it back into ParseIncremental, which takes ownership).
 func ParseWithTree(source []byte) (doc *Document, tree *gotreesitter.Tree, err error) {
+	sourceHadCR := bytes.IndexByte(source, '\r') >= 0
 	defer func() {
 		if r := recover(); r != nil {
 			src := normalizeLineEndings(append([]byte(nil), source...))
@@ -111,8 +118,9 @@ func ParseWithTree(source []byte) (doc *Document, tree *gotreesitter.Tree, err e
 				Children: []*Node{textNodeRange(string(src), sourceRange(src, 0, len(src)))},
 			}
 			doc = &Document{
-				Root:   root,
-				Source: src,
+				Root:        root,
+				Source:      src,
+				sourceHadCR: sourceHadCR,
 				diagnostics: []Diagnostic{{
 					Code:     "MDPP-PARSE-000",
 					Severity: SeverityError,
@@ -125,6 +133,9 @@ func ParseWithTree(source []byte) (doc *Document, tree *gotreesitter.Tree, err e
 		}
 	}()
 	doc, tree = parseDocumentRetainTree(source, nil)
+	if doc != nil {
+		doc.sourceHadCR = sourceHadCR
+	}
 	return doc, tree, nil
 }
 
@@ -138,6 +149,7 @@ func ParseWithTree(source []byte) (doc *Document, tree *gotreesitter.Tree, err e
 // path (e.g. it now matches a container/all-indented/deep-nested fallback)
 // this function falls back to a full parse and the returned Tree may be nil.
 func ParseIncremental(source []byte, prevTree *gotreesitter.Tree, edit gotreesitter.InputEdit) (doc *Document, tree *gotreesitter.Tree, err error) {
+	sourceHadCR := bytes.IndexByte(source, '\r') >= 0
 	defer func() {
 		if r := recover(); r != nil {
 			src := normalizeLineEndings(append([]byte(nil), source...))
@@ -147,8 +159,9 @@ func ParseIncremental(source []byte, prevTree *gotreesitter.Tree, edit gotreesit
 				Children: []*Node{textNodeRange(string(src), sourceRange(src, 0, len(src)))},
 			}
 			doc = &Document{
-				Root:   root,
-				Source: src,
+				Root:        root,
+				Source:      src,
+				sourceHadCR: sourceHadCR,
 				diagnostics: []Diagnostic{{
 					Code:     "MDPP-PARSE-000",
 					Severity: SeverityError,
@@ -167,6 +180,9 @@ func ParseIncremental(source []byte, prevTree *gotreesitter.Tree, edit gotreesit
 		prevTree.Edit(edit)
 	}
 	doc, tree = parseDocumentRetainTree(source, prevTree)
+	if doc != nil {
+		doc.sourceHadCR = sourceHadCR
+	}
 	return doc, tree, nil
 }
 
@@ -260,6 +276,16 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 			ctx.cache.pruneNotIn(ctx.seen)
 		}
 		return doc, nil
+	}
+	candidate := bytes.TrimSpace(source)
+	if len(candidate) > 0 && candidate[0] == '[' && bytes.Contains(candidate, []byte("]:")) {
+		if doc := parseOnlyReferenceDefinitions(source); doc != nil {
+			releasePrev()
+			if topLevel && ctx != nil {
+				ctx.cache.pruneNotIn(ctx.seen)
+			}
+			return doc, nil
+		}
 	}
 
 	if doc := parseContainerDocumentCtx(source, ctx); doc != nil {
@@ -374,6 +400,52 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 		ctx.cache.pruneNotIn(ctx.seen)
 	}
 	return doc, tree
+}
+
+func parseOnlyReferenceDefinitions(source []byte) *Document {
+	parseSource := append(append([]byte(nil), source...), '\n')
+	tree, err := parsePooled(blockLang(), mdEntry, parseSource)
+	if err != nil || tree == nil {
+		return nil
+	}
+	defer tree.Release()
+	bt := gotreesitter.Bind(tree)
+	root := convertBlockCtx(bt, bt.RootNode(), parseSource, nil)
+	if root == nil {
+		return nil
+	}
+	defs := root.Find(NodeLinkReferenceDefinition)
+	if len(defs) == 0 {
+		return nil
+	}
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Range.StartByte < defs[j].Range.StartByte })
+	cursor := 0
+	for _, def := range defs {
+		if def.Range.StartByte < cursor || def.Range.EndByte > len(source) || !allSourceWhitespace(source[cursor:def.Range.StartByte]) {
+			return nil
+		}
+		cursor = def.Range.EndByte
+	}
+	if !allSourceWhitespace(source[cursor:]) {
+		return nil
+	}
+	for _, def := range defs {
+		def.Range = sourceRange(source, def.Range.StartByte, def.Range.EndByte)
+	}
+	root.Range = sourceRange(source, 0, len(source))
+	doc := &Document{Root: root, Source: source, linkRefDefs: collectLinkRefDefs(bt, bt.RootNode())}
+	doc.extractFrontmatter()
+	postProcess(doc)
+	return doc
+}
+
+func allSourceWhitespace(source []byte) bool {
+	for _, ch := range source {
+		if ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n' {
+			return false
+		}
+	}
+	return true
 }
 
 // collectLinkRefDefs walks the tree-sitter AST gathering every
@@ -2520,7 +2592,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 		}
 
 		// Detect footnote definitions: [^id]: content
-		var label, dest string
+		var label, dest, title string
 		for i := 0; i < n.ChildCount(); i++ {
 			child := n.Child(i)
 			ct := bt.NodeType(child)
@@ -2529,6 +2601,8 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 				label = bt.NodeText(child)
 			case "link_destination":
 				dest = bt.NodeText(child)
+			case "link_title":
+				title = stripQuotes(bt.NodeText(child))
 			}
 		}
 		// Footnote defs have labels like [^id]
@@ -2548,7 +2622,17 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 			appendParseErrorDiagnostic(ctx, source, start, end, "invalid link reference definition")
 			return &Node{Type: NodeParagraph, Literal: raw, Range: sourceRange(source, start, end)}
 		}
-		return nil
+		// Keep parsed definitions in the public AST so consumers can inspect
+		// them without rescanning raw source text.
+		def := newNodeFromTree(NodeLinkReferenceDefinition, n)
+		def.Attrs = map[string]string{
+			"label": normalizeLinkLabel(label),
+			"href":  dest,
+		}
+		if title != "" {
+			def.Attrs["title"] = title
+		}
+		return def
 
 	default:
 		if isBlockWrapperNodeType(typ) && n.ChildCount() > 0 {

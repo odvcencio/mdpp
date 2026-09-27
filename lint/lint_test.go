@@ -68,8 +68,8 @@ func TestLintIgnoresBareURLInsideCode(t *testing.T) {
 	}
 }
 
-func TestLintFixesTrailingWhitespaceFenceLanguageAndUnusedRef(t *testing.T) {
-	doc := mdpp.MustParse([]byte("text  \n\n```Go\nx\n```\n\n[stale]: https://example.com\n"))
+func TestLintFixesTrailingWhitespaceAndUnusedRef(t *testing.T) {
+	doc := mdpp.MustParse([]byte("text  \n\n```Go\nx\n```\n\n[stale]: https://example.com\n\nAfter.\n"))
 	diags := Lint(doc)
 
 	trailing := findLintCode(diags, "MD009")
@@ -77,14 +77,9 @@ func TestLintFixesTrailingWhitespaceFenceLanguageAndUnusedRef(t *testing.T) {
 		t.Fatalf("expected MD009 delete fix, got %#v", trailing)
 	}
 
-	fence := findLintCode(diags, "MDPP300")
-	if fence == nil || fence.Fix == nil || fence.Fix.NewText != "go" {
-		t.Fatalf("expected MDPP300 lowercase fix, got %#v", fence)
-	}
-
 	unused := findLintCode(diags, "MDPP105")
-	if unused == nil || unused.Fix == nil || unused.Fix.Range.EndLine != 8 {
-		t.Fatalf("expected MDPP105 line delete fix, got %#v", unused)
+	if unused == nil || unused.Fix == nil || unused.Fix.Range.StartLine != 7 {
+		t.Fatalf("expected MDPP105 definition delete fix, got %#v", unused)
 	}
 }
 

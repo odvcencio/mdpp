@@ -87,6 +87,8 @@ func (t NodeType) String() string {
 		return "Component"
 	case NodeExpression:
 		return "Expression"
+	case NodeLinkReferenceDefinition:
+		return "LinkReferenceDefinition"
 	default:
 		return "Unknown"
 	}
