@@ -19,6 +19,8 @@ type Renderer struct {
 	highlightCode   bool
 	headingIDs      bool
 	unsafeHTML      bool
+	sanitize        bool
+	urlPolicy       func(URLKind, string) (string, bool)
 	hardWraps       bool
 	wrapEmoji       bool
 	imageResolver   func(string) string
@@ -54,6 +56,13 @@ func WithHeadingIDs(enabled bool) Option {
 // WithUnsafeHTML enables or disables raw HTML passthrough.
 func WithUnsafeHTML(enabled bool) Option {
 	return func(r *Renderer) { r.unsafeHTML = enabled }
+}
+
+// WithURLPolicy applies an additional URL policy after the built-in safe
+// policy. It can reject or rewrite URLs, but cannot allow a URL the built-in
+// policy rejects.
+func WithURLPolicy(fn func(URLKind, string) (string, bool)) Option {
+	return func(r *Renderer) { r.urlPolicy = fn }
 }
 
 // WithHardWraps makes single newlines render as <br> instead of whitespace.
@@ -116,17 +125,21 @@ func (r *Renderer) Render(doc *Document) string {
 		b.Grow(len(doc.Source) + len(doc.Source)/4)
 	}
 	renderNodeInto(r, &b, doc.Root)
-	return b.String()
+	return r.secureOutput(b.String())
 }
 
 // RenderNodeInto writes one AST node into b using this renderer's options.
 func (r *Renderer) RenderNodeInto(b *strings.Builder, n *Node) {
-	renderNodeInto(r, b, n)
+	var rendered strings.Builder
+	renderNodeInto(r, &rendered, n)
+	b.WriteString(r.secureOutput(rendered.String()))
 }
 
 // RenderChildrenInto writes a node's children into b using this renderer's options.
 func (r *Renderer) RenderChildrenInto(b *strings.Builder, n *Node) {
-	renderChildrenInto(r, b, n)
+	var rendered strings.Builder
+	renderChildrenInto(r, &rendered, n)
+	b.WriteString(r.secureOutput(rendered.String()))
 }
 
 // RenderWithFragments renders a document and returns top-level HTML fragments
@@ -138,7 +151,7 @@ func (r *Renderer) RenderWithFragments(doc *Document) (string, []RenderFragment)
 	if doc.Root.Type != NodeDocument {
 		var b strings.Builder
 		renderNodeInto(r, &b, doc.Root)
-		html := b.String()
+		html := r.secureOutput(b.String())
 		return html, []RenderFragment{{Index: 0, Type: doc.Root.Type, Range: doc.Root.Range, HTML: html}}
 	}
 	fragments := make([]RenderFragment, 0, len(doc.Root.Children))
@@ -149,7 +162,7 @@ func (r *Renderer) RenderWithFragments(doc *Document) (string, []RenderFragment)
 	for i, child := range doc.Root.Children {
 		var part strings.Builder
 		renderNodeInto(r, &part, child)
-		html := part.String()
+		html := r.secureOutput(part.String())
 		out.WriteString(html)
 		fragments = append(fragments, RenderFragment{
 			Index: i,

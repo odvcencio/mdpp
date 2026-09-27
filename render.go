@@ -18,7 +18,7 @@ func renderNode(r *Renderer, n *Node) string {
 	}
 	var b strings.Builder
 	renderNodeInto(r, &b, n)
-	return b.String()
+	return r.secureOutput(b.String())
 }
 
 // renderNodeInto writes the HTML for n into b. Internal recursive
@@ -149,8 +149,8 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString(" />\n")
 
 	case NodeLink:
-		href := html.EscapeString(n.Attrs["href"])
-		if href == "" {
+		rawHref := n.Attrs["href"]
+		if rawHref == "" {
 			if raw := n.Attrs["raw"]; raw != "" {
 				b.WriteString(html.EscapeString(raw))
 			} else {
@@ -158,6 +158,11 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 			}
 			return
 		}
+		href, ok := r.filterURL(URLKindLink, rawHref)
+		if !ok {
+			href = ""
+		}
+		href = html.EscapeString(href)
 		title := n.Attrs["title"]
 		b.WriteString(`<a href="`)
 		b.WriteString(href)
@@ -175,6 +180,11 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		src := n.Attrs["src"]
 		if r.imageResolver != nil {
 			src = r.imageResolver(src)
+		}
+		if filtered, ok := r.filterURL(URLKindImageSrc, src); ok {
+			src = filtered
+		} else {
+			src = ""
 		}
 		alt := html.EscapeString(n.Attrs["alt"])
 		src = html.EscapeString(src)
@@ -269,9 +279,14 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		renderTaskListItemInto(r, b, n)
 
 	case NodeFootnoteRef:
-		id := html.EscapeString(n.Attrs["id"])
-		b.WriteString(`<sup><a class="footnote-ref" href="#fn-`)
-		b.WriteString(id)
+		rawID := n.Attrs["id"]
+		href, ok := r.filterURL(URLKindLink, "#fn-"+rawID)
+		if !ok {
+			href = ""
+		}
+		id := html.EscapeString(rawID)
+		b.WriteString(`<sup><a class="footnote-ref" href="`)
+		b.WriteString(html.EscapeString(href))
 		b.WriteString(`" id="fnref-`)
 		b.WriteString(id)
 		b.WriteString(`">[`)
@@ -279,13 +294,18 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString("]</a></sup>")
 
 	case NodeFootnoteDef:
-		id := html.EscapeString(n.Attrs["id"])
+		rawID := n.Attrs["id"]
+		href, ok := r.filterURL(URLKindLink, "#fnref-"+rawID)
+		if !ok {
+			href = ""
+		}
+		id := html.EscapeString(rawID)
 		b.WriteString(`<section class="footnotes"><ol><li id="fn-`)
 		b.WriteString(id)
 		b.WriteString(`">`)
 		renderChildrenInto(r, b, n)
-		b.WriteString(` <a href="#fnref-`)
-		b.WriteString(id)
+		b.WriteString(` <a href="`)
+		b.WriteString(html.EscapeString(href))
 		b.WriteString(`">\u21a9</a></li></ol></section>`)
 		b.WriteByte('\n')
 
@@ -368,7 +388,17 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString("</dd>\n")
 
 	case NodeAutoEmbed:
-		src := html.EscapeString(n.Attrs["src"])
+		rawSrc := n.Attrs["src"]
+		embedSrc, ok := r.filterURL(URLKindEmbed, rawSrc)
+		if !ok {
+			embedSrc = ""
+		}
+		href, ok := r.filterURL(URLKindLink, rawSrc)
+		if !ok {
+			href = ""
+		}
+		src := html.EscapeString(embedSrc)
+		displaySrc := html.EscapeString(rawSrc)
 		provider := html.EscapeString(n.Attrs["provider"])
 		b.WriteString(`<div class="mdpp-embed`)
 		if provider != "" {
@@ -385,9 +415,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		}
 		writeSourceAttrs(r, b, n)
 		b.WriteString(`><a href="`)
-		b.WriteString(src)
+		b.WriteString(html.EscapeString(href))
 		b.WriteString(`">`)
-		b.WriteString(src)
+		b.WriteString(displaySrc)
 		b.WriteString("</a></div>\n")
 
 	case NodeSlide:
