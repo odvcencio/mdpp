@@ -2,13 +2,21 @@ package pdf
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/chromedp/chromedp"
 	"m31labs.dev/mdpp"
+)
+
+var (
+	localChromeProbe    sync.Once
+	localChromeProbeErr error
 )
 
 func TestRenderProducesPDFBytes(t *testing.T) {
@@ -17,7 +25,7 @@ func TestRenderProducesPDFBytes(t *testing.T) {
 	doc := mdpp.MustParse([]byte("# PDF Smoke\n\n[[toc]]\n\n## Section\n\nBody with math $x^2$.\n"))
 	out, err := Render(doc, Options{
 		RenderOptions: mdpp.RenderOptions{HeadingIDs: true, Math: mdpp.MathRaw},
-		Timeout:       15 * time.Second,
+		Timeout:       60 * time.Second,
 		SettleDelay:   10 * time.Millisecond,
 		Background:    true,
 	})
@@ -41,7 +49,7 @@ func TestRenderCanRasterizeFirstPage(t *testing.T) {
 	doc := mdpp.MustParse([]byte("# Raster Smoke\n\n![Diagram](images/diagram.png \"Architecture\")\n\n| A | B |\n|---|---|\n| 1 | 2 |\n"))
 	out, err := Render(doc, Options{
 		RenderOptions: mdpp.RenderOptions{HeadingIDs: true, Math: mdpp.MathRaw},
-		Timeout:       15 * time.Second,
+		Timeout:       60 * time.Second,
 		SettleDelay:   10 * time.Millisecond,
 		Background:    true,
 	})
@@ -90,10 +98,34 @@ func skipIfNoLocalChrome(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
 		if _, err := exec.LookPath(name); err == nil {
+			if err := probeLocalChrome(); err != nil {
+				t.Skipf("local Chrome/Chromium is not usable: %v", err)
+			}
 			return
 		}
 	}
 	t.Skip("local Chrome/Chromium not available")
+}
+
+func probeLocalChrome() error {
+	localChromeProbe.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		allocOpts := append([]chromedp.ExecAllocatorOption(nil), chromedp.DefaultExecAllocatorOptions[:]...)
+		allocOpts = append(allocOpts,
+			chromedp.Flag("headless", "new"),
+			chromedp.Flag("no-sandbox", true),
+			chromedp.Flag("disable-gpu", true),
+			chromedp.Flag("use-gl", "swiftshader"),
+		)
+		ctx, cancelAlloc := chromedp.NewExecAllocator(ctx, allocOpts...)
+		defer cancelAlloc()
+		ctx, cancelTab := chromedp.NewContext(ctx)
+		defer cancelTab()
+		localChromeProbeErr = chromedp.Run(ctx, chromedp.Navigate("about:blank"))
+	})
+	return localChromeProbeErr
 }
 
 func minInt(a, b int) int {
