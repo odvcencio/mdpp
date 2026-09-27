@@ -254,22 +254,22 @@ func (s *Server) codeActions(params CodeActionParams) ([]CodeAction, error) {
 		actions = append(actions, codeActionsForConversions(params.TextDocument.URI, doc, source, index, params.Range)...)
 	}
 	if fixAllAllowed {
-		formatted, err := mdppfmt.Format(source)
-		if err != nil {
-			return nil, err
+		var edits []TextEdit
+		for _, d := range lint.Lint(doc) {
+			if d.Fix == nil {
+				continue
+			}
+			edits = append(edits, TextEdit{
+				Range:   index.RangeToLSP(d.Fix.Range),
+				NewText: d.Fix.NewText,
+			})
 		}
-		if string(formatted) != string(source) {
+		if len(edits) > 0 {
 			actions = append(actions, CodeAction{
-				Title: "Format document with mdpp",
+				Title: "Fix all lint issues",
 				Kind:  "source.fixAll.mdpp",
 				Edit: &WorkspaceEdit{Changes: map[DocumentURI][]TextEdit{
-					params.TextDocument.URI: {{
-						Range: Range{
-							Start: Position{Line: 0, Character: 0},
-							End:   index.OffsetToPosition(len(source)),
-						},
-						NewText: string(formatted),
-					}},
+					params.TextDocument.URI: edits,
 				}},
 			})
 		}

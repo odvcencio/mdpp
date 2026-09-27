@@ -170,7 +170,7 @@ func TestServerPreviewRendersLargeSegmentedDocument(t *testing.T) {
 
 func TestServerJSONRPCHarness(t *testing.T) {
 	uri := DocumentURI("file:///doc.md")
-	src := "http://example.com\n\nTitle\n=====\n\n3. First item\n1. Second item\n"
+	src := "[stale]: https://unused.example.test\n\nhttp://example.com\nplain line\nTitle\n=====\n\n3. First item\n1. Second item\n"
 
 	var input bytes.Buffer
 	writeRPCFrame(&input, rpcRequest(1, "initialize", InitializeParams{
@@ -264,7 +264,7 @@ func TestServerJSONRPCHarness(t *testing.T) {
 }
 
 func TestServerCodeActionsFromLintFixes(t *testing.T) {
-	src := "text  \n\n[stale]: https://example.com\n"
+	src := "text  \n\n[stale]: https://example.com\n\nAfter.\n"
 	uri := DocumentURI("file:///doc.md")
 	s := NewServer()
 	s.store.Open(TextDocumentItem{URI: uri, Version: 1, Text: src})
@@ -299,7 +299,7 @@ func TestServerCodeActionsFromLintFixes(t *testing.T) {
 }
 
 func TestServerCodeActionsSourceFixAll(t *testing.T) {
-	src := "Title\n=====\n"
+	src := "ordinary trailing space \n\n```Go\ncode with trailing spaces  \n[foo]: https://example.com\n```\n"
 	uri := DocumentURI("file:///doc.md")
 	s := NewServer()
 	s.store.Open(TextDocumentItem{URI: uri, Version: 1, Text: src})
@@ -321,8 +321,9 @@ func TestServerCodeActionsSourceFixAll(t *testing.T) {
 	if actions[0].Kind != "source.fixAll.mdpp" {
 		t.Fatalf("expected source.fixAll.mdpp, got %#v", actions[0])
 	}
-	if got := actions[0].Edit.Changes[uri][0].NewText; got != "# Title\n" {
-		t.Fatalf("unexpected fix-all text: %q", got)
+	edits := actions[0].Edit.Changes[uri]
+	if len(edits) != 1 || edits[0].Range.Start.Line != 0 || edits[0].Range.End.Line != 0 || edits[0].NewText != "" {
+		t.Fatalf("source.fixAll should only remove the prose trailing space: %#v", edits)
 	}
 }
 

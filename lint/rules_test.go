@@ -17,7 +17,7 @@ func TestLintImplementedRulesPositiveCases(t *testing.T) {
 		src  string
 	}{
 		{code: "MD004", src: "- one\n* two\n"},
-		{code: "MD009", src: "text  \n"},
+		{code: "MD009", src: "text \nnext\n"},
 		{code: "MD012", src: "alpha\n\n\n\nbeta\n"},
 		{code: "MD034", src: "http://example.com\n"},
 		{code: "MD045", src: "![](image.png)\n"},
@@ -27,7 +27,7 @@ func TestLintImplementedRulesPositiveCases(t *testing.T) {
 		{code: "MDPP102", src: "[jump](#missing)\n"},
 		{code: "MDPP103", src: "# Results\n\n## Results\n"},
 		{code: "MDPP104", src: ":::unknown\nbody\n:::\n"},
-		{code: "MDPP105", src: "[ref]: https://example.com\n"},
+		{code: "MDPP105", src: "[ref]: https://example.com\n\nAfter.\n"},
 		{code: "MDPP106", src: "[x][missing]\n"},
 		{code: "MDPP107", src: "---\nmdpp: 9.9\n---\n# Content\n"},
 		{code: "MDPP108", src: "[[toc]]\n\n[[toc]]\n"},
@@ -38,7 +38,6 @@ func TestLintImplementedRulesPositiveCases(t *testing.T) {
 		{code: "MDPP201", src: "<https://example.com>\n"},
 		{code: "MDPP202", src: "[](/x)\n"},
 		{code: "MDPP203", src: "|---|---|\n| a | b |\n"},
-		{code: "MDPP300", src: "```Go\nx\n```\n"},
 	}
 
 	for _, tc := range tests {
@@ -88,9 +87,8 @@ func TestLintFixesApplyCleanly(t *testing.T) {
 		code string
 		src  string
 	}{
-		{code: "MD009", src: "text  \n"},
-		{code: "MDPP105", src: "[ref]: https://example.com\n"},
-		{code: "MDPP300", src: "```Go\nx\n```\n"},
+		{code: "MD009", src: "text \nnext\n"},
+		{code: "MDPP105", src: "[ref]: https://example.com\n\nAfter.\n"},
 	}
 
 	for _, tc := range tests {
