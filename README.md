@@ -84,6 +84,24 @@ out, err := pdf.Render(doc, pdf.Options{
 })
 ```
 
+## Rendering safety
+
+`RenderOptions` has three trust modes:
+
+- **Safe (default):** raw HTML is escaped. URLs using `javascript:`, `vbscript:`,
+  `file:`, or disallowed `data:` media types get an empty `href` or `src`.
+  Data URLs are allowed only for PNG, GIF, JPEG, WebP, and AVIF image sources.
+  Relative URLs, fragments, and other schemes pass through unchanged.
+- **Sanitized:** set `Sanitize: true` to apply the URL policy and an HTML
+  allow-list. If `UnsafeHTML` is also true, allowed formatting HTML is kept,
+  event-handler attributes are removed, and dangerous elements are dropped.
+  The sanitizer also applies GFM's raw HTML tag filter.
+- **Trusted:** set `UnsafeHTML: true` and leave `Sanitize` false only for
+  trusted-author content. Raw HTML and URLs pass through unchanged.
+
+`URLPolicy` can reject or rewrite URLs after the built-in policy. It can make
+the policy stricter, but cannot re-enable a blocked scheme.
+
 ## What Ships
 
 | Area | Support |

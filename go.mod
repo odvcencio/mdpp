@@ -9,4 +9,7 @@ require (
 
 require github.com/oklog/ulid/v2 v2.1.1 // indirect
 
-require m31labs.dev/sirena v0.0.2-internal
+require (
+	golang.org/x/net v0.57.0
+	m31labs.dev/sirena v0.0.2-internal
+)
