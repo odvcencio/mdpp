@@ -60,9 +60,42 @@ mdpp parse --json README.md
 ## Go API
 
 ```go
-doc := mdpp.Parse([]byte(source))
-html := mdpp.RenderString(source)
+doc, err := mdpp.Parse([]byte(source))
+if err != nil {
+    return err
+}
+html, err := mdpp.Render(doc, mdpp.RenderOptions{})
+if err != nil {
+    return err
+}
 ```
+
+`Parse` uses a deterministic work budget of 256 parser-work units per input
+byte, with a 64,000-unit floor. Its wall-clock deadline starts at 20 seconds
+and adds 10 seconds per MiB. The deadline is a backstop for real runaways. Pass
+tighter values with `ParseOptions`, or pass a context with an earlier deadline:
+
+```go
+doc, err := mdpp.ParseWithOptions([]byte(source), mdpp.ParseOptions{
+    WorkBudget: 1_000_000,
+    Deadline:   3 * time.Second,
+})
+```
+
+Import `time` when setting `Deadline`. To use a caller-owned deadline or
+cancellation signal, pass its context to `ParseContext`:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+defer cancel()
+doc, err := mdpp.ParseContext(ctx, []byte(source))
+```
+
+Import `context` and `time` for this example.
+
+When a work, memory, or deadline limit is reached, the returned document
+contains the complete source as text and an `MDPP-PARSE-005` warning that names
+the limit. A zero option selects its default.
 
 The package exposes the parser, renderer, diagnostics, formatter, linter inputs, table of contents, frontmatter, and source ranges under one module:
 

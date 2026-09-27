@@ -1,11 +1,320 @@
 package mdpp
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestParseWorkBudgetReturnsSourceAsText(t *testing.T) {
+	source := []byte("# Visible source\n\nThis *text* must survive a work-budget fallback.\n")
+	doc, err := ParseWithOptions(source, ParseOptions{WorkBudget: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc == nil || doc.Root == nil {
+		t.Fatal("budgeted parse returned no document")
+	}
+	if got := collectText(doc.Root); got != string(source) {
+		t.Fatalf("fallback text = %q, want source %q", got, source)
+	}
+	diagnostics := doc.Diagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Code != "MDPP-PARSE-005" || diagnostics[0].Severity != SeverityWarning {
+		t.Fatalf("budget diagnostics = %#v, want one MDPP-PARSE-005 warning", diagnostics)
+	}
+	if !strings.Contains(diagnostics[0].Message, "parser work budget") {
+		t.Fatalf("budget diagnostic does not name the hit: %q", diagnostics[0].Message)
+	}
+	rendered := NewRenderer().Render(doc)
+	if !strings.Contains(rendered, "# Visible source") || !strings.Contains(rendered, "*text*") {
+		t.Fatalf("fallback did not render the source as text: %q", rendered)
+	}
+}
+
+func TestParseContextDeadlineReturnsSourceAsText(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	source := []byte("A cancelled parse still returns all source text.\n")
+	doc, err := ParseContext(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := collectText(doc.Root); got != string(source) {
+		t.Fatalf("cancelled parse text = %q, want source %q", got, source)
+	}
+	diagnostics := doc.Diagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Code != "MDPP-PARSE-005" || !strings.Contains(diagnostics[0].Message, "context deadline") {
+		t.Fatalf("deadline diagnostic = %#v", diagnostics)
+	}
+}
+
+func TestDefaultParseDeadlineUsesLongBackstop(t *testing.T) {
+	const oneMiB = 1 << 20
+	for _, test := range []struct {
+		bytes int
+		want  time.Duration
+	}{
+		{bytes: 0, want: 20 * time.Second},
+		{bytes: 1, want: 20*time.Second + 10*time.Second/time.Duration(oneMiB)},
+		{bytes: oneMiB, want: 30 * time.Second},
+		{bytes: 2 * oneMiB, want: 40 * time.Second},
+	} {
+		if got := defaultParseDeadline(test.bytes); got != test.want {
+			t.Errorf("defaultParseDeadline(%d) = %s, want %s", test.bytes, got, test.want)
+		}
+	}
+}
+
+func TestShortParseOptionsDeadlineIsNotRoundedUp(t *testing.T) {
+	const targetBytes = 16_000
+	unit := `a*b_[c](d){e}"f"-->`
+	longLine := strings.Repeat(unit, targetBytes/len(unit)+1)[:targetBytes]
+	source := []byte("# Synthetic input\n\n" + longLine + "\n")
+	started := time.Now()
+	doc, err := ParseWithOptions(source, ParseOptions{Deadline: 50 * time.Millisecond})
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("short-deadline parse took %s, want under 2s", elapsed)
+	}
+	if doc == nil || doc.Root == nil {
+		t.Fatal("short-deadline parse returned no document")
+	}
+	diagnostics := doc.Diagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Code != "MDPP-PARSE-005" {
+		t.Fatalf("short-deadline diagnostics = %#v, want one MDPP-PARSE-005 warning", diagnostics)
+	}
+	if !strings.Contains(diagnostics[0].Message, "wall-clock deadline") {
+		t.Fatalf("short-deadline diagnostic = %q, want wall-clock deadline", diagnostics[0].Message)
+	}
+	if got := collectText(doc.Root); got != string(source) {
+		t.Fatalf("fallback text length = %d, want original source length %d", len(got), len(source))
+	}
+}
+
+func TestParsePathologicalInlineStopsOnWorkBudget(t *testing.T) {
+	const targetBytes = 12_000
+	unit := `a*b_[c](d){e}"f"-->`
+	longLine := strings.Repeat(unit, targetBytes/len(unit)+1)[:targetBytes]
+	source := []byte("# Synthetic input\n\n" + longLine + "\n")
+	// Reserve enough work for the block parse, then require the inline parse to
+	// stop at the deterministic work limit.
+	workBudget := 2 * parserWorkEstimate(len(source)+1)
+	start := time.Now()
+	doc, err := ParseWithOptions(source, ParseOptions{WorkBudget: workBudget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("pathological input took %s, want under 5s", elapsed)
+	}
+	if doc == nil || doc.Root == nil {
+		t.Fatal("pathological parse returned no document")
+	}
+	diagnostics := doc.Diagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Code != "MDPP-PARSE-005" || diagnostics[0].Severity != SeverityWarning {
+		t.Fatalf("work-budget diagnostics = %#v, want one MDPP-PARSE-005 warning", diagnostics)
+	}
+	if !strings.Contains(diagnostics[0].Message, "parser work budget") {
+		t.Fatalf("diagnostic = %q, want parser work budget", diagnostics[0].Message)
+	}
+	if got := collectText(doc.Root); got != string(source) {
+		t.Fatalf("fallback text length = %d, want original source length %d", len(got), len(source))
+	}
+}
+
+func TestContainerChunkRangesUseOuterSourcePositions(t *testing.T) {
+	source := []byte("before container\n\n:::warning\nbody with *inline* text\n:::\nafter container\n")
+	doc, err := Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var container *Node
+	var find func(*Node)
+	find = func(node *Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == NodeContainerDirective {
+			container = node
+		}
+		for _, child := range node.Children {
+			find(child)
+		}
+	}
+	find(doc.Root)
+	if container == nil || len(container.Children) == 0 {
+		t.Fatal("container directive body was not parsed")
+	}
+	if got := container.Children[0].Range.StartLine; got != 4 {
+		t.Fatalf("container body starts on line %d, want line 4", got)
+	}
+}
+
+func TestSegmentedZeroStartOrderedList(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("testdata", "parse", "segmented-zero-start-list.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source) < segmentedDocumentMinBytes || len(topLevelHeadingChunks(source)) < 2 {
+		t.Fatalf("fixture must take the segmented path; bytes=%d", len(source))
+	}
+
+	start := time.Now()
+	doc, err := Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("segmented zero-start list took %s, want under 1s", elapsed)
+	}
+	if doc == nil || doc.Root == nil {
+		t.Fatal("Parse returned no document")
+	}
+	var list *Node
+	var walk func(*Node)
+	walk = func(node *Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == NodeList && node.Attrs["ordered"] == "true" {
+			list = node
+		}
+		for _, child := range node.Children {
+			walk(child)
+		}
+	}
+	walk(doc.Root)
+	if list == nil {
+		t.Fatal("segmented parse did not preserve the ordered list")
+	}
+	listOffset := list.Range.StartByte
+	prefix := source[:listOffset]
+	wantLine := bytes.Count(prefix, []byte{'\n'}) + 1
+	wantCol := listOffset - bytes.LastIndex(prefix, []byte{'\n'})
+	if list.Range.StartLine != wantLine || list.Range.StartCol != wantCol {
+		t.Fatalf("segmented list starts at %d:%d, want %d:%d", list.Range.StartLine, list.Range.StartCol, wantLine, wantCol)
+	}
+	if got := list.Attrs["start"]; got != "0" {
+		t.Fatalf("ordered list start = %q, want 0", got)
+	}
+	if len(list.Children) != 2 {
+		t.Fatalf("ordered list items = %d, want 2", len(list.Children))
+	}
+	for _, diagnostic := range doc.Diagnostics() {
+		if diagnostic.Code == "MDPP-PARSE-005" {
+			t.Fatalf("ordinary synthetic list hit a parse budget: %+v", diagnostic)
+		}
+	}
+}
+
+func TestFastListParserAdvancesPastLargeOrderedMarkers(t *testing.T) {
+	marker := strings.Repeat("9", 64)
+	source := []byte(marker + ". item\n")
+	lines := sourceLines(source)
+	list, next := fastListNode(source, lines, 0, &parseCtx{})
+	if next != len(lines) {
+		t.Fatalf("large ordered marker consumed %d lines, want %d", next, len(lines))
+	}
+	if list == nil || list.Attrs["ordered"] != "true" || list.Attrs["start"] != marker {
+		t.Fatalf("large ordered list = %#v, want ordered start %q", list, marker)
+	}
+}
+
+func TestParse10000ShortParagraphsTerminates(t *testing.T) {
+	source := makeShortParagraphDocument(10_000)
+	start := time.Now()
+	// Race instrumentation and package parallelism add substantial parser
+	// overhead. Keep this completion check separate from the measured speed
+	// target recorded in the bounded-parse evidence.
+	doc, err := ParseWithOptions(source, ParseOptions{Deadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc == nil || doc.Root == nil {
+		t.Fatal("Parse returned no document")
+	}
+	if elapsed := time.Since(start); elapsed > time.Minute {
+		t.Fatalf("10,000 short paragraphs took %s, want under 1m", elapsed)
+	}
+	for _, diagnostic := range doc.Diagnostics() {
+		if diagnostic.Code == "MDPP-PARSE-005" {
+			t.Fatalf("ordinary generated document hit a parse budget: %+v", diagnostic)
+		}
+	}
+	paragraphs := 0
+	inlineNodes := map[NodeType]int{}
+	var countParagraphs func(*Node)
+	countParagraphs = func(node *Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == NodeParagraph {
+			paragraphs++
+		}
+		if node.Type == NodeEmphasis || node.Type == NodeCodeSpan || node.Type == NodeLink {
+			inlineNodes[node.Type]++
+		}
+		for _, child := range node.Children {
+			countParagraphs(child)
+		}
+	}
+	countParagraphs(doc.Root)
+	if paragraphs != 10_000 {
+		t.Fatalf("parsed paragraphs = %d, want 10,000", paragraphs)
+	}
+	for _, typ := range []NodeType{NodeEmphasis, NodeCodeSpan, NodeLink} {
+		if inlineNodes[typ] != 10_000 {
+			t.Fatalf("parsed nodes of type %d = %d, want 10,000", typ, inlineNodes[typ])
+		}
+	}
+}
+
+func TestLiteralContainerMarkerDoesNotTriggerContainerReparse(t *testing.T) {
+	source := []byte("# Synthetic marker\n\n" + strings.Repeat("Prose mentions ::: without opening a container.\n\n", 120) + "\n```text\n:::\n```\n")
+	start := time.Now()
+	doc, err := Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("literal container marker took %s, want under 1s", elapsed)
+	}
+	if doc == nil || doc.Root == nil {
+		t.Fatal("Parse returned no document")
+	}
+	var containers int
+	var countContainers func(*Node)
+	countContainers = func(node *Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == NodeContainerDirective {
+			containers++
+		}
+		for _, child := range node.Children {
+			countContainers(child)
+		}
+	}
+	countContainers(doc.Root)
+	if containers != 0 {
+		t.Fatalf("literal prose marker created %d container directives", containers)
+	}
+}
+
+func makeShortParagraphDocument(count int) []byte {
+	var source strings.Builder
+	for i := 0; i < count; i++ {
+		source.WriteString("Short paragraph with *emphasis*, a `code span`, and a [link](https://example.com/path).\n\n")
+	}
+	return []byte(source.String())
+}
 
 func TestParseHeading(t *testing.T) {
 	doc := MustParse([]byte("# Hello"))
@@ -586,7 +895,11 @@ func FuzzParse(f *testing.F) {
 				t.Fatalf("Parse panicked on %d bytes: %v\nbytes: %q", len(src), r, src)
 			}
 		}()
+		start := time.Now()
 		doc, _ := Parse(src)
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Parse took %s for %d bytes, want under 2s", elapsed, len(src))
+		}
 		if doc == nil {
 			t.Fatal("Parse returned nil document on non-error path")
 		}

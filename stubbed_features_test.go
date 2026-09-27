@@ -125,7 +125,7 @@ func TestRequirementDiagramAlias(t *testing.T) {
 }
 
 func TestNestedBlockquote(t *testing.T) {
-	// Wired: parseSimpleBlockquoteDocument recursively re-parses stripped content.
+	// Nested blockquotes must survive conversion through the main parser path.
 	src := "> outer\n>\n> > inner\n"
 	html := NewRenderer().RenderString(src)
 	if strings.Count(html, "<blockquote>") < 2 {
