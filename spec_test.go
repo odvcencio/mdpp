@@ -3,6 +3,7 @@ package mdpp
 import (
 	"embed"
 	"encoding/json"
+	"flag"
 	"html"
 	mrand "math/rand"
 	"regexp"
@@ -24,13 +25,7 @@ const (
 	gfmLostTextCeiling  = 0
 )
 
-type markdownSpecExample struct {
-	Example  int    `json:"example"`
-	Section  string `json:"section"`
-	Ext      string `json:"ext"`
-	Markdown string `json:"markdown"`
-	HTML     string `json:"html"`
-}
+var updateSpecFailures = flag.Bool("update-spec-failures", false, "refresh the checked-in known spec failures")
 
 var (
 	specTagsRE   = regexp.MustCompile(`(?s)<[^>]*>`)
@@ -59,6 +54,8 @@ func runMarkdownSpec(t *testing.T, file string, passFloor, lostTextCeiling int) 
 	}
 
 	passed := 0
+	sections := summarizeSpecSections(examples)
+	sectionFailures := make(map[string][]int)
 	total := 0
 	lostText := 0
 	emptyOutput := 0
@@ -100,7 +97,9 @@ func runMarkdownSpec(t *testing.T, file string, passFloor, lostTextCeiling int) 
 		gotHTML := normalizeSpecHTML(string(got))
 		if gotHTML == wantHTML {
 			passed++
+			sections[example.Section].Passed++
 		} else {
+			sectionFailures[example.Section] = append(sectionFailures[example.Section], example.Example)
 			mismatches = append(mismatches, example.Example)
 		}
 		if strings.TrimSpace(string(got)) == "" && strings.TrimSpace(example.HTML) != "" {
@@ -110,6 +109,25 @@ func runMarkdownSpec(t *testing.T, file string, passFloor, lostTextCeiling int) 
 		if hasLostSpecWords(example.HTML, string(got)) {
 			lostText++
 			lostExamples = append(lostExamples, example.Example)
+		}
+	}
+	if *updateSpecFailures {
+		if err := writeSpecFailures(file, sections, sectionFailures); err != nil {
+			t.Fatalf("write known spec failures: %v", err)
+		}
+	}
+	sectionNames := make([]string, 0, len(sections))
+	for section := range sections {
+		sectionNames = append(sectionNames, section)
+	}
+	sort.Strings(sectionNames)
+	for _, section := range sectionNames {
+		count := sections[section]
+		t.Logf("%s / %s: pass %d/%d", file, section, count.Passed, count.Total)
+	}
+	if !*updateSpecFailures {
+		if err := assertKnownSpecFailures(file, sectionFailures); err != nil {
+			t.Error(err)
 		}
 	}
 
