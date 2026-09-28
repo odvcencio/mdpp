@@ -24,7 +24,7 @@ type emphasisDelimiterPair struct {
 // to plain inline spans. Other inline constructs retain their existing parser
 // precedence. The fixed chunk limit bounds stack memory and nesting depth.
 func parseEmphasisDelimiterRunsAt(text string, source []byte, baseOffset int) ([]*Node, bool) {
-	if len(text) == 0 || len(text) > maxInlineParseChunk || !strings.ContainsAny(text, "*_") || strings.ContainsAny(text, "[]<>\\!~`") {
+	if len(text) == 0 || len(text) > maxInlineParseChunk || !strings.ContainsAny(text, "*_") || strings.ContainsAny(text, "[]<>\\!~`") || strings.Contains(text, " \n") {
 		return nil, false
 	}
 
@@ -69,15 +69,24 @@ func parseEmphasisDelimiterRunsAt(text string, source []byte, baseOffset int) ([
 	// whether the opener can also close. Lazy stale-entry removal keeps each
 	// candidate insertion/removal amortized constant time.
 	var openers [2][3][2][]int
+	// order holds every live opener in source order. A match kills every opener
+	// between the matched opener and its closer, as the CommonMark algorithm
+	// does; alive is the lookup used by the class stacks below.
+	order := make([]int, 0, len(runs))
+	alive := make([]bool, len(runs))
 	markerSlot := func(marker byte) int {
 		if marker == '*' {
 			return 0
 		}
 		return 1
 	}
-	pushOpener := func(index int) {
+	pushOpener := func(index int, first bool) {
 		run := &runs[index]
 		if run.canOpen && run.remaining > 0 {
+			if first {
+				order = append(order, index)
+				alive[index] = true
+			}
 			closeClass := 0
 			if run.canClose {
 				closeClass = 1
@@ -91,7 +100,7 @@ func parseEmphasisDelimiterRunsAt(text string, source []byte, baseOffset int) ([
 		for len(stack) > 0 {
 			candidate := stack[len(stack)-1]
 			run := &runs[candidate]
-			if run.remaining > 0 && run.canOpen && run.remaining%3 == residue {
+			if alive[candidate] && run.remaining > 0 && run.canOpen && run.remaining%3 == residue {
 				return candidate
 			}
 			stack = stack[:len(stack)-1]
@@ -139,10 +148,19 @@ func parseEmphasisDelimiterRunsAt(text string, source []byte, baseOffset int) ([
 				opener.remaining -= use
 				closer.start += use
 				closer.remaining -= use
-				pushOpener(best)
+				for len(order) > 0 && order[len(order)-1] > best {
+					alive[order[len(order)-1]] = false
+					order = order[:len(order)-1]
+				}
+				if opener.remaining == 0 && len(order) > 0 && order[len(order)-1] == best {
+					alive[best] = false
+					order = order[:len(order)-1]
+				} else if opener.remaining > 0 {
+					pushOpener(best, false)
+				}
 			}
 		}
-		pushOpener(closerIndex)
+		pushOpener(closerIndex, true)
 	}
 
 	openingAt := make([]*emphasisDelimiterPair, len(text)+1)

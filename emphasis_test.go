@@ -27,3 +27,25 @@ func TestCommonMarkEmphasisDelimiterProcessing(t *testing.T) {
 		})
 	}
 }
+
+// Regression tests for two review findings: a closer must not pair across an
+// unresolved delimiter span (CommonMark 0.31.2 example 470), and a hard break
+// inside emphasis must survive (example 638).
+func TestCommonMarkEmphasisRegressions(t *testing.T) {
+	for _, tt := range []struct{ markdown, want string }{
+		{"*foo __bar *baz bim__ bam*\n", "<p><em>foo <strong>bar *baz bim</strong> bam</em></p>\n"},
+		{"*foo  \nbar*\n", "<p><em>foo<br />\nbar</em></p>\n"},
+	} {
+		doc, err := Parse([]byte(tt.markdown))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := Render(doc, RenderOptions{UnsafeHTML: true, HeadingIDs: false})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if normalizeSpecHTML(string(got)) != normalizeSpecHTML(tt.want) {
+			t.Errorf("Render(%q) = %q, want %q", tt.markdown, got, tt.want)
+		}
+	}
+}
