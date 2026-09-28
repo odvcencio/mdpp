@@ -3331,6 +3331,13 @@ func parseInline(text string, source []byte) []*Node {
 }
 
 func parseInlineAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
+	if nodes, ok := parseEmphasisDelimiterRunsAt(text, source, baseOffset); ok {
+		return splitTextNewlines(nodes)
+	}
+	return parseInlineBaseAt(text, source, baseOffset, ctx)
+}
+
+func parseInlineBaseAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
 	if nodes, ok := parseChainedReferenceLinksAt(text, source, baseOffset, ctx); ok {
 		return splitTextNewlines(nodes)
 	}
@@ -3758,6 +3765,9 @@ func parseInlineWithRecovery(text string, source []byte, recoverSuffix bool) []*
 }
 
 func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recoverSuffix bool, ctx *parseCtx) []*Node {
+	if nodes, ok := parseEmphasisDelimiterRunsAt(text, source, baseOffset); ok {
+		return splitTextNewlines(nodes)
+	}
 	if inlineLang() == nil {
 		return []*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))}
 	}
