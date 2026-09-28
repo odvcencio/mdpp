@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"html"
+	mrand "math/rand"
 	"regexp"
 	"sort"
 	"strings"
@@ -18,8 +19,8 @@ var specFiles embed.FS
 
 const (
 	// Raise these floors only after measuring the full spec suite.
-	commonMarkPassFloor = 406
-	gfmPassFloor        = 400
+	commonMarkPassFloor = 407
+	gfmPassFloor        = 402
 	gfmLostTextCeiling  = 0
 )
 
@@ -63,16 +64,19 @@ func runMarkdownSpec(t *testing.T, file string, passFloor, lostTextCeiling int) 
 	emptyOutput := 0
 	var mismatches, lostExamples, emptyExamples []int
 	for _, example := range examples {
-		if example.Ext == "disabled" {
-			continue
+		disabled := example.Ext == "disabled"
+		if !disabled {
+			total++
 		}
-		total++
 		doc, err := Parse([]byte(example.Markdown))
 		if err != nil {
 			t.Errorf("example %d: Parse: %v", example.Example, err)
-			mismatches = append(mismatches, example.Example)
+			if !disabled {
+				mismatches = append(mismatches, example.Example)
+			}
 			continue
 		}
+		assertSpecDiagnosticRanges(t, example, doc)
 		options := RenderOptions{UnsafeHTML: true, HeadingIDs: false}
 		if example.Ext == "tagfilter" {
 			// PR #6 adds the GFM tagfilter in sanitizing mode.
@@ -81,7 +85,15 @@ func runMarkdownSpec(t *testing.T, file string, passFloor, lostTextCeiling int) 
 		got, err := Render(doc, options)
 		if err != nil {
 			t.Errorf("example %d: Render: %v", example.Example, err)
-			mismatches = append(mismatches, example.Example)
+			if !disabled {
+				mismatches = append(mismatches, example.Example)
+			}
+			continue
+		}
+		if disabled {
+			if hasLostSpecWords(example.HTML, string(got)) {
+				t.Errorf("disabled example %d lost visible words", example.Example)
+			}
 			continue
 		}
 		wantHTML := normalizeSpecHTML(example.HTML)
@@ -111,6 +123,77 @@ func runMarkdownSpec(t *testing.T, file string, passFloor, lostTextCeiling int) 
 	}
 	if len(emptyExamples) > 0 {
 		t.Errorf("%s produced empty output for examples: %v", file, emptyExamples)
+	}
+}
+
+func TestRandomSpecExamplePairsPreserveWordsAndDiagnosticRanges(t *testing.T) {
+	examples := loadAllSpecExamples(t)
+	random := mrand.New(mrand.NewSource(20260927))
+	for pair := 0; pair < 128; pair++ {
+		first := examples[random.Intn(len(examples))]
+		second := examples[random.Intn(len(examples))]
+		source := []byte(first.Markdown + "\n\n" + second.Markdown)
+		doc, err := Parse(source)
+		if err != nil {
+			t.Errorf("pair %d: Parse: %v", pair, err)
+			continue
+		}
+		for _, diagnostic := range doc.Diagnostics() {
+			assertDiagnosticRangeWithinSource(t, source, pair, diagnostic)
+		}
+		options := RenderOptions{UnsafeHTML: true, HeadingIDs: false}
+		if first.Ext == "tagfilter" || second.Ext == "tagfilter" {
+			options.Sanitize = true
+		}
+		got, err := Render(doc, options)
+		if err != nil {
+			t.Errorf("pair %d: Render: %v", pair, err)
+			continue
+		}
+		want := first.HTML + "\n" + second.HTML
+		if hasLostSpecWords(want, string(got)) {
+			t.Errorf("pair %d lost visible words (examples %d and %d)", pair, first.Example, second.Example)
+		}
+	}
+}
+
+func loadAllSpecExamples(t *testing.T) []markdownSpecExample {
+	t.Helper()
+	var all []markdownSpecExample
+	for _, file := range []string{"commonmark-0.31.2.json", "gfm-0.29.json"} {
+		data, err := specFiles.ReadFile("testdata/spec/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var examples []markdownSpecExample
+		if err := json.Unmarshal(data, &examples); err != nil {
+			t.Fatalf("decode %s: %v", file, err)
+		}
+		all = append(all, examples...)
+	}
+	if len(all) == 0 {
+		t.Fatal("spec fixtures contain no examples")
+	}
+	return all
+}
+
+func assertSpecDiagnosticRanges(t *testing.T, example markdownSpecExample, doc *Document) {
+	t.Helper()
+	source := []byte(example.Markdown)
+	for _, diagnostic := range doc.Diagnostics() {
+		assertDiagnosticRangeWithinSource(t, source, example.Example, diagnostic)
+	}
+}
+
+func assertDiagnosticRangeWithinSource(t *testing.T, source []byte, example int, diagnostic Diagnostic) {
+	t.Helper()
+	r := diagnostic.Range
+	if r.StartByte < 0 || r.EndByte <= r.StartByte || r.EndByte > len(source) {
+		t.Errorf("example %d: %s has an empty or out-of-source byte range %+v for %d bytes", example, diagnostic.Code, r, len(source))
+		return
+	}
+	if r.StartLine < 1 || r.EndLine < r.StartLine || sourceRange(source, r.StartByte, r.EndByte) != r {
+		t.Errorf("example %d: %s has invalid source line positions %+v", example, diagnostic.Code, r)
 	}
 }
 

@@ -36,6 +36,83 @@ func TestEscapedDestinationLinkParagraphRecovers(t *testing.T) {
 	}
 }
 
+func TestEscapedLinkErrorBlockPreservesFollowingQuote(t *testing.T) {
+	source := "[docs](https://example.com/a\\_b) more text\n\n> > quote\n"
+	doc, err := Parse([]byte(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := Render(doc, RenderOptions{HeadingIDs: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendered), `href="https://example.com/a_b"`) || !strings.Contains(string(rendered), "docs</a> more text") {
+		t.Fatalf("escaped-link paragraph did not render as a link with trailing text: %s", rendered)
+	}
+	if len(doc.Root.Find(NodeBlockquote)) != 2 || strings.Count(string(rendered), "<blockquote>") != 2 || !strings.Contains(string(rendered), "quote") {
+		t.Fatalf("following nested quote did not retain its block structure: %s", rendered)
+	}
+	for _, diagnostic := range doc.Diagnostics() {
+		if diagnostic.Code == "MDPP-PARSE-006" {
+			t.Fatalf("recovered blocks should not report a fallback diagnostic: %+v", diagnostic)
+		}
+	}
+}
+
+func TestRecoveryErrorBlockChunksRespectBlockInternals(t *testing.T) {
+	source := "[docs](https://example.com/a\\_b) text\n\n\n" +
+		"```md\nfence first\n\nfence second\n```\n\n" +
+		":::note\ncontainer first\n\ncontainer second\n:::\n\n" +
+		"- item\n\n  continuation\n- second\n\nlast block\n"
+	chunks := recoveryErrorBlockChunks([]byte(source), 0, len(source))
+	if len(chunks) != 5 {
+		t.Fatalf("expected 5 recovery chunks, got %d: %+v", len(chunks), chunks)
+	}
+	want := []string{
+		"[docs](https://example.com/a\\_b) text",
+		"```md\nfence first\n\nfence second\n```",
+		":::note\ncontainer first\n\ncontainer second\n:::",
+		"- item\n\n  continuation\n- second",
+		"last block",
+	}
+	for i, chunk := range chunks {
+		got := strings.TrimSpace(string(source[chunk.start:chunk.end]))
+		if got != want[i] {
+			t.Errorf("chunk %d = %q, want %q", i, got, want[i])
+		}
+	}
+
+	separatedListSource := []byte("- item\n\nstandalone paragraph\n\n  indented code\n\nlast block\n")
+	separatedListChunks := recoveryErrorBlockChunks(separatedListSource, 0, len(separatedListSource))
+	if len(separatedListChunks) != 4 {
+		t.Fatalf("a prior list must not absorb later blank-line blocks: %+v", separatedListChunks)
+	}
+}
+
+func TestInlineErrorDiagnosticWithoutBaseUsesMatchingSourceSpan(t *testing.T) {
+	inline := `<a href="x"`
+	source := []byte("earlier paragraph\n" + inline + "\n")
+	ctx := &parseCtx{}
+	parseInlineAt(inline, source, -1, ctx)
+	start := strings.Index(string(source), inline)
+	if start < 0 {
+		t.Fatal("test fixture inline text is missing from source")
+	}
+	for _, diagnostic := range ctx.recoveryDiagnostics {
+		if diagnostic.Code != "MDPP-PARSE-006" {
+			continue
+		}
+		if diagnostic.Range.StartByte < start || diagnostic.Range.EndByte > start+len(inline) || diagnostic.Range.StartByte >= diagnostic.Range.EndByte {
+			t.Fatalf("inline diagnostic was not shifted to the matching source span: %+v", diagnostic)
+		}
+		if diagnostic.Range.StartLine != 2 || diagnostic.Range.EndLine < diagnostic.Range.StartLine {
+			t.Fatalf("inline diagnostic has invalid source lines: %+v", diagnostic)
+		}
+		return
+	}
+	t.Fatalf("missing inline fallback diagnostic: %+v", ctx.recoveryDiagnostics)
+}
+
 func TestChainedReferenceLinksRemainLinked(t *testing.T) {
 	source := "before [first][one][second] after\n\n[one]: /one\n[second]: /two\n"
 	doc, err := Parse([]byte(source))
