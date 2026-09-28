@@ -49,3 +49,26 @@ func TestCommonMarkEmphasisRegressions(t *testing.T) {
 		}
 	}
 }
+
+// Newlines inside emphasis must become soft breaks (or hard wraps) like
+// newlines elsewhere in the paragraph.
+func TestEmphasisNewlinesFollowHardWraps(t *testing.T) {
+	doc, err := Parse([]byte("*foo\nbar*\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	soft, err := Render(doc, RenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(soft), "<em>foo\nbar</em>") {
+		t.Fatalf("soft render = %q", soft)
+	}
+	hard, err := Render(doc, RenderOptions{HardWraps: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hard), "<em>foo<br") || !strings.Contains(string(hard), "bar</em>") {
+		t.Fatalf("hard-wrap render = %q, want a <br> inside the emphasis", hard)
+	}
+}

@@ -184,7 +184,7 @@ func parseEmphasisDelimiterRunsAt(text string, source []byte, baseOffset int) ([
 			if pair.strong {
 				kind = NodeStrong
 			}
-			formatted := newNode(kind, build(pair.openEnd, pair.closeStart)...)
+			formatted := newNode(kind, splitTextNewlines(build(pair.openEnd, pair.closeStart))...)
 			formatted.Range = inlineSpanRange(source, baseOffset, pair.openStart, pair.closeEnd)
 			nodes = append(nodes, formatted)
 			start = pair.closeEnd
