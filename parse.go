@@ -524,8 +524,10 @@ func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node) map
 				return
 			}
 			label = normalizeLinkLabel(label)
-			if label != "" && dest != "" {
-				out[label] = linkRefDef{href: unescapeLinkDestination(dest), title: title}
+			if label != "" {
+				if _, exists := out[label]; !exists {
+					out[label] = linkRefDef{href: unescapeLinkDestination(strings.TrimSuffix(strings.TrimPrefix(dest, "<"), ">")), title: title}
+				}
 			}
 			return
 		}
@@ -3438,6 +3440,12 @@ func parseInline(text string, source []byte) []*Node {
 func parseInlineAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
 	if nodes, ok := parseEmphasisDelimiterRunsAt(text, source, baseOffset); ok {
 		return splitTextNewlines(nodes)
+	}
+	if nodes, ok := parseBracketLinksAt(text, source, baseOffset, ctx); ok {
+		return nodes
+	}
+	if !strings.Contains(text, "]") && !strings.ContainsAny(text, "*_`<\\~") && strings.Contains(text, "[") {
+		return splitTextNewlines([]*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))})
 	}
 	return parseInlineBaseAt(text, source, baseOffset, ctx)
 }

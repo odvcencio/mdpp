@@ -156,9 +156,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 
 	case NodeLink:
 		rawHref := n.Attrs["href"]
-		if rawHref == "" {
+		if _, hasHref := n.Attrs["href"]; !hasHref {
 			if raw := n.Attrs["raw"]; raw != "" {
-				b.WriteString(html.EscapeString(raw))
+				b.WriteString(html.EscapeString(decodeMarkdownText(raw)))
 			} else {
 				renderChildrenInto(r, b, n)
 			}
@@ -183,6 +183,10 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString("</a>")
 
 	case NodeImage:
+		if _, hasSrc := n.Attrs["src"]; !hasSrc {
+			b.WriteString(html.EscapeString(decodeMarkdownText(n.Attrs["raw"])))
+			return
+		}
 		src := n.Attrs["src"]
 		if r.imageResolver != nil {
 			src = r.imageResolver(src)
@@ -193,9 +197,9 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 			src = ""
 		}
 		alt := html.EscapeString(n.Attrs["alt"])
-		src = html.EscapeString(src)
+		src = html.EscapeString(percentEncodeMarkdownURL(src))
 		title := n.Attrs["title"]
-		if title != "" {
+		if title != "" && !r.imageTitleAttr {
 			b.WriteString(`<figure`)
 			writeSourceAttrs(r, b, n)
 			b.WriteString(`><img src="`)
@@ -213,6 +217,10 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString(src)
 		b.WriteString(`" alt="`)
 		b.WriteString(alt)
+		if title != "" {
+			b.WriteString(`" title="`)
+			b.WriteString(html.EscapeString(title))
+		}
 		b.WriteString(`" />`)
 
 	case NodeEmphasis:
@@ -831,7 +839,7 @@ func percentEncodeMarkdownURL(raw string) string {
 	var out strings.Builder
 	for i := 0; i < len(raw); i++ {
 		b := raw[i]
-		if b != '`' && b != '\\' && b < 0x80 {
+		if b >= 0x20 && b < 0x80 && !strings.ContainsRune(" `\\\"<>", rune(b)) {
 			continue
 		}
 		if out.Len() == 0 {
@@ -844,7 +852,7 @@ func percentEncodeMarkdownURL(raw string) string {
 		out.WriteByte(hexDigits[b&15])
 		if i+1 < len(raw) {
 			// Continue copying plain bytes from the next iteration.
-			for i+1 < len(raw) && raw[i+1] != '`' && raw[i+1] != '\\' && raw[i+1] < 0x80 {
+			for i+1 < len(raw) && raw[i+1] >= 0x20 && raw[i+1] < 0x80 && !strings.ContainsRune(" `\\\"<>", rune(raw[i+1])) {
 				i++
 				out.WriteByte(raw[i])
 			}

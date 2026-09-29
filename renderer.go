@@ -24,6 +24,7 @@ type Renderer struct {
 	hardWraps       bool
 	wrapEmoji       bool
 	imageResolver   func(string) string
+	imageTitleAttr  bool
 	math            MathOption
 	containerHTML   func(c *Node, body string) string
 	sourcePositions bool
@@ -78,6 +79,12 @@ func WithWrapEmoji(enabled bool) Option {
 // WithImageResolver sets a function to resolve image URLs.
 func WithImageResolver(fn func(string) string) Option {
 	return func(r *Renderer) { r.imageResolver = fn }
+}
+
+// WithImageTitleAttribute renders image titles as HTML title attributes.
+// The default keeps mdpp's figure and caption rendering.
+func WithImageTitleAttribute(enabled bool) Option {
+	return func(r *Renderer) { r.imageTitleAttr = enabled }
 }
 
 // WithContainerRenderer sets a custom renderer for container directives.

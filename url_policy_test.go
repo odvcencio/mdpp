@@ -34,7 +34,7 @@ func TestURLPolicyAdversarialVectors(t *testing.T) {
 		{"x19", "> [!NOTE] <script>alert(1)</script>\n", 0},
 		{"x20", ":::warning <script>alert(1)</script>\nbody\n:::\n", 0},
 		{"x21", "x[^a\"><script>]\n\n[^a\"><script>]: note\n", 0},
-		{"xss", "<javascript:alert(document.domain)>\n\n[click](<javascript:alert(document.domain)>)\n\n[[embed:javascript:alert(document.domain)]]\n", 3},
+		{"xss", "<javascript:alert(document.domain)>\n\n[click](<javascript:alert(document.domain)>)\n\n[[embed:javascript:alert(document.domain)]]\n", 4},
 		{"sec56-autolink", "<javascript:alert(document.domain)>\n", 1},
 		{"sec56-embed", "[[embed:javascript:alert(document.domain)]]\n", 2},
 		{"sec56-inline-link", "[x](javascript:alert(1))", 1},
@@ -334,7 +334,7 @@ func TestTrustedModeKeepsRawHTMLAndUnsafeURLs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), `href="javascript:alert(1"`) || !strings.Contains(string(got), `<script>alert(2)</script>`) {
+	if !strings.Contains(string(got), `href="javascript:alert(1)"`) || !strings.Contains(string(got), `<script>alert(2)</script>`) {
 		t.Fatalf("trusted mode changed existing output: %s", got)
 	}
 }
