@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"html"
 	"regexp"
 	"sort"
 	"strconv"
@@ -19,6 +20,7 @@ var (
 	footnoteDefinitionRawRe   = regexp.MustCompile(`^ {0,3}\[\^([A-Za-z0-9_-]+)\]:[ \t]*(.*)$`)
 	footnoteDefinitionLabelRe = regexp.MustCompile(`^\[\^([A-Za-z0-9_-]+)\]$`)
 	inlineMarkdownLinkRe      = regexp.MustCompile(`\[([^\]\n]+)\]\(([^)\s][^)]*)\)`)
+	standaloneOpenHTMLTagRe   = regexp.MustCompile(`^<[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_:.-]*(?:[ \t]*=[ \t]*(?:"[^\r\n"]*"|'[^\r\n']*'|[^\s"'=<>` + "`" + `]+))?)*[ \t]*>$`)
 )
 
 type headingTextRepair struct {
@@ -547,15 +549,71 @@ func normalizeLinkLabel(s string) string {
 }
 
 func unescapeLinkDestination(destination string) string {
-	const escapedPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+	return decodeMarkdownText(destination)
+}
+
+const escapedPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+
+// decodeMarkdownText applies only complete CommonMark references. The HTML
+// unescaper supplies the HTML5 names and numeric replacement rules, but also
+// accepts semicolonless references, which Markdown must leave untouched.
+func decodeMarkdownText(s string) string {
+	if !strings.ContainsAny(s, "\\&") {
+		return s
+	}
 	var out strings.Builder
-	for i := 0; i < len(destination); i++ {
-		if destination[i] == '\\' && i+1 < len(destination) && strings.ContainsRune(escapedPunctuation, rune(destination[i+1])) {
-			i++
+	out.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\\' && i+1 < len(s) && strings.IndexByte(escapedPunctuation, s[i+1]) >= 0 {
+			out.WriteByte(s[i+1])
+			i += 2
+			continue
 		}
-		out.WriteByte(destination[i])
+		if s[i] == '&' {
+			end := i + 1
+			if end < len(s) && s[end] == '#' {
+				end++
+				base, limit := byte(10), 7
+				if end < len(s) && (s[end] == 'x' || s[end] == 'X') {
+					end++
+					base, limit = 16, 6
+				}
+				start := end
+				for end < len(s) && end-start < limit && isEntityDigit(s[end], base) {
+					end++
+				}
+				if end > start && end < len(s) && s[end] == ';' {
+					out.WriteString(html.UnescapeString(s[i : end+1]))
+					i = end + 1
+					continue
+				}
+			} else {
+				start := end
+				for end < len(s) && end-start < 31 && isASCIIAlphaNumeric(s[end]) {
+					end++
+				}
+				if end > start && end < len(s) && s[end] == ';' {
+					entity := s[i : end+1]
+					if decoded := html.UnescapeString(entity); decoded != entity {
+						out.WriteString(decoded)
+						i = end + 1
+						continue
+					}
+				}
+			}
+		}
+		out.WriteByte(s[i])
+		i++
 	}
 	return out.String()
+}
+
+func isEntityDigit(b, base byte) bool {
+	return b >= '0' && b <= '9' || base == 16 && (b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F')
+}
+
+func isASCIIAlphaNumeric(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
 func lowerMarkdownPlusSource(source []byte) []byte {
@@ -1124,7 +1182,7 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 	cb := &Node{
 		Type:    NodeCodeBlock,
 		Literal: literal.String(),
-		Attrs:   map[string]string{"language": normalizedFenceLanguage(info)},
+		Attrs:   map[string]string{"language": normalizedFenceLanguage(firstFenceInfoWord(info))},
 		Range:   sourceRange(source, lines[start].start, lines[end].next),
 	}
 	return codeBlockToDiagram(cb), end + 1, true
@@ -2214,9 +2272,45 @@ func advanceTextPosition(line int, col int, text string) (int, int) {
 }
 
 func textNodeRange(text string, r Range) *Node {
-	node := textNode(text)
+	node := textNode(decodeMarkdownText(text))
 	node.Range = r
 	return node
+}
+
+// The block grammar occasionally classifies a standalone opening tag as an
+// inline paragraph when its quoted attribute contains an escape or entity.
+func repairStandaloneHTMLBlocks(doc *Document) {
+	if doc == nil || doc.Root == nil || !bytes.Contains(doc.Source, []byte{'<'}) {
+		return
+	}
+	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
+		if n.Type != NodeParagraph || len(n.Children) != 1 || n.Children[0].Type != NodeHTMLInline {
+			return true
+		}
+		tag := n.Children[0].Literal
+		if strings.HasSuffix(strings.TrimSpace(tag), "/>") || !standaloneOpenHTMLTagRe.MatchString(tag) {
+			return true
+		}
+		start, end := n.Range.StartByte, n.Range.EndByte
+		if n.Range.StartLine == 0 {
+			if parent != doc.Root || len(parent.Children) != 1 || strings.TrimRight(string(doc.Source), "\r\n") != tag {
+				return true
+			}
+			n.Range = doc.Root.Range
+			start, end = 0, len(doc.Source)
+		}
+		if start < 0 || end > len(doc.Source) || end < start {
+			return true
+		}
+		raw := string(doc.Source[start:end])
+		if strings.TrimRight(raw, "\r\n") != tag {
+			return true
+		}
+		n.Type = NodeHTMLBlock
+		n.Literal = raw
+		n.Children = nil
+		return false
+	})
 }
 
 func clearNodeRanges(root *Node) {
@@ -2233,27 +2327,17 @@ func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ stri
 		child := n.Child(i)
 		switch bt.NodeType(child) {
 		case "info_string":
-			langNode := findChild(bt, child, "language")
-			if langNode != nil {
-				cb.Attrs["language"] = strings.TrimSpace(bt.NodeText(langNode))
-			} else {
-				cb.Attrs["language"] = strings.TrimSpace(bt.NodeText(child))
-			}
 			// gosx-slides (Track D): lift a `{…}` highlight block out of the
 			// full info string into Attrs["highlights"], e.g. `go {1-3|5}`
 			// yields language="go", highlights="1-3|5". The language token is
 			// the info string's first whitespace-delimited token, so an info
 			// string that is ONLY a brace block leaves no language behind.
 			lang, highlights := parseFenceInfo(bt.NodeText(child))
+			if lang != "" {
+				cb.Attrs["language"] = lang
+			}
 			if highlights != "" {
 				cb.Attrs["highlights"] = highlights
-				// Repair the no-language case where the `language` child
-				// captured part of the brace block (e.g. ```{1,4}).
-				if lang == "" {
-					delete(cb.Attrs, "language")
-				} else if cb.Attrs["language"] == "" {
-					cb.Attrs["language"] = lang
-				}
 			}
 		case "code_fence_content":
 			cb.Literal = bt.NodeText(child)
@@ -2275,6 +2359,18 @@ var fenceHighlightRe = regexp.MustCompile(`\{([^{}]*)\}`)
 // the inner content of the first `{…}` highlight block. Either result may be
 // empty: an info string of just `{1,4}` yields ("", "1,4"); `go {1-3|5}`
 // yields ("go", "1-3|5"); a plain `go` yields ("go", "").
+// firstFenceInfoWord returns the first word of a fence info string with its
+// backslash escapes and character references decoded, the single decode of the
+// fence language on the fast path (parseFenceInfo does the same for the
+// grammar path).
+func firstFenceInfoWord(info string) string {
+	fields := strings.Fields(info)
+	if len(fields) == 0 {
+		return ""
+	}
+	return decodeMarkdownText(fields[0])
+}
+
 func parseFenceInfo(info string) (lang, highlights string) {
 	info = strings.TrimSpace(info)
 	if m := fenceHighlightRe.FindStringSubmatch(info); m != nil {
@@ -2291,7 +2387,7 @@ func parseFenceInfo(info string) (lang, highlights string) {
 	} else {
 		lang = info
 	}
-	return lang, highlights
+	return decodeMarkdownText(lang), highlights
 }
 
 // stripIndentedCodeBlock removes the 4-space (or tab) indent from each line
@@ -2434,6 +2530,15 @@ func fallbackErrorBlock(n *gotreesitter.Node, source []byte, ctx *parseCtx) *Nod
 		paragraph := &Node{Type: NodeParagraph, Range: sourceRange(source, start, end)}
 		paragraph.Children = parseInlineAt(recovered, source, start+leading+contentStart, ctx)
 		return paragraph
+	}
+	// An entity in a link destination can make the block grammar report an
+	// ERROR even though the inline link is complete.
+	if strings.HasPrefix(strings.TrimLeft(raw, " \t"), "[") && strings.Contains(raw, "](") && !strings.Contains(strings.TrimRight(raw, "\r\n"), "\n") {
+		content := strings.TrimRight(raw, "\r\n")
+		children := parseInlineAt(content, source, start, ctx)
+		if len(children) == 1 {
+			return &Node{Type: NodeParagraph, Children: children, Range: sourceRange(source, start, end)}
+		}
 	}
 	if chunks := recoveryErrorBlockChunks(source, start, end); len(chunks) > 1 {
 		document := &Node{Type: NodeDocument, Range: sourceRange(source, start, end)}
@@ -3400,24 +3505,57 @@ func parseInlineSimpleAt(text string, source []byte, baseOffset int) ([]*Node, b
 	if strings.Contains(text, "  \n") || strings.Contains(text, "\\\n") {
 		return nil, false
 	}
+	var nextBacktick map[int]int
+	backticksIndexed := false
 	var nodes []*Node
 	for i := 0; i < len(text); {
 		switch text[i] {
 		case '_', '<', '\\':
 			return nil, false
 		case '`':
-			end := strings.IndexByte(text[i+1:], '`')
-			if end < 0 {
-				appendTextRange(&nodes, text[i:i+1], inlineSpanRange(source, baseOffset, i, i+1))
-				i++
+			if !backticksIndexed {
+				backticksIndexed = true
+				if strings.Count(text[i:], "`") > 2 {
+					nextBacktick = make(map[int]int)
+					nextByLength := make(map[int]int)
+					for j := len(text) - 1; j >= 0; {
+						if text[j] != '`' {
+							j--
+							continue
+						}
+						end := j + 1
+						for j >= 0 && text[j] == '`' {
+							j--
+						}
+						start := j + 1
+						length := end - start
+						if next, ok := nextByLength[length]; ok {
+							nextBacktick[start] = next
+						}
+						nextByLength[length] = start
+					}
+				}
+			}
+			runEnd := i + 1
+			for runEnd < len(text) && text[runEnd] == '`' {
+				runEnd++
+			}
+			end, matched := nextBacktick[i]
+			if nextBacktick == nil && runEnd == i+1 {
+				if offset := strings.IndexByte(text[runEnd:], '`'); offset >= 0 {
+					end, matched = runEnd+offset, true
+				}
+			}
+			if !matched {
+				appendTextRange(&nodes, text[i:runEnd], inlineSpanRange(source, baseOffset, i, runEnd))
+				i = runEnd
 				continue
 			}
-			end += i + 1
 			n := newNode(NodeCodeSpan)
-			n.Literal = text[i+1 : end]
-			n.Range = inlineSpanRange(source, baseOffset, i, end+1)
+			n.Literal = normalizeCodeSpan(text[runEnd:end])
+			n.Range = inlineSpanRange(source, baseOffset, i, end+runEnd-i)
 			nodes = append(nodes, n)
-			i = end + 1
+			i = end + runEnd - i
 		case '*':
 			if strings.HasPrefix(text[i:], "***") {
 				return nil, false
@@ -4640,7 +4778,9 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 		link := newNode(NodeLink)
 		link.Range = inlineSpanRange(source, baseOffset, int(n.StartByte()), int(n.EndByte()))
 		link.Attrs = map[string]string{"href": href}
-		link.Children = []*Node{textNodeRange(url, inlineSpanRange(source, baseOffset, int(n.StartByte())+1, int(n.EndByte())-1))}
+		label := textNode(url) // autolink display text does not process escapes or entities
+		label.Range = inlineSpanRange(source, baseOffset, int(n.StartByte())+1, int(n.EndByte())-1)
+		link.Children = []*Node{label}
 		nodes = append(nodes, link)
 
 	case "hard_line_break":
@@ -4796,7 +4936,7 @@ func appendText(nodes *[]*Node, text string) {
 func appendTextRange(nodes *[]*Node, text string, r Range) {
 	if len(*nodes) > 0 && (*nodes)[len(*nodes)-1].Type == NodeText {
 		last := (*nodes)[len(*nodes)-1]
-		last.Literal += text
+		last.Literal += decodeMarkdownText(text)
 		if last.Range.StartLine != 0 && r.StartLine != 0 {
 			last.Range.EndByte = r.EndByte
 			last.Range.EndLine = r.EndLine
@@ -4982,8 +5122,8 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 		}
 	}
 	if allInlineOrSkip && hasInline {
-		para := newNodeFromTree(NodeParagraph, n)
 		sectionText := strings.TrimRight(bt.NodeText(n), "\n")
+		para := newNodeFromTree(NodeParagraph, n)
 		para.Children = append(para.Children, parseInlineAt(sectionText, source, int(n.StartByte()), ctx)...)
 		return para
 	}
@@ -5091,7 +5231,7 @@ func extractCodeSpanText(bt *gotreesitter.BoundTree, n *gotreesitter.Node) strin
 	nodeStart := n.StartByte()
 
 	if n.ChildCount() == 0 {
-		return nodeText
+		return normalizeCodeSpan(nodeText)
 	}
 
 	var sb strings.Builder
@@ -5118,7 +5258,17 @@ func extractCodeSpanText(bt *gotreesitter.BoundTree, n *gotreesitter.Node) strin
 		sb.Write(src[cursor:])
 	}
 
-	return sb.String()
+	return normalizeCodeSpan(sb.String())
+}
+
+func normalizeCodeSpan(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", " ")
+	content = strings.ReplaceAll(content, "\r", " ")
+	content = strings.ReplaceAll(content, "\n", " ")
+	if len(content) >= 2 && content[0] == ' ' && content[len(content)-1] == ' ' && strings.Trim(content, " ") != "" {
+		content = content[1 : len(content)-1]
+	}
+	return content
 }
 
 // headingLevel extracts the heading level (1-6) from an atx_heading or setext_heading node.
@@ -5236,10 +5386,10 @@ func stripQuotes(s string) string {
 	if len(s) >= 2 {
 		first, last := s[0], s[len(s)-1]
 		if (first == '"' && last == '"') || (first == '\'' && last == '\'') || (first == '(' && last == ')') {
-			return s[1 : len(s)-1]
+			return decodeMarkdownText(s[1 : len(s)-1])
 		}
 	}
-	return s
+	return decodeMarkdownText(s)
 }
 
 // findChild finds the first child of n with the given node type.

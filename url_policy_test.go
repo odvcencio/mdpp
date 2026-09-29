@@ -15,8 +15,8 @@ func TestURLPolicyAdversarialVectors(t *testing.T) {
 	}{
 		{"x1", "[x](javascript:alert(1))", 1},
 		{"x2", "[x](JaVaScRiPt:alert(1))", 1},
-		{"x3", "[x](java&#115;cript:alert(1))", 0},
-		{"x4", "[x](&#x6A;avascript:alert(1))", 0},
+		{"x3", "[x](java&#115;cript:alert(1))", 1},
+		{"x4", "[x](&#x6A;avascript:alert(1))", 1},
 		{"x5", "![x](javascript:alert(1))", 1},
 		{"x6", "<javascript:alert(1)>\n", 1},
 		{"x7", "[x]\n\n[x]: javascript:alert(1)\n", 0},

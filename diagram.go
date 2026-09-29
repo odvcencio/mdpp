@@ -63,6 +63,11 @@ func diagramFenceInfo(language, source string) (syntax, kind string, ok bool) {
 	return "", "", false
 }
 
+// normalizedFenceLanguage lower-cases and trims a fence language that has
+// already had its backslash escapes and character references decoded (once, at
+// parse time). It must not decode again: a second pass turns the literal text
+// "&#109;ermaid" into "mermaid" and sends an ordinary code block to the diagram
+// renderer.
 func normalizedFenceLanguage(language string) string {
 	fields := strings.Fields(strings.TrimSpace(language))
 	if len(fields) == 0 {

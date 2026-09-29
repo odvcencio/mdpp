@@ -13,10 +13,11 @@ func postProcess(doc *Document) {
 		return
 	}
 	flattenDocumentNodes(doc.Root)
+	repairStandaloneHTMLBlocks(doc)
 	processAdmonitions(doc.Root)
 	processBlockquoteHeadings(doc.Root)
 	footnoteDefs := processFootnotes(doc.Root)
-	processInlineMath(doc.Root)
+	processInlineMath(doc.Root, doc.Source)
 	processSuperscripts(doc.Root)
 	processEmojiShortcodes(doc.Root)
 
@@ -522,13 +523,19 @@ var mathBlockRe = regexp.MustCompile(`^\$\$([\s\S]+?)\$\$$`)
 var mathInlineRe = regexp.MustCompile(`\$([^\$\n]+?)\$`)
 
 // processInlineMath converts $...$ to inline math and $$...$$ paragraphs to block math.
-func processInlineMath(root *Node) {
+func processInlineMath(root *Node, source []byte) {
 	// First: handle block math — paragraphs that are entirely $$...$$
 	for i, child := range root.Children {
 		if child.Type != NodeParagraph {
 			continue
 		}
-		text := collectNodeText(child)
+		text := strings.TrimSpace(collectNodeText(child))
+		if !strings.HasPrefix(text, "$$") || !strings.HasSuffix(text, "$$") {
+			continue
+		}
+		if child.Range.StartLine != 0 && child.Range.StartByte >= 0 && child.Range.EndByte <= len(source) && child.Range.EndByte >= child.Range.StartByte {
+			text = string(source[child.Range.StartByte:child.Range.EndByte])
+		}
 		text = strings.TrimSpace(text)
 		match := mathBlockRe.FindStringSubmatch(text)
 		if match == nil {
