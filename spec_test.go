@@ -20,8 +20,8 @@ var specFiles embed.FS
 
 const (
 	// Raise these floors only after measuring the full spec suite.
-	commonMarkPassFloor = 468
-	gfmPassFloor        = 462
+	commonMarkPassFloor = 514
+	gfmPassFloor        = 506
 	gfmLostTextCeiling  = 0
 )
 
@@ -74,10 +74,10 @@ func runMarkdownSpec(t *testing.T, file string, passFloor, lostTextCeiling int) 
 			continue
 		}
 		assertSpecDiagnosticRanges(t, example, doc)
-		options := RenderOptions{UnsafeHTML: true, HeadingIDs: false}
+		options := RenderOptions{UnsafeHTML: true, HeadingIDs: false, ImageTitleAttribute: true}
 		if example.Ext == "tagfilter" {
 			// PR #6 adds the GFM tagfilter in sanitizing mode.
-			options = RenderOptions{UnsafeHTML: true, Sanitize: true}
+			options = RenderOptions{UnsafeHTML: true, Sanitize: true, ImageTitleAttribute: true}
 		}
 		got, err := Render(doc, options)
 		if err != nil {
@@ -159,7 +159,7 @@ func TestRandomSpecExamplePairsPreserveWordsAndDiagnosticRanges(t *testing.T) {
 		for _, diagnostic := range doc.Diagnostics() {
 			assertDiagnosticRangeWithinSource(t, source, pair, diagnostic)
 		}
-		options := RenderOptions{UnsafeHTML: true, HeadingIDs: false}
+		options := RenderOptions{UnsafeHTML: true, HeadingIDs: false, ImageTitleAttribute: true}
 		if first.Ext == "tagfilter" || second.Ext == "tagfilter" {
 			options.Sanitize = true
 		}

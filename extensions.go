@@ -72,10 +72,13 @@ func processReferenceLinks(doc *Document) {
 		return
 	}
 	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
-		if n.Type != NodeLink || n.Attrs == nil {
+		if (n.Type != NodeLink && n.Type != NodeImage) || n.Attrs == nil {
 			return true
 		}
-		if n.Attrs["href"] != "" {
+		if _, inline := n.Attrs["href"]; inline {
+			return true
+		}
+		if _, inline := n.Attrs["src"]; inline {
 			return true
 		}
 		// Ignore shortcut links that carry the [!TYPE] / [^id] raw marker —
@@ -89,12 +92,19 @@ func processReferenceLinks(doc *Document) {
 		label := n.Attrs["ref"]
 		if label == "" {
 			// Collapsed / shortcut form: the link text IS the label.
-			label = collectNodeText(n)
+			label = n.Attrs["label"]
+			if label == "" {
+				label = collectNodeText(n)
+			}
 		}
 		label = normalizeLinkLabel(label)
 		if def, ok := doc.linkRefDefs[label]; ok {
 			n.Attrs["resolved-ref"] = label
-			n.Attrs["href"] = def.href
+			if n.Type == NodeImage {
+				n.Attrs["src"] = def.href
+			} else {
+				n.Attrs["href"] = def.href
+			}
 			if def.title != "" {
 				n.Attrs["title"] = def.title
 			}

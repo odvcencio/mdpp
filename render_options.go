@@ -8,17 +8,18 @@ package mdpp
 // Sanitize false, raw HTML and URLs pass through unchanged for trusted-author
 // content.
 type RenderOptions struct {
-	HighlightCode     bool
-	HeadingIDs        bool
-	UnsafeHTML        bool
-	HardWraps         bool
-	WrapEmoji         bool
-	ImageResolver     func(src string) string
-	ContainerRenderer func(c *Node, body string) string
-	SourcePositions   bool
-	NodeRenderers     map[NodeType]NodeRenderer
-	Math              MathOption
-	Sanitize          bool
+	HighlightCode       bool
+	HeadingIDs          bool
+	UnsafeHTML          bool
+	HardWraps           bool
+	WrapEmoji           bool
+	ImageResolver       func(src string) string
+	ImageTitleAttribute bool
+	ContainerRenderer   func(c *Node, body string) string
+	SourcePositions     bool
+	NodeRenderers       map[NodeType]NodeRenderer
+	Math                MathOption
+	Sanitize            bool
 	// URLPolicy can reject or rewrite URLs after the built-in safe policy.
 	// Returning false emits an empty URL attribute. It cannot allow a URL the
 	// built-in policy rejects.
@@ -59,6 +60,7 @@ func rendererFromOptions(opts RenderOptions) *Renderer {
 		WithHardWraps(opts.HardWraps),
 		WithWrapEmoji(opts.WrapEmoji),
 		WithImageResolver(opts.ImageResolver),
+		WithImageTitleAttribute(opts.ImageTitleAttribute),
 		WithContainerRenderer(opts.ContainerRenderer),
 		WithSourcePositions(opts.SourcePositions),
 		WithURLPolicy(opts.URLPolicy),
