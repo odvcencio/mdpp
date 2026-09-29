@@ -1182,7 +1182,7 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 	cb := &Node{
 		Type:    NodeCodeBlock,
 		Literal: literal.String(),
-		Attrs:   map[string]string{"language": normalizedFenceLanguage(info)},
+		Attrs:   map[string]string{"language": normalizedFenceLanguage(firstFenceInfoWord(info))},
 		Range:   sourceRange(source, lines[start].start, lines[end].next),
 	}
 	return codeBlockToDiagram(cb), end + 1, true
@@ -2359,6 +2359,18 @@ var fenceHighlightRe = regexp.MustCompile(`\{([^{}]*)\}`)
 // the inner content of the first `{…}` highlight block. Either result may be
 // empty: an info string of just `{1,4}` yields ("", "1,4"); `go {1-3|5}`
 // yields ("go", "1-3|5"); a plain `go` yields ("go", "").
+// firstFenceInfoWord returns the first word of a fence info string with its
+// backslash escapes and character references decoded, the single decode of the
+// fence language on the fast path (parseFenceInfo does the same for the
+// grammar path).
+func firstFenceInfoWord(info string) string {
+	fields := strings.Fields(info)
+	if len(fields) == 0 {
+		return ""
+	}
+	return decodeMarkdownText(fields[0])
+}
+
 func parseFenceInfo(info string) (lang, highlights string) {
 	info = strings.TrimSpace(info)
 	if m := fenceHighlightRe.FindStringSubmatch(info); m != nil {
