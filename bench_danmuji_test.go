@@ -13,7 +13,7 @@ package mdpp
 import "testing"
 
 func BenchmarkParseShortDoc(b *testing.B) {
-//line /home/draco/work/mdpp/bench.dmj:13
+//line bench.dmj:13
 	source := []byte(benchShortMarkdown)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -23,7 +23,7 @@ func BenchmarkParseShortDoc(b *testing.B) {
 }
 
 func BenchmarkRenderShortDoc(b *testing.B) {
-//line /home/draco/work/mdpp/bench.dmj:23
+//line bench.dmj:23
 	doc := MustParse([]byte(benchShortMarkdown))
 	r := NewRenderer()
 	b.ReportAllocs()
@@ -34,7 +34,7 @@ func BenchmarkRenderShortDoc(b *testing.B) {
 }
 
 func BenchmarkRenderLongDoc(b *testing.B) {
-//line /home/draco/work/mdpp/bench.dmj:34
+//line bench.dmj:34
 	doc := MustParse([]byte(benchLongMarkdown))
 	r := NewRenderer()
 	b.ReportAllocs()
@@ -45,7 +45,7 @@ func BenchmarkRenderLongDoc(b *testing.B) {
 }
 
 func BenchmarkParseAndRenderLongDoc(b *testing.B) {
-//line /home/draco/work/mdpp/bench.dmj:45
+//line bench.dmj:45
 	src := []byte(benchLongMarkdown)
 	b.ReportAllocs()
 	b.ResetTimer()
