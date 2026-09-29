@@ -138,6 +138,20 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		b.WriteString("<li")
 		writeSourceAttrs(r, b, n)
 		b.WriteByte('>')
+		if n.Attrs["tight"] == "true" && len(n.Children) > 0 {
+			if n.Children[0].Type != NodeParagraph {
+				b.WriteByte('\n')
+			}
+			for _, child := range n.Children {
+				if child.Type == NodeParagraph {
+					renderChildrenInto(r, b, child)
+				} else {
+					renderNodeInto(r, b, child)
+				}
+			}
+			b.WriteString("</li>\n")
+			break
+		}
 		// Render children into a temporary builder so we can trim the
 		// trailing newline cleanly. The child nodes are typically a
 		// single paragraph so the temp cost is bounded.

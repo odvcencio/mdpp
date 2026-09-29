@@ -20,8 +20,8 @@ var specFiles embed.FS
 
 const (
 	// Raise these floors only after measuring the full spec suite.
-	commonMarkPassFloor = 514
-	gfmPassFloor        = 506
+	commonMarkPassFloor = 592
+	gfmPassFloor        = 583
 	gfmLostTextCeiling  = 0
 )
 

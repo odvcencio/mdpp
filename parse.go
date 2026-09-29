@@ -358,6 +358,20 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 		}
 		return doc, nil
 	}
+	if doc := parseCommonMarkHTMLBlocks(source, ctx); doc != nil {
+		releasePrev()
+		if topLevel && ctx != nil {
+			ctx.cache.pruneNotIn(ctx.seen)
+		}
+		return doc, nil
+	}
+	if doc := parseLeadingThematicBreaks(source, ctx); doc != nil {
+		releasePrev()
+		if topLevel && ctx != nil {
+			ctx.cache.pruneNotIn(ctx.seen)
+		}
+		return doc, nil
+	}
 	if prevTree == nil {
 		if doc := parseSegmentedDocumentCtx(source, ctx); doc != nil {
 			releasePrev()
@@ -672,6 +686,9 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 			return nil
 		}
 		if strings.TrimSpace(line) == "" {
+			if sawQuote {
+				return nil // An unmarked blank line ends this block quote.
+			}
 			contentLines = append(contentLines, "")
 			continue
 		}
@@ -719,14 +736,34 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 // children are skipped — their own conversion already ran this pass, and a
 // second strip could eat legitimate prose.
 func stripQuoteContinuationMarkers(n *Node) {
-	for i, child := range n.Children {
+	for i := 0; i < len(n.Children); i++ {
+		child := n.Children[i]
 		if child.Type == NodeBlockquote {
 			continue
+		}
+		if child.Type == NodeHTMLBlock && strings.Contains(child.Literal, "\n>") {
+			lines := strings.Split(child.Literal, "\n")
+			for j := 1; j < len(lines); j++ {
+				if content, ok := stripBlockquoteMarker(lines[j]); ok {
+					lines[j] = content
+				}
+			}
+			child.Literal = strings.Join(lines, "\n")
 		}
 		if child.Type == NodeText && i > 0 {
 			prev := n.Children[i-1].Type
 			if prev == NodeSoftBreak || prev == NodeHardBreak {
 				if content, ok := stripBlockquoteMarker(child.Literal); ok {
+					if content == "" {
+						if n.Type == NodeHeading && i == len(n.Children)-1 {
+							n.Children = n.Children[:i-1]
+							i -= 2
+						} else {
+							n.Children = append(n.Children[:i], n.Children[i+1:]...)
+							i--
+						}
+						continue
+					}
 					child.Literal = content
 				}
 			}
@@ -741,8 +778,31 @@ func stripBlockquoteMarker(line string) (string, bool) {
 		return "", false
 	}
 	content := strings.TrimPrefix(trimmed, ">")
-	if strings.HasPrefix(content, " ") || strings.HasPrefix(content, "\t") {
+	if strings.HasPrefix(content, "\t") {
+		// The marker occupies one column. A following tab reaches the
+		// next four-column stop, of which one column is marker padding.
+		column := len(line) - len(trimmed) + 1
+		padding := 4 - column%4
+		content = strings.Repeat(" ", padding-1) + content[1:]
+	} else if strings.HasPrefix(content, " ") {
 		content = content[1:]
+	}
+	// Expand indentation tabs against their original column before the
+	// stripped content is reparsed. Text tabs after the indentation stay raw.
+	indent := 0
+	for indent < len(content) && (content[indent] == ' ' || content[indent] == '\t') {
+		indent++
+	}
+	if strings.Contains(content[:indent], "\t") {
+		column := 0
+		for j := 0; j < indent; j++ {
+			if content[j] == '\t' {
+				column += 4 - (column+2)%4
+			} else {
+				column++
+			}
+		}
+		content = strings.Repeat(" ", column) + content[indent:]
 	}
 	return content, true
 }
@@ -1067,6 +1127,9 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 		if trimmed == "" {
 			i++
 			continue
+		}
+		if i+1 < len(lines) && isSetextUnderlineLine([]byte(lines[i+1].text)) {
+			return nil, false
 		}
 		if isATXHeadingLine([]byte(line.text)) {
 			heading := fastHeadingNode(source, line, ctx)
@@ -1961,7 +2024,7 @@ func parseAllIndentedDocument(source []byte) *Document {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "\t") {
+		if _, ok := stripIndentColumns(line, 4); !ok {
 			return nil
 		}
 		sawContent = true
@@ -1971,12 +2034,9 @@ func parseAllIndentedDocument(source []byte) *Document {
 	}
 	stripped := make([]string, len(lines))
 	for i, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "    "):
-			stripped[i] = line[4:]
-		case strings.HasPrefix(line, "\t"):
-			stripped[i] = line[1:]
-		default:
+		if content, ok := stripIndentColumns(line, 4); ok {
+			stripped[i] = content
+		} else {
 			stripped[i] = line
 		}
 	}
@@ -1989,6 +2049,24 @@ func parseAllIndentedDocument(source []byte) *Document {
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{code}, Range: sourceRange(source, 0, len(source))}, Source: source}
 	doc.extractFrontmatter()
 	return doc
+}
+
+func stripIndentColumns(line string, columns int) (string, bool) {
+	visual := 0
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case ' ':
+			visual++
+		case '\t':
+			visual += 4 - visual%4
+		default:
+			return "", false
+		}
+		if visual >= columns {
+			return strings.Repeat(" ", visual-columns) + line[i+1:], true
+		}
+	}
+	return "", false
 }
 
 // parseDeepNestedListDocument handles pure-list documents whose nesting
