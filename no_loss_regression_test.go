@@ -261,7 +261,7 @@ func TestErrorBlockFallbackPreservesTextAndDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(rendered), "[a](url") || !strings.Contains(string(rendered), "&amp;quot;") {
+	if !strings.Contains(string(rendered), "[a](url") || !strings.Contains(string(rendered), "&#34;tit&#34;") {
 		t.Fatalf("error fallback did not render the original text: %s", rendered)
 	}
 	assertParseDiagnostic(t, doc, "MDPP-PARSE-006")

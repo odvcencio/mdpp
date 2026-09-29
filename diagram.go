@@ -68,7 +68,7 @@ func normalizedFenceLanguage(language string) string {
 	if len(fields) == 0 {
 		return ""
 	}
-	lang := strings.ToLower(fields[0])
+	lang := strings.ToLower(decodeMarkdownText(fields[0]))
 	lang = strings.TrimPrefix(lang, "{.")
 	lang = strings.TrimPrefix(lang, ".")
 	lang = strings.TrimSuffix(lang, "}")

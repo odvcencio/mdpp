@@ -168,7 +168,7 @@ func renderNodeInto(r *Renderer, b *strings.Builder, n *Node) {
 		if !ok {
 			href = ""
 		}
-		href = html.EscapeString(href)
+		href = html.EscapeString(percentEncodeMarkdownURL(href))
 		title := n.Attrs["title"]
 		b.WriteString(`<a href="`)
 		b.WriteString(href)
@@ -617,7 +617,7 @@ func isAdmonitionContainer(name string) bool {
 func renderAdmonitionTitleInto(r *Renderer, b *strings.Builder, title string) {
 	root := newNode(NodeDocument)
 	root.Children = parseInline(title, nil)
-	processInlineMath(root)
+	processInlineMath(root, nil)
 	processSuperscripts(root)
 	processEmojiShortcodes(root)
 
@@ -823,4 +823,35 @@ func slugify(s string) string {
 // Slugify converts heading text into the renderer's auto-generated id.
 func Slugify(s string) string {
 	return slugify(s)
+}
+
+// CommonMark percent-encodes backticks, backslashes, and UTF-8 bytes in link
+// destinations while leaving URL punctuation and existing escapes intact.
+func percentEncodeMarkdownURL(raw string) string {
+	var out strings.Builder
+	for i := 0; i < len(raw); i++ {
+		b := raw[i]
+		if b != '`' && b != '\\' && b < 0x80 {
+			continue
+		}
+		if out.Len() == 0 {
+			out.Grow(len(raw) + 8)
+			out.WriteString(raw[:i])
+		}
+		const hexDigits = "0123456789ABCDEF"
+		out.WriteByte('%')
+		out.WriteByte(hexDigits[b>>4])
+		out.WriteByte(hexDigits[b&15])
+		if i+1 < len(raw) {
+			// Continue copying plain bytes from the next iteration.
+			for i+1 < len(raw) && raw[i+1] != '`' && raw[i+1] != '\\' && raw[i+1] < 0x80 {
+				i++
+				out.WriteByte(raw[i])
+			}
+		}
+	}
+	if out.Len() == 0 {
+		return raw
+	}
+	return out.String()
 }
