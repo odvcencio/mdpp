@@ -25,7 +25,7 @@ func TestLargeHTMLAndBlockquoteBlocks(t *testing.T) {
 		}
 		return best
 	}
-	for _, line := range []string{"<div>\n", ">\n"} {
+	for _, line := range []string{"<div>\n", ">\n", "> a\n", "> > a\n"} {
 		t.Run(strings.TrimSpace(line), func(t *testing.T) {
 			small := parseBest([]byte(strings.Repeat(line, 25_000)))
 			large := parseBest([]byte(strings.Repeat(line, 100_000)))

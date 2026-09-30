@@ -5500,14 +5500,44 @@ func splitTextNewlines(nodes []*Node) []*Node {
 		}
 		lines := strings.Split(n.Literal, "\n")
 		cursor := 0
+		// Track the line and column at cursor as it advances. Rescanning the
+		// prefix for every piece (textSliceRange) made long text nodes quadratic.
+		tracked := n.Range.StartLine != 0
+		curLine, curCol := n.Range.StartLine, n.Range.StartCol
 		for i, line := range lines {
 			if line != "" {
-				out = append(out, textNodeRange(line, textSliceRange(n.Range, n.Literal, cursor, cursor+len(line))))
+				var r Range
+				if tracked {
+					// A line holds no newline, so it ends on the same line.
+					r = Range{
+						StartByte: n.Range.StartByte + cursor,
+						EndByte:   n.Range.StartByte + cursor + len(line),
+						StartLine: curLine,
+						StartCol:  curCol,
+						EndLine:   curLine,
+						EndCol:    curCol + len(line),
+					}
+				}
+				out = append(out, textNodeRange(line, r))
 			}
 			cursor += len(line)
+			curCol += len(line)
 			if i < len(lines)-1 {
-				out = append(out, &Node{Type: NodeSoftBreak, Range: textSliceRange(n.Range, n.Literal, cursor, cursor+1)})
+				var r Range
+				if tracked {
+					r = Range{
+						StartByte: n.Range.StartByte + cursor,
+						EndByte:   n.Range.StartByte + cursor + 1,
+						StartLine: curLine,
+						StartCol:  curCol,
+						EndLine:   curLine + 1,
+						EndCol:    1,
+					}
+				}
+				out = append(out, &Node{Type: NodeSoftBreak, Range: r})
 				cursor++
+				curLine++
+				curCol = 1
 			}
 		}
 	}
