@@ -13,7 +13,15 @@ func postProcess(doc *Document) {
 		return
 	}
 	flattenDocumentNodes(doc.Root)
+	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
+		if n.Type == NodeBlockquote {
+			stripQuoteContinuationMarkers(n)
+		}
+		return true
+	})
 	repairStandaloneHTMLBlocks(doc)
+	annotateListTightness(doc)
+	repairListCodeTabs(doc)
 	processAdmonitions(doc.Root)
 	processBlockquoteHeadings(doc.Root)
 	footnoteDefs := processFootnotes(doc.Root)
