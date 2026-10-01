@@ -6,7 +6,6 @@
           "total": 18,
           "baseline_passed": 16,
           "examples": [
-            77,
             79
           ]
         },
@@ -212,7 +211,6 @@
           "total": 18,
           "baseline_passed": 16,
           "examples": [
-            47,
             49
           ]
         },
