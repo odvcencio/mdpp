@@ -16,6 +16,9 @@ func documentDiagnostics(uri DocumentURI, doc *mdpp.Document, index *LineIndex) 
 		return []Diagnostic{}
 	}
 	out := []Diagnostic{}
+	for _, d := range mdpp.IndexStory(doc).Diagnostics {
+		out = append(out, Diagnostic{Range: index.RangeToLSP(d.Range), Severity: parserSeverity(d.Severity), Code: d.Code, Source: "mdpp", Message: d.Message})
+	}
 	for _, d := range doc.Diagnostics() {
 		out = append(out, Diagnostic{
 			Range:    index.RangeToLSP(d.Range),
