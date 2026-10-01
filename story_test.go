@@ -90,3 +90,33 @@ func TestEditParsedDirectivePreservesFormatting(t *testing.T) {
 		t.Fatal("unsafe normalized offsets accepted")
 	}
 }
+
+func TestStorySlideRenameRejectsDeckWideCollisions(t *testing.T) {
+	for _, other := range []string{"closing", "opening"} {
+		doc := MustParse([]byte("```yaml\nid: opening\n```\n\n# First\n\n---\n\n```yaml\nid: " + other + "\n```\n\n# Second\n"))
+		idx := IndexStory(doc)
+		target, ok := idx.At(strings.Index(string(doc.Source), "opening"))
+		if !ok {
+			t.Fatal("missing slide declaration")
+		}
+		if edits, err := idx.Rename(target, "closing"); err == nil || len(edits) != 0 {
+			t.Fatalf("accepted collision/ambiguity: %v, %v", edits, err)
+		}
+	}
+}
+
+func TestStoryAllActorKindsAndUnspacedEdges(t *testing.T) {
+	doc := MustParse([]byte("```sirena\njob worker\ngateway ingress\nexternal outside\nworker->ingress: calls \"Request\"\ningress->outside: calls \"Dispatch\"\n```\n"))
+	idx := IndexStory(doc)
+	if len(idx.Diagnostics) != 0 {
+		t.Fatalf("valid actors unresolved: %+v", idx.Diagnostics)
+	}
+	target, ok := idx.At(strings.Index(string(doc.Source), "worker->"))
+	if !ok {
+		t.Fatal("missing edge endpoint")
+	}
+	edits, err := idx.Rename(target, "executor")
+	if err != nil || len(edits) != 2 {
+		t.Fatal(edits, err)
+	}
+}

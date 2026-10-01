@@ -210,7 +210,7 @@ func (idx StoryIndex) Rename(target StorySymbol, name string) ([]SourceEdit, err
 	}
 	declarations := 0
 	for _, s := range idx.Symbols {
-		if s.Kind == target.Kind && s.Scope == target.Scope && s.Declaration {
+		if s.Kind == target.Kind && (target.Kind == "slide" || s.Scope == target.Scope) && s.Declaration {
 			if s.Name == target.Name {
 				declarations++
 			} else if s.Name == name {
@@ -301,7 +301,7 @@ func indexStoryActors(doc *Document, n *Node, result *StoryIndex) {
 		i++
 	}
 	scope := fmt.Sprintf("diagram:%d", n.Range.StartByte)
-	kinds := map[string]bool{"service": true, "client": true, "database": true, "queue": true, "cache": true, "actor": true, "node": true, "component": true, "worker": true, "store": true}
+	kinds := map[string]bool{"service": true, "client": true, "database": true, "queue": true, "cache": true, "job": true, "external": true, "gateway": true, "node": true}
 	add := func(t token, decl bool) {
 		if storyName.MatchString(t.text) {
 			result.Symbols = append(result.Symbols, StorySymbol{"actor", t.text, scope, decl, sourceRange(doc.Source, t.start, t.end)})
