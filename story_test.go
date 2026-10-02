@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	gotreesitter "github.com/odvcencio/gotreesitter"
 )
 
 const storyFixture = "```yaml\nid: opening\ncues: overview, request, recovery\n```\n\n# Café\n\n:::motion {cue=request duration=900 custom=keep}\nHello\n:::\n\n:::motion {cue=recovery after=request}\nRecovered\n:::\n\n[Jump](#opening/recovery)\n\n```sirena\nclient browser { label: \"api\" }\nservice api\nbrowser -> api: calls \"Request\"\n// service fake\n```\n\n```text\n:::motion {cue=fake}\nservice fake\n```\n"
@@ -288,5 +290,94 @@ func TestStoryIndexSurvivesSlideSplitting(t *testing.T) {
 				t.Fatal("index changed the caller's split AST or source")
 			}
 		})
+	}
+}
+
+func TestStoryCarriageReturnsKeepReadOnlyIndexAndRejectEdits(t *testing.T) {
+	source := storyFixture + "\n:::motion {after=missing}\nUnresolved\n:::\n"
+	want := IndexStory(MustParse([]byte(source)))
+	if len(want.Symbols) == 0 || len(want.Diagnostics) != 1 {
+		t.Fatalf("incomplete baseline: %+v", want)
+	}
+	for _, ending := range []string{"\r\n", "\r"} {
+		for _, transform := range []struct {
+			name string
+			run  func(*Document)
+		}{
+			{"parsed", func(*Document) {}},
+			{"SplitSlides", func(doc *Document) { SplitSlides(doc) }},
+			{"Document.Slides", func(doc *Document) { doc.Slides() }},
+		} {
+			t.Run(strings.ReplaceAll(ending, "\r", "CR")+"/"+transform.name, func(t *testing.T) {
+				doc := MustParse([]byte(strings.ReplaceAll(source, "\n", ending)))
+				transform.run(doc)
+				before := DumpTreeForSnapshot(doc.Root)
+				got := IndexStory(doc)
+				if !reflect.DeepEqual(got.Symbols, want.Symbols) || !reflect.DeepEqual(got.Diagnostics, want.Diagnostics) {
+					t.Fatalf("normalized read-only index differs: got %+v, want %+v", got, want)
+				}
+				for _, target := range want.Symbols {
+					if found, ok := got.At(target.Range.StartByte); !ok || found != target ||
+						!reflect.DeepEqual(got.References(target, true), want.References(target, true)) {
+						t.Fatalf("normalized navigation changed for %+v", target)
+					}
+					if edits, err := got.Rename(target, "updated"); err == nil || !strings.Contains(err.Error(), "LF input") || len(edits) != 0 {
+						t.Fatalf("unsafe rename allowed: edits=%v error=%v", edits, err)
+					}
+				}
+				if _, err := EditDirectiveAttributes(doc, strings.Index(source, ":::motion"), map[string]string{"after": "updated"}); err == nil {
+					t.Fatal("unsafe directive source edit allowed")
+				}
+				if string(doc.Source) != source || DumpTreeForSnapshot(doc.Root) != before {
+					t.Fatal("index changed normalized source or AST")
+				}
+			})
+		}
+	}
+}
+
+func TestStoryCachedParserCarriageReturnEditSafety(t *testing.T) {
+	for _, ending := range []string{"\r\n", "\r"} {
+		p := NewParser()
+		defer p.Close()
+		lf := []byte(storyFixture)
+		cr := []byte(strings.ReplaceAll(storyFixture, "\n", ending))
+		for _, step := range []struct {
+			incremental bool
+			source      []byte
+			wantCR      bool
+		}{
+			{false, cr, true}, {false, lf, false},
+			// The normalized bytes are identical, so the retained tree needs
+			// only a no-op edit while original-source CR provenance changes.
+			{true, cr, true}, {true, lf, false},
+		} {
+			var doc *Document
+			var err error
+			if step.incremental {
+				doc, err = p.ParseIncremental(step.source, gotreesitter.InputEdit{})
+			} else {
+				doc, err = p.Parse(step.source)
+			}
+			if err != nil || doc.SourceHadCarriageReturns() != step.wantCR || string(doc.Source) != storyFixture {
+				t.Fatalf("cached parser provenance: incremental=%v doc=%+v err=%v", step.incremental, doc, err)
+			}
+			idx := IndexStory(doc)
+			target, ok := idx.At(strings.Index(storyFixture, "after=request") + len("after="))
+			if !ok {
+				t.Fatal("cached parser lost read-only story symbol")
+			}
+			edits, err := idx.Rename(target, "updated")
+			if step.wantCR {
+				if err == nil || !strings.Contains(err.Error(), "LF input") || len(edits) != 0 {
+					t.Fatalf("unsafe cached parser rename: %v %v", edits, err)
+				}
+				if _, err := EditDirectiveAttributes(doc, strings.Index(storyFixture, ":::motion"), map[string]string{"after": "updated"}); err == nil {
+					t.Fatal("unsafe cached parser directive edit")
+				}
+			} else if err != nil || len(edits) == 0 {
+				t.Fatalf("safe LF rename rejected: %v %v", edits, err)
+			}
+		}
 	}
 }

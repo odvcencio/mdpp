@@ -25,7 +25,7 @@ func (s *Server) definition(params DefinitionParams) ([]Location, error) {
 	if err != nil {
 		return nil, err
 	}
-	story := mdpp.IndexStory(doc)
+	story := storyIndexForSource(doc, source)
 	if target, ok := story.At(offset); ok {
 		var out []Location
 		for _, symbol := range story.References(target, true) {
@@ -63,7 +63,7 @@ func (s *Server) references(params ReferenceParams) ([]Location, error) {
 	if err != nil {
 		return nil, err
 	}
-	story := mdpp.IndexStory(doc)
+	story := storyIndexForSource(doc, source)
 	if target, ok := story.At(offset); ok {
 		var out []Location
 		for _, symbol := range story.References(target, params.Context.IncludeDeclaration) {
@@ -180,9 +180,12 @@ func (s *Server) prepareRename(params TextDocumentPositionParams) (*Range, error
 	if err != nil {
 		return nil, err
 	}
-	story := mdpp.IndexStory(doc)
+	story := storyIndexForSource(doc, source)
 	if target, ok := story.At(offset); ok {
 		if _, err := story.Rename(target, target.Name); err != nil {
+			if story.sourceHadCR {
+				return nil, err
+			}
 			return nil, nil
 		}
 		r := index.RangeToLSP(target.Range)
@@ -204,7 +207,7 @@ func (s *Server) rename(params RenameParams) (*WorkspaceEdit, error) {
 	if err != nil {
 		return nil, err
 	}
-	story := mdpp.IndexStory(doc)
+	story := storyIndexForSource(doc, source)
 	if target, ok := story.At(offset); ok {
 		patches, err := story.Rename(target, params.NewName)
 		if err != nil {

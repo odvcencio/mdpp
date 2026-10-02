@@ -1,8 +1,10 @@
 package lsp
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestStoryDefinitionReferencesAndRename(t *testing.T) {
@@ -29,5 +31,105 @@ func TestStoryDefinitionReferencesAndRename(t *testing.T) {
 		if err != nil || len(edit.Changes[uri]) != len(refs) {
 			t.Fatal("rename", edit, err)
 		}
+	}
+}
+
+func TestStoryCRLFReadOnlyPositionsAndEditSafety(t *testing.T) {
+	const lf = "```yaml\nid: opening\ntitle: Café\ncues: [\"😀\", overview, 'request'] # request\n```\n\n# Café\n\n" +
+		":::motion {note=\"😀 Café\" cue=done after=request}\nx\n:::\n\n" +
+		":::motion {note=\"😀 Café\" after=missing}\nx\n:::\n\n[😀 Café](#opening/request)\n\n" +
+		"```sirena\nservice api\nclient web\nweb -> api: calls \"😀 Café\"\n```\n"
+	targets := []struct {
+		marker, name string
+		skip, count  int
+	}{
+		{"after=request", "request", len("after="), 3},
+		{"/request", "request", 1, 3},
+		{"#opening", "opening", 1, 2},
+		{"-> api", "api", 3, 2},
+	}
+	uri := DocumentURI("file:///story-crlf.md")
+	type response struct {
+		definitions, references [][]Location
+		diagnostics             []Diagnostic
+	}
+	collect := func(t *testing.T, source string, carriageReturns bool) response {
+		t.Helper()
+		s := NewServer()
+		open := s.store.Open(TextDocumentItem{URI: uri, Version: 1, Text: source})
+		doc, original, index, _ := open.SnapshotReady()
+		if string(doc.Source) != lf || string(original) != source || doc.SourceHadCarriageReturns() != carriageReturns {
+			t.Fatal("snapshot source normalization changed")
+		}
+		var out response
+		for _, target := range targets {
+			offset := strings.Index(source, target.marker) + target.skip
+			position := index.OffsetToPosition(offset)
+			prefix := lf[:strings.Index(lf, target.marker)+target.skip]
+			wantPosition := Position{Line: uint32(strings.Count(prefix, "\n")), Character: uint32(len(utf16.Encode([]rune(prefix[strings.LastIndex(prefix, "\n")+1:]))))}
+			if position != wantPosition {
+				t.Fatalf("incorrect UTF-16 query position: got %+v, want %+v", position, wantPosition)
+			}
+			defs, err := s.definition(DefinitionParams{TextDocument: TextDocumentIdentifier{URI: uri}, Position: position})
+			if err != nil || len(defs) != 1 {
+				t.Fatalf("definition for %s: %v %v", target.name, defs, err)
+			}
+			refs, err := s.references(ReferenceParams{TextDocument: TextDocumentIdentifier{URI: uri}, Position: position, Context: ReferenceContext{IncludeDeclaration: true}})
+			if err != nil || len(refs) != target.count {
+				t.Fatalf("references for %s: %v %v", target.name, refs, err)
+			}
+			for _, loc := range append(append([]Location{}, defs...), refs...) {
+				a, okA := index.PositionToOffset(loc.Range.Start)
+				b, okB := index.PositionToOffset(loc.Range.End)
+				if !okA || !okB || string(original[a:b]) != target.name {
+					t.Fatalf("range does not select original %s: %+v", target.name, loc)
+				}
+			}
+			out.definitions = append(out.definitions, defs)
+			out.references = append(out.references, refs)
+			selection, err := s.prepareRename(TextDocumentPositionParams{TextDocument: TextDocumentIdentifier{URI: uri}, Position: position})
+			if carriageReturns {
+				if selection != nil || err == nil || !strings.Contains(err.Error(), "LF input") {
+					t.Fatalf("prepareRename did not reject CRLF: %v %v", selection, err)
+				}
+			} else if selection == nil || err != nil {
+				t.Fatalf("LF prepareRename failed: %v %v", selection, err)
+			}
+			edit, err := s.rename(RenameParams{TextDocument: TextDocumentIdentifier{URI: uri}, Position: position, NewName: "updated"})
+			if carriageReturns {
+				if edit != nil || err == nil || !strings.Contains(err.Error(), "LF input") {
+					t.Fatalf("rename did not reject CRLF: %v %v", edit, err)
+				}
+			} else if err != nil || len(edit.Changes[uri]) != target.count {
+				t.Fatalf("LF rename failed: %v %v", edit, err)
+			}
+		}
+		for _, diagnostic := range documentDiagnostics(uri, doc, index) {
+			if strings.HasPrefix(diagnostic.Code, "STORY-") {
+				out.diagnostics = append(out.diagnostics, diagnostic)
+				a, _ := index.PositionToOffset(diagnostic.Range.Start)
+				b, _ := index.PositionToOffset(diagnostic.Range.End)
+				if string(original[a:b]) != "missing" {
+					t.Fatalf("diagnostic range does not select original name: %+v", diagnostic)
+				}
+			}
+		}
+		if len(out.diagnostics) != 1 {
+			t.Fatalf("missing story diagnostic: %+v", out.diagnostics)
+		}
+		for _, symbol := range storyIndexForSource(doc, original).Symbols {
+			if symbol.Range != lspSourceRange(original, symbol.Range.StartByte, symbol.Range.EndByte) {
+				t.Fatalf("inconsistent original byte/line range: %+v", symbol)
+			}
+		}
+		if string(original) != source || string(doc.Source) != lf {
+			t.Fatal("story requests changed source buffers")
+		}
+		return out
+	}
+	want := collect(t, lf, false)
+	got := collect(t, strings.ReplaceAll(lf, "\n", "\r\n"), true)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CRLF read-only responses differ\ngot %+v\nwant %+v", got, want)
 	}
 }

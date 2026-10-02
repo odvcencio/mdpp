@@ -148,12 +148,17 @@ Aliases, folded/literal scalars and noncontiguous spellings without safe ranges
 remain unindexed.
 
 The core API is `IndexStory(doc)`. Its symbols expose kind, scope, declaration
-status and source range. `Rename` rejects ambiguous declarations and collisions.
+status and source range against normalized `Document.Source`, matching the AST.
+Read-only indexing, references and diagnostics support LF and CRLF input,
+including after slide splitting. The LSP maps story ranges to the editor's
+original source and UTF-16 positions. `Rename` rejects ambiguous declarations
+and collisions.
 `EditDirectiveAttributes(doc, openingByte, changes)` edits parsed directive
 openings while retaining spacing, quote style, other attributes and the body.
 Both APIs keep the core free of a Sirena dependency. Diagram semantic validation
 still belongs to the supplied Sirena renderer. Source edits currently require LF
-input; normalized CRLF offsets are rejected rather than applied to original bytes.
+input; `Rename`, `EditDirectiveAttributes` and LSP story rename reject input
+containing carriage returns rather than apply normalized offsets to original bytes.
 
 ## What Ships
 

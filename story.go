@@ -12,7 +12,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// StorySymbol identifies a declaration or reference by exact UTF-8 byte range.
+// StorySymbol identifies a declaration or reference by exact UTF-8 byte range
+// in the parser's normalized Document.Source.
 // Cue scopes are slides; actor scopes are individual Sirena fences. Names in
 // unrelated diagrams never participate in each other's rename operations.
 type StorySymbol struct {
@@ -25,6 +26,7 @@ type StorySymbol struct {
 type StoryIndex struct {
 	Symbols     []StorySymbol
 	Diagnostics []Diagnostic
+	sourceHadCR bool
 }
 
 var storyName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
@@ -39,14 +41,12 @@ func IndexStory(doc *Document) StoryIndex {
 	if doc == nil || doc.Root == nil {
 		return result
 	}
-	if doc.SourceHadCarriageReturns() {
-		return result
-	} // normalized offsets cannot edit original CRLF
+	result.sourceHadCR = doc.SourceHadCarriageReturns()
 	if documentHasSlides(doc.Root) {
 		// SplitSlides discards metadata nodes and separator ranges. Use the
 		// parser's normal bounded path to recover both without altering doc.
 		parsed, err := Parse(doc.Source)
-		if err != nil || parsed == nil || parsed.Root == nil || parsed.SourceHadCarriageReturns() {
+		if err != nil || parsed == nil || parsed.Root == nil {
 			return result
 		}
 		doc = parsed
@@ -313,6 +313,9 @@ func (idx StoryIndex) References(target StorySymbol, includeDeclaration bool) []
 
 // Rename returns disjoint edits, refusing ambiguous declarations and collisions.
 func (idx StoryIndex) Rename(target StorySymbol, name string) ([]SourceEdit, error) {
+	if idx.sourceHadCR {
+		return nil, fmt.Errorf("story source edits require LF input; the original source contained carriage returns")
+	}
 	if !storyName.MatchString(name) {
 		return nil, fmt.Errorf("story name must contain 1–64 letters, digits, underscores or hyphens and start with a letter")
 	}
