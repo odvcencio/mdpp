@@ -142,6 +142,10 @@ The LSP understands authored slide IDs and named cues in parsed YAML fences,
 and edge endpoints inside Sirena fences. Definition, references and rename use
 exact byte ranges; actor names stay scoped to their diagram. Unknown references
 and duplicate slide IDs produce diagnostics before presentation.
+YAML comments are excluded. Plain and quoted scalar names, comma-separated cues,
+and cue lists retain exact edit ranges, including UTF-8 and escaped names.
+Aliases, folded/literal scalars and noncontiguous spellings without safe ranges
+remain unindexed.
 
 The core API is `IndexStory(doc)`. Its symbols expose kind, scope, declaration
 status and source range. `Rename` rejects ambiguous declarations and collisions.

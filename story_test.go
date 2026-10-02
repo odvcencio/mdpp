@@ -120,3 +120,105 @@ func TestStoryAllActorKindsAndUnspacedEdges(t *testing.T) {
 		t.Fatal(edits, err)
 	}
 }
+
+func TestStoryYAMLMetadataExactRanges(t *testing.T) {
+	type symbol struct{ kind, name, spelling string }
+	tests := []struct {
+		name, metadata string
+		want           []symbol
+	}{
+		{"comments", "id: opening # closing\ncues: overview, request # note request\n", []symbol{{"slide", "opening", "opening"}, {"cue", "overview", "overview"}, {"cue", "request", "request"}}},
+		{"quoted strings", "id: 'opening' # note\ncues: \" overview , request \" # note\n", []symbol{{"slide", "opening", "opening"}, {"cue", "overview", "overview"}, {"cue", "request", "request"}}},
+		{"quoted hash", "id: \"opening#note\"\ncues: \"overview # note, request\"\n", []symbol{{"cue", "request", "request"}}},
+		{"plain hash", "id: opening#note\ncues: overview#note, request\n", []symbol{{"cue", "request", "request"}}},
+		{"flow list", "id: opening\ncues: [overview, 'request', \"recovery\"] # note\n", []symbol{{"slide", "opening", "opening"}, {"cue", "overview", "overview"}, {"cue", "request", "request"}, {"cue", "recovery", "recovery"}}},
+		{"block list", "id: opening\ncues:\n  - overview # note\n  - 'request'\n  - \"recovery\"\n", []symbol{{"slide", "opening", "opening"}, {"cue", "overview", "overview"}, {"cue", "request", "request"}, {"cue", "recovery", "recovery"}}},
+		{"unicode columns", "title: Café\ncues: [\"café\", \"request\"] # Café\n", []symbol{{"cue", "request", "request"}}},
+		{"escaped names", "id: \"op\\u0065ning\"\ncues: \"over\\u0076iew, request\"\n", []symbol{{"slide", "opening", "op\\u0065ning"}, {"cue", "overview", "over\\u0076iew"}, {"cue", "request", "request"}}},
+		{"invalid scalar types", "id: true\ncues: 42\n", nil},
+		{"invalid names", "id: bad name\ncues: bad name, 9bad, good, [wrong]\n", []symbol{{"cue", "good", "good"}}},
+		{"mixed list", "id: [opening]\ncues: [true, null, 17, \"bad name\", \"bad#name\", allowed]\n", []symbol{{"cue", "allowed", "allowed"}}},
+		{"maps", "id: {name: opening}\ncues: {name: request}\n", nil},
+		{"nested metadata", "other:\n  id: opening\n  cues: request\n", nil},
+		{"duplicate keys", "id: opening\nid: closing\ncues: request\n", nil},
+		{"invalid YAML", "id: opening\ncues: [request\n", nil},
+	}
+	for _, tt := range tests {
+		for _, frontmatter := range []bool{false, true} {
+			t.Run(tt.name+"/frontmatter="+map[bool]string{false: "false", true: "true"}[frontmatter], func(t *testing.T) {
+				source := "```yaml\n" + tt.metadata + "```\n\n# Café\n"
+				if frontmatter {
+					source = "---\n" + tt.metadata + "---\n\n# Café\n"
+				}
+				doc := MustParse([]byte(source))
+				idx := IndexStory(doc)
+				if len(idx.Symbols) != len(tt.want) {
+					t.Fatalf("symbols=%+v, want %+v", idx.Symbols, tt.want)
+				}
+				for i, want := range tt.want {
+					s := idx.Symbols[i]
+					start := strings.Index(source, want.spelling)
+					if s.Kind != want.kind || s.Name != want.name || !s.Declaration || s.Range != sourceRange(doc.Source, start, start+len(want.spelling)) {
+						t.Fatalf("symbol=%+v, want %+v at byte %d", s, want, start)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStoryYAMLMetadataRenamePreservesCommentsAndQuotes(t *testing.T) {
+	for _, tt := range []struct{ metadata, request, updated string }{
+		{"id: 'opening' # opening\ncues: overview, request # request\n", "request", "updated"},
+		{"id: \"opening\" # opening\ncues: \"overview, request\" # request\n", "request", "updated"},
+		{"id: opening # opening\ncues: [\"café\", 'request'] # request\n", "request", "updated"},
+		{"id: opening # opening\ncues:\n  - overview # request\n  - \"request\" # request\n", "\"request\"", "\"updated\""},
+		{"id: \"op\\u0065ning\" # opening\ncues: \"overview, re\\u0071uest\" # request\n", "re\\u0071uest", "updated"},
+	} {
+		source := "```yml\n" + tt.metadata + "```\n\n:::motion {after=request}\nHello\n:::\n\n[Jump](#opening/request)\n"
+		doc := MustParse([]byte(source))
+		idx := IndexStory(doc)
+		for _, name := range []string{"opening", "request"} {
+			offset := strings.LastIndex(source, "/request") + 1
+			if name == "opening" {
+				offset = strings.LastIndex(source, "#opening") + 1
+			}
+			target, ok := idx.At(offset)
+			if !ok {
+				t.Fatalf("missing target %s in %s", name, source)
+			}
+			edits, err := idx.Rename(target, "updated")
+			wantCount := 3
+			if name == "opening" {
+				wantCount = 2
+			}
+			if err != nil || len(edits) != wantCount {
+				t.Fatalf("rename %s: edits=%+v error=%v", name, edits, err)
+			}
+			updated := source
+			for i := len(edits) - 1; i >= 0; i-- {
+				e := edits[i]
+				updated = updated[:e.Range.StartByte] + e.NewText + updated[e.Range.EndByte:]
+			}
+			spelling := name
+			if strings.Contains(tt.metadata, "\\u") {
+				spelling = map[string]string{"opening": "op\\u0065ning", "request": "re\\u0071uest"}[name]
+			}
+			want := strings.Replace(source, spelling, "updated", 1)
+			if name == "request" {
+				want = strings.Replace(source, tt.request, tt.updated, 1)
+				want = strings.ReplaceAll(want, "after=request", "after=updated")
+				want = strings.ReplaceAll(want, "/request)", "/updated)")
+			} else {
+				want = strings.ReplaceAll(want, "#opening/", "#updated/")
+			}
+			if updated != want {
+				t.Fatalf("rename changed formatting/comment\ngot: %s\nwant: %s", updated, want)
+			}
+		}
+		comment := strings.LastIndex(source, "# request") + 2
+		if _, ok := idx.At(comment); ok {
+			t.Fatal("comment is a rename target")
+		}
+	}
+}

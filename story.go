@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 )
 
 // StorySymbol identifies a declaration or reference by exact UTF-8 byte range.
@@ -25,8 +28,6 @@ type StoryIndex struct {
 }
 
 var storyName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
-var storyMetadata = regexp.MustCompile(`(?m)^ *(id|cues):[ \t]*(.*)$`)
-var storyWord = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]*`)
 
 // IndexStory indexes parsed slide metadata, motion dependencies, local story
 // links and Sirena actor relationships without changing the document's AST.
@@ -45,38 +46,17 @@ func IndexStory(doc *Document) StoryIndex {
 	scope := "slide:0"
 	slide := 0
 	var links []*Node
-	metadata := func(n *Node) {
-		start, end := n.Range.StartByte, n.Range.EndByte
-		if start < 0 || end > len(doc.Source) {
-			return
-		}
-		for _, match := range storyMetadata.FindAllSubmatchIndex(doc.Source[start:end], -1) {
-			kind := string(doc.Source[start+match[2] : start+match[3]])
-			for _, word := range storyWord.FindAllIndex(doc.Source[start+match[4]:start+match[5]], -1) {
-				a, b := start+match[4]+word[0], start+match[4]+word[1]
-				name := string(doc.Source[a:b])
-				if !storyName.MatchString(name) {
-					continue
-				}
-				if kind == "id" {
-					add("slide", name, scope, true, a, b)
-					break
-				}
-				add("cue", name, scope, true, a, b)
-			}
-		}
-	}
 	var visit func(*Node)
 	visit = func(n *Node) {
 		if n == nil {
 			return
 		}
 		if n.Type == NodeFrontmatter {
-			metadata(n)
+			indexStoryMetadata(doc, n, scope, &result)
 			return
 		}
 		if n.Type == NodeCodeBlock && (n.Attr("language") == "yaml" || n.Attr("language") == "yml") {
-			metadata(n)
+			indexStoryMetadata(doc, n, scope, &result)
 			return
 		}
 		if n.Type == NodeDiagram && n.Attr("syntax") == "sirena" {
@@ -183,6 +163,127 @@ func IndexStory(doc *Document) StoryIndex {
 	}
 	sort.Slice(result.Symbols, func(i, j int) bool { return result.Symbols[i].Range.StartByte < result.Symbols[j].Range.StartByte })
 	return result
+}
+
+// YAML nodes distinguish comments, strings and collections. Only complete
+// names are indexed; their edit ranges retain the original scalar spelling.
+func indexStoryMetadata(doc *Document, n *Node, scope string, result *StoryIndex) {
+	start, end := n.Range.StartByte, n.Range.EndByte
+	if start < 0 || end < start || end > len(doc.Source) || n.Literal == "" {
+		return
+	}
+	body := []byte(n.Literal)
+	rel := bytes.Index(doc.Source[start:end], body)
+	if rel < 0 {
+		return // transformed literals have no reliable source edit ranges
+	}
+	start += rel
+	var root yaml.Node
+	if yaml.Unmarshal(body, &root) != nil || len(root.Content) != 1 || root.Content[0].Kind != yaml.MappingNode {
+		return
+	}
+	var values map[string]any
+	if root.Decode(&values) != nil {
+		return // invalid mappings, including duplicate keys, have no declarations
+	}
+	add := func(kind, name string, a, b int) {
+		result.Symbols = append(result.Symbols, StorySymbol{kind, name, scope, true, sourceRange(doc.Source, start+a, start+b)})
+	}
+	var cues func(*yaml.Node)
+	cues = func(value *yaml.Node) {
+		if value.Kind == yaml.SequenceNode {
+			for _, item := range value.Content {
+				if item.Kind == yaml.ScalarNode {
+					cues(item)
+				}
+			}
+			return
+		}
+		a, b, quote, ok := storyScalarSource(body, value)
+		if !ok {
+			return
+		}
+		parts, rawParts := strings.Split(value.Value, ","), bytes.Split(body[a:b], []byte(","))
+		if len(parts) != len(rawParts) {
+			return // escaped separators do not provide contiguous cue ranges
+		}
+		for i, raw := range rawParts {
+			name, trimmed := strings.TrimSpace(parts[i]), bytes.TrimSpace(raw)
+			if storyName.MatchString(name) && storyScalarText(trimmed, quote) == name {
+				offset := a + bytes.Index(raw, trimmed)
+				add("cue", name, offset, offset+len(trimmed))
+			}
+			a += len(raw) + 1
+		}
+	}
+	mapping := root.Content[0].Content
+	for i := 0; i+1 < len(mapping); i += 2 {
+		key, value := mapping[i], mapping[i+1]
+		switch key.Value {
+		case "id":
+			if a, b, _, ok := storyScalarSource(body, value); ok && storyName.MatchString(value.Value) {
+				add("slide", value.Value, a, b)
+			}
+		case "cues":
+			cues(value)
+		}
+	}
+}
+
+// yaml.Node columns count runes. Convert them to UTF-8 byte offsets before
+// finding the scalar token; quotes and inline comments stay outside edits.
+func storyScalarSource(body []byte, n *yaml.Node) (int, int, byte, bool) {
+	if n.Kind != yaml.ScalarNode || n.Tag != "!!str" || n.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
+		return 0, 0, 0, false
+	}
+	a := 0
+	for line := 1; line < n.Line; line++ {
+		next := bytes.IndexByte(body[a:], '\n')
+		if next < 0 {
+			return 0, 0, 0, false
+		}
+		a += next + 1
+	}
+	for column := 1; column < n.Column && a < len(body); column++ {
+		_, size := utf8.DecodeRune(body[a:])
+		a += size
+	}
+	if a >= len(body) {
+		return 0, 0, 0, false
+	}
+	quote := body[a]
+	if quote != '\'' && quote != '"' {
+		return a, a + len(n.Value), 0, bytes.HasPrefix(body[a:], []byte(n.Value))
+	}
+	a++
+	for b := a; b < len(body) && body[b] != '\n'; b++ {
+		if quote == '"' && body[b] == '\\' {
+			b++
+			continue
+		}
+		if body[b] != quote {
+			continue
+		}
+		if quote == '\'' && b+1 < len(body) && body[b+1] == quote {
+			b++
+			continue
+		}
+		return a, b, quote, storyScalarText(body[a:b], quote) == n.Value
+	}
+	return 0, 0, 0, false
+}
+
+func storyScalarText(raw []byte, quote byte) string {
+	if quote == 0 {
+		return string(raw)
+	}
+	var value string
+	encoded := append([]byte{quote}, raw...)
+	encoded = append(encoded, quote)
+	if yaml.Unmarshal(encoded, &value) != nil {
+		return ""
+	}
+	return value
 }
 
 func (idx StoryIndex) At(offset int) (StorySymbol, bool) {
