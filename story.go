@@ -32,6 +32,8 @@ var storyName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 // IndexStory indexes parsed slide metadata, motion dependencies, local story
 // links and Sirena actor relationships without changing the document's AST.
 // It deliberately uses parsed fences/directives, not searches through prose.
+// Split documents are indexed from a temporary parse of their source, retaining
+// the ranges of metadata fences that slide splitting removes from the AST.
 func IndexStory(doc *Document) StoryIndex {
 	var result StoryIndex
 	if doc == nil || doc.Root == nil {
@@ -40,6 +42,15 @@ func IndexStory(doc *Document) StoryIndex {
 	if doc.SourceHadCarriageReturns() {
 		return result
 	} // normalized offsets cannot edit original CRLF
+	if documentHasSlides(doc.Root) {
+		// SplitSlides discards metadata nodes and separator ranges. Use the
+		// parser's normal bounded path to recover both without altering doc.
+		parsed, err := Parse(doc.Source)
+		if err != nil || parsed == nil || parsed.Root == nil || parsed.SourceHadCarriageReturns() {
+			return result
+		}
+		doc = parsed
+	}
 	add := func(kind, name, scope string, decl bool, start, end int) {
 		result.Symbols = append(result.Symbols, StorySymbol{kind, name, scope, decl, sourceRange(doc.Source, start, end)})
 	}
@@ -94,10 +105,6 @@ func IndexStory(doc *Document) StoryIndex {
 			slide++
 			scope = fmt.Sprintf("slide:%d", slide)
 			continue
-		}
-		if n.Type == NodeSlide {
-			scope = fmt.Sprintf("slide:%d", slide)
-			slide++
 		}
 		visit(n)
 	}

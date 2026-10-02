@@ -1,6 +1,7 @@
 package mdpp
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -220,5 +221,72 @@ func TestStoryYAMLMetadataRenamePreservesCommentsAndQuotes(t *testing.T) {
 		if _, ok := idx.At(comment); ok {
 			t.Fatal("comment is a rename target")
 		}
+	}
+}
+
+func TestStoryIndexSurvivesSlideSplitting(t *testing.T) {
+	source := "---\ntitle: Café\n---\n\n" +
+		"```yaml\nid: opening\ntitle: Café\ncues: [\"café\", overview, 'request'] # request\n```\n\n# First\n\n" +
+		":::motion {cue=request after=overview}\nFirst\n:::\n\n:::motion {after=missing}\nUnresolved\n:::\n\n[Next](#closing/request)\n\n" +
+		"```sirena\nservice api\nclient web\nweb -> api: calls \"Café\"\n```\n\n---\n\n" +
+		"```yml\nid: closing # closing\ncues:\n  - overview\n  - \"request\" # request\n```\n\n# Second\n\n" +
+		":::motion {cue=request after=overview}\nSecond\n:::\n\n[Back](#opening/request)\n\n" +
+		"```sirena\nservice api\nclient web\nweb -> api: calls \"Café\"\n```\n\n---\n\n" +
+		"```yaml\nid: final\ncues: overview, recovery # recovery\n```\n\n:::motion {cue=recovery after=missing}\nFinal\n:::\n\n[Start](#opening/overview)\n"
+	want := IndexStory(MustParse([]byte(source)))
+	ids, requestScopes, actors := map[string]string{}, []string{}, 0
+	for _, symbol := range want.Symbols {
+		if symbol.Declaration {
+			switch symbol.Kind {
+			case "slide":
+				ids[symbol.Name] = symbol.Scope
+			case "cue":
+				if symbol.Name == "request" {
+					requestScopes = append(requestScopes, symbol.Scope)
+				}
+			case "actor":
+				actors++
+			}
+		}
+	}
+	if !reflect.DeepEqual(ids, map[string]string{"opening": "slide:0", "closing": "slide:1", "final": "slide:2"}) ||
+		!reflect.DeepEqual(requestScopes, []string{"slide:0", "slide:1"}) || actors != 4 || len(want.Diagnostics) != 2 {
+		t.Fatalf("incomplete baseline: ids=%v requests=%v actors=%d diagnostics=%+v", ids, requestScopes, actors, want.Diagnostics)
+	}
+	for _, transform := range []struct {
+		name string
+		run  func(*Document)
+	}{
+		{"SplitSlides", func(doc *Document) { SplitSlides(doc) }},
+		{"Document.Slides", func(doc *Document) { doc.Slides() }},
+	} {
+		t.Run(transform.name, func(t *testing.T) {
+			doc := MustParse([]byte(source))
+			transform.run(doc)
+			transform.run(doc) // both public split operations are idempotent
+			before := DumpTreeForSnapshot(doc.Root)
+			got := IndexStory(doc)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("split story index differs\ngot: %+v\nwant: %+v", got, want)
+			}
+			for _, target := range want.Symbols {
+				if found, ok := got.At(target.Range.StartByte); !ok || found != target {
+					t.Fatalf("lost exact source range for %+v", target)
+				}
+				for _, declarations := range []bool{false, true} {
+					if !reflect.DeepEqual(got.References(target, declarations), want.References(target, declarations)) {
+						t.Fatalf("references changed for %+v", target)
+					}
+				}
+				edits, err := got.Rename(target, "updated")
+				wantEdits, wantErr := want.Rename(target, "updated")
+				if !reflect.DeepEqual(edits, wantEdits) || (err == nil) != (wantErr == nil) || (err != nil && err.Error() != wantErr.Error()) {
+					t.Fatalf("rename changed for %+v: edits=%+v err=%v, want edits=%+v err=%v", target, edits, err, wantEdits, wantErr)
+				}
+			}
+			if DumpTreeForSnapshot(doc.Root) != before || string(doc.Source) != source {
+				t.Fatal("index changed the caller's split AST or source")
+			}
+		})
 	}
 }
