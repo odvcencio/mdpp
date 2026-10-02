@@ -1137,6 +1137,11 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			i++
 			continue
 		}
+		if isThematicBreakLine(line.text) {
+			children = append(children, &Node{Type: NodeThematicBreak, Range: sourceRange(source, line.start, line.next)})
+			i++
+			continue
+		}
 		if isMarkdownFenceLine(trimmed) {
 			node, next, ok := fastFenceNode(source, lines, i)
 			if !ok {
@@ -1244,10 +1249,15 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 		literal.WriteString(lines[i].text)
 		literal.WriteByte('\n')
 	}
+	lang, highlights := parseFenceInfo(info)
+	attrs := map[string]string{"language": normalizedFenceLanguage(lang)}
+	if highlights != "" {
+		attrs["highlights"] = highlights
+	}
 	cb := &Node{
 		Type:    NodeCodeBlock,
 		Literal: literal.String(),
-		Attrs:   map[string]string{"language": normalizedFenceLanguage(firstFenceInfoWord(info))},
+		Attrs:   attrs,
 		Range:   sourceRange(source, lines[start].start, lines[end].next),
 	}
 	return codeBlockToDiagram(cb), end + 1, true

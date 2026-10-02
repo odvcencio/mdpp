@@ -1,6 +1,7 @@
 package mdpp
 
 import (
+	"bytes"
 	"hash/fnv"
 	"sync"
 
@@ -83,6 +84,9 @@ func (p *Parser) Parse(source []byte) (*Document, error) {
 		p.lastHits, p.lastMisses = ctx.stats()
 	}()
 	p.prevTree = tree
+	if doc != nil {
+		doc.sourceHadCR = bytes.IndexByte(source, '\r') >= 0
+	}
 	return doc, nil
 }
 
@@ -131,6 +135,9 @@ func (p *Parser) ParseIncremental(source []byte, edit gotreesitter.InputEdit) (*
 		p.lastHits, p.lastMisses = ctx.stats()
 	}()
 	p.prevTree = tree
+	if doc != nil {
+		doc.sourceHadCR = bytes.IndexByte(source, '\r') >= 0
+	}
 	return doc, nil
 }
 

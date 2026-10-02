@@ -25,6 +25,16 @@ func (s *Server) definition(params DefinitionParams) ([]Location, error) {
 	if err != nil {
 		return nil, err
 	}
+	story := storyIndexForSource(doc, source)
+	if target, ok := story.At(offset); ok {
+		var out []Location
+		for _, symbol := range story.References(target, true) {
+			if symbol.Declaration {
+				out = append(out, Location{URI: open.URI, Range: index.RangeToLSP(symbol.Range)})
+			}
+		}
+		return out, nil
+	}
 	for i := len(path) - 1; i >= 0; i-- {
 		n := path[i]
 		switch n.Type {
@@ -52,6 +62,14 @@ func (s *Server) references(params ReferenceParams) ([]Location, error) {
 	doc, source, index, _, offset, path, err := documentPositionContext(open, params.Position)
 	if err != nil {
 		return nil, err
+	}
+	story := storyIndexForSource(doc, source)
+	if target, ok := story.At(offset); ok {
+		var out []Location
+		for _, symbol := range story.References(target, params.Context.IncludeDeclaration) {
+			out = append(out, Location{URI: open.URI, Range: index.RangeToLSP(symbol.Range)})
+		}
+		return out, nil
 	}
 	var locs []Location
 	for i := len(path) - 1; i >= 0; i-- {
@@ -158,9 +176,20 @@ func (s *Server) prepareRename(params TextDocumentPositionParams) (*Range, error
 	if !ok {
 		return nil, nil
 	}
-	_, source, index, _, offset, path, err := documentPositionContext(open, params.Position)
+	doc, source, index, _, offset, path, err := documentPositionContext(open, params.Position)
 	if err != nil {
 		return nil, err
+	}
+	story := storyIndexForSource(doc, source)
+	if target, ok := story.At(offset); ok {
+		if _, err := story.Rename(target, target.Name); err != nil {
+			if story.sourceHadCR {
+				return nil, err
+			}
+			return nil, nil
+		}
+		r := index.RangeToLSP(target.Range)
+		return &r, nil
 	}
 	if target, ok := renameTarget(source, index, offset, path); ok {
 		r := index.RangeToLSP(target.selection)
@@ -177,6 +206,18 @@ func (s *Server) rename(params RenameParams) (*WorkspaceEdit, error) {
 	doc, source, index, _, offset, path, err := documentPositionContext(open, params.Position)
 	if err != nil {
 		return nil, err
+	}
+	story := storyIndexForSource(doc, source)
+	if target, ok := story.At(offset); ok {
+		patches, err := story.Rename(target, params.NewName)
+		if err != nil {
+			return nil, err
+		}
+		edits := make([]TextEdit, 0, len(patches))
+		for _, patch := range patches {
+			edits = append(edits, TextEdit{Range: index.RangeToLSP(patch.Range), NewText: patch.NewText})
+		}
+		return &WorkspaceEdit{Changes: map[DocumentURI][]TextEdit{open.URI: edits}}, nil
 	}
 	target, ok := renameTarget(source, index, offset, path)
 	if !ok {
@@ -701,12 +742,17 @@ func lspSourceRange(source []byte, start int, end int) mdpp.Range {
 	}
 	lineCol := func(offset int) (int, int) {
 		line, col := 1, 1
-		for i := 0; i < offset && i < len(source); i++ {
-			if source[i] == '\n' {
+		for i := 0; i < offset && i < len(source); {
+			if width := sourceLineBreakWidth(source, i); width > 0 {
+				if i+width > offset {
+					break // a byte inside CRLF is still the preceding line end
+				}
+				i += width
 				line++
 				col = 1
 				continue
 			}
+			i++
 			col++
 		}
 		return line, col

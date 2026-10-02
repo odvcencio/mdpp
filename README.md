@@ -135,6 +135,31 @@ out, err := pdf.Render(doc, pdf.Options{
 `URLPolicy` can reject or rewrite URLs after the built-in policy. It can make
 the policy stricter, but cannot re-enable a blocked scheme.
 
+## Story authoring
+
+The LSP understands authored slide IDs and named cues in parsed YAML fences,
+`cue`/`after` motion attributes, local `#slide/cue` links, and actor declarations
+and edge endpoints inside Sirena fences. Definition, references and rename use
+exact byte ranges; actor names stay scoped to their diagram. Unknown references
+and duplicate slide IDs produce diagnostics before presentation.
+YAML comments are excluded. Plain and quoted scalar names, comma-separated cues,
+and cue lists retain exact edit ranges, including UTF-8 and escaped names.
+Aliases, folded/literal scalars and noncontiguous spellings without safe ranges
+remain unindexed.
+
+The core API is `IndexStory(doc)`. Its symbols expose kind, scope, declaration
+status and source range against normalized `Document.Source`, matching the AST.
+Read-only indexing, references and diagnostics support LF, CRLF, CR and mixed
+line endings, including after slide splitting. The LSP maps story ranges to
+the editor's original source and UTF-16 positions. `Rename` rejects ambiguous
+declarations and collisions.
+`EditDirectiveAttributes(doc, openingByte, changes)` edits parsed directive
+openings while retaining spacing, quote style, other attributes and the body.
+Both APIs keep the core free of a Sirena dependency. Diagram semantic validation
+still belongs to the supplied Sirena renderer. Source edits currently require LF
+input; `Rename`, `EditDirectiveAttributes` and LSP story rename reject input
+containing carriage returns rather than apply normalized offsets to original bytes.
+
 ## What Ships
 
 | Area | Support |
