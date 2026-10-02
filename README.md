@@ -149,10 +149,10 @@ remain unindexed.
 
 The core API is `IndexStory(doc)`. Its symbols expose kind, scope, declaration
 status and source range against normalized `Document.Source`, matching the AST.
-Read-only indexing, references and diagnostics support LF and CRLF input,
-including after slide splitting. The LSP maps story ranges to the editor's
-original source and UTF-16 positions. `Rename` rejects ambiguous declarations
-and collisions.
+Read-only indexing, references and diagnostics support LF, CRLF, CR and mixed
+line endings, including after slide splitting. The LSP maps story ranges to
+the editor's original source and UTF-16 positions. `Rename` rejects ambiguous
+declarations and collisions.
 `EditDirectiveAttributes(doc, openingByte, changes)` edits parsed directive
 openings while retaining spacing, quote style, other attributes and the body.
 Both APIs keep the core free of a Sirena dependency. Diagram semantic validation

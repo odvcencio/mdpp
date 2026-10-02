@@ -742,12 +742,17 @@ func lspSourceRange(source []byte, start int, end int) mdpp.Range {
 	}
 	lineCol := func(offset int) (int, int) {
 		line, col := 1, 1
-		for i := 0; i < offset && i < len(source); i++ {
-			if source[i] == '\n' {
+		for i := 0; i < offset && i < len(source); {
+			if width := sourceLineBreakWidth(source, i); width > 0 {
+				if i+width > offset {
+					break // a byte inside CRLF is still the preceding line end
+				}
+				i += width
 				line++
 				col = 1
 				continue
 			}
+			i++
 			col++
 		}
 		return line, col

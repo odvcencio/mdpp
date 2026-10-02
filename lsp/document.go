@@ -345,11 +345,30 @@ func parseDocumentWithTree(source []byte) (*mdpp.Document, *gotreesitter.Tree) {
 	return doc, tree
 }
 
+// sourceLineBreakWidth follows the LSP line-ending rules: CRLF is one break,
+// and LF or a lone CR is one break. The offset must be within source.
+func sourceLineBreakWidth(source []byte, offset int) int {
+	switch source[offset] {
+	case '\r':
+		if offset+1 < len(source) && source[offset+1] == '\n' {
+			return 2
+		}
+		return 1
+	case '\n':
+		return 1
+	default:
+		return 0
+	}
+}
+
 func NewLineIndex(source []byte) *LineIndex {
 	starts := []int{0}
-	for i, b := range source {
-		if b == '\n' {
-			starts = append(starts, i+1)
+	for i := 0; i < len(source); {
+		if width := sourceLineBreakWidth(source, i); width > 0 {
+			i += width
+			starts = append(starts, i)
+		} else {
+			i++
 		}
 	}
 	return &LineIndex{
@@ -386,6 +405,9 @@ func (i *LineIndex) OffsetToPosition(offset int) Position {
 	}
 	line := i.lineForOffset(offset)
 	start := i.lineStarts[line]
+	if end := i.lineContentEnd(line); offset > end {
+		offset = end // bytes inside CRLF map to the same valid line-end position
+	}
 	col := byteColumnToUTF16(i.source[start:offset])
 	return Position{Line: uint32(line), Character: uint32(col)}
 }
@@ -482,10 +504,10 @@ func (i *LineIndex) lineContentEnd(line int) int {
 	if line+1 < len(i.lineStarts) {
 		end = i.lineStarts[line+1]
 	}
-	if end > 0 && end <= len(i.source) && i.source[end-1] == '\n' {
+	if end > i.lineStarts[line] && i.source[end-1] == '\n' {
 		end--
 	}
-	if end > 0 && end <= len(i.source) && i.source[end-1] == '\r' {
+	if end > i.lineStarts[line] && i.source[end-1] == '\r' {
 		end--
 	}
 	return end

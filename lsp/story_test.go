@@ -34,7 +34,7 @@ func TestStoryDefinitionReferencesAndRename(t *testing.T) {
 	}
 }
 
-func TestStoryCRLFReadOnlyPositionsAndEditSafety(t *testing.T) {
+func TestStoryLineEndingsReadOnlyPositionsAndEditSafety(t *testing.T) {
 	const lf = "```yaml\nid: opening\ntitle: Café\ncues: [\"😀\", overview, 'request'] # request\n```\n\n# Café\n\n" +
 		":::motion {note=\"😀 Café\" cue=done after=request}\nx\n:::\n\n" +
 		":::motion {note=\"😀 Café\" after=missing}\nx\n:::\n\n[😀 Café](#opening/request)\n\n" +
@@ -90,7 +90,7 @@ func TestStoryCRLFReadOnlyPositionsAndEditSafety(t *testing.T) {
 			selection, err := s.prepareRename(TextDocumentPositionParams{TextDocument: TextDocumentIdentifier{URI: uri}, Position: position})
 			if carriageReturns {
 				if selection != nil || err == nil || !strings.Contains(err.Error(), "LF input") {
-					t.Fatalf("prepareRename did not reject CRLF: %v %v", selection, err)
+					t.Fatalf("prepareRename did not reject carriage returns: %v %v", selection, err)
 				}
 			} else if selection == nil || err != nil {
 				t.Fatalf("LF prepareRename failed: %v %v", selection, err)
@@ -98,7 +98,7 @@ func TestStoryCRLFReadOnlyPositionsAndEditSafety(t *testing.T) {
 			edit, err := s.rename(RenameParams{TextDocument: TextDocumentIdentifier{URI: uri}, Position: position, NewName: "updated"})
 			if carriageReturns {
 				if edit != nil || err == nil || !strings.Contains(err.Error(), "LF input") {
-					t.Fatalf("rename did not reject CRLF: %v %v", edit, err)
+					t.Fatalf("rename did not reject carriage returns: %v %v", edit, err)
 				}
 			} else if err != nil || len(edit.Changes[uri]) != target.count {
 				t.Fatalf("LF rename failed: %v %v", edit, err)
@@ -128,8 +128,93 @@ func TestStoryCRLFReadOnlyPositionsAndEditSafety(t *testing.T) {
 		return out
 	}
 	want := collect(t, lf, false)
-	got := collect(t, strings.ReplaceAll(lf, "\n", "\r\n"), true)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("CRLF read-only responses differ\ngot %+v\nwant %+v", got, want)
+	var mixed strings.Builder
+	for i, line := range strings.SplitAfter(lf, "\n") {
+		mixed.WriteString(strings.TrimSuffix(line, "\n"))
+		if strings.HasSuffix(line, "\n") {
+			ending := []string{"\r", "\n", "\r\n"}[i%3]
+			if line == "\n" && ending == "\n" {
+				ending = "\r\n" // do not merge the prior CR with an empty LF line
+			}
+			mixed.WriteString(ending)
+		}
+	}
+	for _, tc := range []struct{ name, source string }{
+		{"CRLF", strings.ReplaceAll(lf, "\n", "\r\n")},
+		{"CR", strings.ReplaceAll(lf, "\n", "\r")},
+		{"mixed", mixed.String()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := collect(t, tc.source, true)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("read-only responses differ\ngot %+v\nwant %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestLineIndexLineEndingBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		endings []string
+	}{
+		{"LF", []string{"\n", "\n", "\n"}},
+		{"CRLF", []string{"\r\n", "\r\n", "\r\n"}},
+		{"CR", []string{"\r", "\r", "\r"}},
+		{"mixed", []string{"\r\n", "\r", "\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := []string{"😀", "é", "x"}
+			source := lines[0] + tc.endings[0] + lines[1] + tc.endings[1] + lines[2] + tc.endings[2]
+			index := NewLineIndex([]byte(source))
+			start := 0
+			for line, text := range lines {
+				end := start + len(text)
+				next := end + len(tc.endings[line])
+				width := uint32(len(utf16.Encode([]rune(text))))
+				positions := []struct {
+					offset int
+					pos    Position
+				}{
+					{start, Position{Line: uint32(line)}},
+					{end, Position{Line: uint32(line), Character: width}},
+					{next, Position{Line: uint32(line + 1)}},
+				}
+				for _, point := range positions {
+					if got := index.OffsetToPosition(point.offset); got != point.pos {
+						t.Fatalf("offset %d: got %+v, want %+v", point.offset, got, point.pos)
+					}
+					if got, ok := index.PositionToOffset(point.pos); !ok || got != point.offset {
+						t.Fatalf("position %+v: got %d/%v, want %d", point.pos, got, ok, point.offset)
+					}
+				}
+				for offset := end; offset < next; offset++ {
+					pos := index.OffsetToPosition(offset)
+					if pos != (Position{Line: uint32(line), Character: width}) {
+						t.Fatalf("terminator byte %d returned invalid position %+v", offset, pos)
+					}
+					if got, ok := index.PositionToOffset(pos); !ok || got != end {
+						t.Fatalf("terminator position did not map to canonical content end: %d/%v", got, ok)
+					}
+					r := lspSourceRange([]byte(source), offset, offset)
+					if r.StartLine != line+1 || r.StartCol != len(text)+1 {
+						t.Fatalf("terminator range metadata differs from position: %+v", r)
+					}
+				}
+				if got, ok := index.PositionToOffset(Position{Line: uint32(line), Character: width + 1}); ok || got != end {
+					t.Fatalf("position beyond content accepted: %d/%v", got, ok)
+				}
+				if got, ok := index.LinePrefix(Position{Line: uint32(line), Character: width}); !ok || got != text {
+					t.Fatalf("line prefix includes terminator: %q/%v", got, ok)
+				}
+				if index.LineContentEndForOffset(start) != end || index.NextLineStartAfterOffset(start) != next {
+					t.Fatal("incorrect content or next-line boundary")
+				}
+				start = next
+			}
+			if index.LineContentEndForOffset(len(source)) != len(source) {
+				t.Fatal("trailing empty line consumed the preceding terminator")
+			}
+		})
 	}
 }

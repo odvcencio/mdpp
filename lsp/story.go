@@ -49,17 +49,14 @@ func storyIndexForSource(doc *mdpp.Document, source []byte) storySourceIndex {
 	original, normalized, line, col := 0, 0, 1, 1
 	for _, point := range points {
 		for normalized < point.offset && original < len(source) {
-			if source[original] == '\r' && original+1 < len(source) && source[original+1] == '\n' {
-				original++
-				col++
-			}
-			if source[original] == '\n' {
+			if width := sourceLineBreakWidth(source, original); width > 0 {
+				original += width
 				line++
 				col = 1
 			} else {
+				original++
 				col++
 			}
-			original++
 			normalized++
 		}
 		*point.byte, *point.line, *point.col = original, line, col
