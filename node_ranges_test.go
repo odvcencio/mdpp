@@ -36,10 +36,16 @@ func checkNodeRanges(doc *Document) []string {
 		if !rangeExempt(n, ancestors) && n.Type != NodeDocument {
 			r := n.Range
 			switch {
-			case r.StartLine == 0 || r.EndByte <= r.StartByte:
+			case r.StartLine == 0 || (r.EndByte <= r.StartByte && !(n.Type == NodeText && n.Literal == "" && r.EndByte == r.StartByte)):
 				problems = append(problems, fmt.Sprintf("%v %q has the empty range %+v", n.Type, n.Literal, r))
+			case r.StartByte < 0 || r.StartByte > r.EndByte:
+				problems = append(problems, fmt.Sprintf("%v %q range %d-%d is reversed", n.Type, n.Literal, r.StartByte, r.EndByte))
 			case r.EndByte > len(doc.Source):
 				problems = append(problems, fmt.Sprintf("%v %q ends at %d, past the source (%d bytes)", n.Type, n.Literal, r.EndByte, len(doc.Source)))
+			case !pointMatches(doc.Source, r.StartByte, r.StartLine, r.StartCol):
+				problems = append(problems, fmt.Sprintf("%v %q starts at byte %d but says line %d column %d", n.Type, n.Literal, r.StartByte, r.StartLine, r.StartCol))
+			case !pointMatches(doc.Source, r.EndByte, r.EndLine, r.EndCol):
+				problems = append(problems, fmt.Sprintf("%v %q ends at byte %d but says line %d column %d", n.Type, n.Literal, r.EndByte, r.EndLine, r.EndCol))
 			case parent != nil && parent.Type != NodeDocument && parent.Range.StartLine != 0 &&
 				(r.StartByte < parent.Range.StartByte || r.EndByte > parent.Range.EndByte):
 				problems = append(problems, fmt.Sprintf("%v %q range %d-%d lies outside its parent %v %d-%d", n.Type, n.Literal, r.StartByte, r.EndByte, parent.Type, parent.Range.StartByte, parent.Range.EndByte))
@@ -53,8 +59,19 @@ func checkNodeRanges(doc *Document) []string {
 	return problems
 }
 
+// pointMatches reports whether the 1-indexed line and byte column are those of
+// the byte offset in source.
+func pointMatches(source []byte, offset, line, col int) bool {
+	if offset < 0 || offset > len(source) {
+		return false
+	}
+	wantLine := 1 + strings.Count(string(source[:offset]), "\n")
+	wantCol := offset - (strings.LastIndex(string(source[:offset]), "\n") + 1) + 1
+	return line == wantLine && col == wantCol
+}
+
 func TestNodeRangesPointIntoSource(t *testing.T) {
-	inputs := append(conformanceInputs(t), differentialInputs()...)
+	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
 	failures := map[string]string{}
 	for _, src := range inputs {
 		doc, err := Parse([]byte(src))
