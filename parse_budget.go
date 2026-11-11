@@ -32,6 +32,8 @@ type ParseOptions struct {
 	// input-size-based default. ParseContext also honors an earlier context
 	// deadline or cancellation.
 	Deadline time.Duration
+	// Profile selects the dialect to read. The zero value is Markdown++.
+	Profile ParseProfile
 }
 
 type parseBudget struct {

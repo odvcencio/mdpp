@@ -58,7 +58,7 @@ func parseLeadingThematicBreaks(source []byte, ctx *parseCtx) *Document {
 			blockChunk{start: lines[i].start, end: len(source), startLine: i + 1, startCol: 1}, ctx)
 	}
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: children, Range: sourceRange(source, 0, len(source))}, Source: source, diagnostics: diagnostics, linkRefDefs: refs}
-	doc.extractFrontmatter()
-	postProcess(doc)
+	doc.extractFrontmatterCtx(ctx)
+	postProcess(doc, ctx)
 	return doc
 }

@@ -8,8 +8,15 @@ import (
 // postProcess walks the AST after parsing and applies Markdown++ transformations.
 // Task lists and subscripts are handled during parsing (convertListItem and
 // strikethrough detection respectively), so they are not processed here.
-func postProcess(doc *Document) {
+func postProcess(doc *Document, ctx *parseCtx) {
 	if doc == nil || doc.Root == nil {
+		return
+	}
+	if ctx != nil {
+		doc.profile = ctx.profile
+	}
+	if doc.profile == ProfileGFM {
+		postProcessGFM(doc)
 		return
 	}
 	flattenDocumentNodes(doc.Root)
@@ -1272,4 +1279,23 @@ func extendIndentedCodeRanges(doc *Document) {
 			n.Range = sourceRange(doc.Source, lineStart, n.Range.EndByte)
 		}
 	}
+}
+
+// postProcessGFM is postProcess for the GFM profile: the repairs of the
+// CommonMark reading stay, and every Markdown++ pass is off (see
+// ProfileGFM).
+func postProcessGFM(doc *Document) {
+	flattenDocumentNodes(doc.Root)
+	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
+		if n.Type == NodeBlockquote {
+			stripQuoteContinuationMarkers(n)
+		}
+		return true
+	})
+	repairStandaloneHTMLBlocks(doc)
+	trimHeadingRanges(doc)
+	extendIndentedCodeRanges(doc)
+	annotateListTightness(doc)
+	repairListCodeTabs(doc)
+	processReferenceLinks(doc)
 }

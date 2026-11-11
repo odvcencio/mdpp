@@ -185,7 +185,7 @@ func BenchmarkMarkdownCachedASTPostProcess256KiB(b *testing.B) {
 		root := convertBlockCtx(bound, bound.RootNode(), source, ctx)
 		doc := &Document{Root: root, Source: source}
 		doc.extractFrontmatter()
-		postProcess(doc)
+		postProcess(doc, nil)
 	}
 }
 

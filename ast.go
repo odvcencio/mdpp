@@ -125,6 +125,15 @@ type Document struct {
 	linkRefDefs     map[string]linkRefDef
 	diagnostics     []Diagnostic
 	sourceHadCR     bool
+	profile         ParseProfile
+}
+
+// Profile returns the dialect that the document was parsed as.
+func (d *Document) Profile() ParseProfile {
+	if d == nil {
+		return ProfileMarkdownPlus
+	}
+	return d.profile
 }
 
 // SourceHadCarriageReturns reports whether the input to Parse contained CR

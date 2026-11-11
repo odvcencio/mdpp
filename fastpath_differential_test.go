@@ -49,10 +49,17 @@ func writeFullNode(sb *strings.Builder, n *Node, depth int) {
 	}
 }
 
+// differentialProfile is the profile the differential comparison parses in.
+var differentialProfile ParseProfile
+
+func parseInProfile(src string) (*Document, error) {
+	return ParseWithOptions([]byte(src), ParseOptions{Profile: differentialProfile})
+}
+
 func parseTreeWithFastPath(src string, fast bool) *Node {
 	fastBlockChunkDisabled = !fast
 	defer func() { fastBlockChunkDisabled = false }()
-	doc, err := Parse([]byte(src))
+	doc, err := parseInProfile(src)
 	if err != nil || doc == nil {
 		return nil
 	}
@@ -62,7 +69,7 @@ func parseTreeWithFastPath(src string, fast bool) *Node {
 func parseWithFastPath(src string, fast bool) (dump string) {
 	fastBlockChunkDisabled = !fast
 	defer func() { fastBlockChunkDisabled = false }()
-	doc, err := Parse([]byte(src))
+	doc, err := parseInProfile(src)
 	if err != nil || doc == nil {
 		return "error"
 	}
@@ -260,6 +267,16 @@ func isKnownFastPathDifference(src string) bool {
 }
 
 func TestFastPathMatchesFullParser(t *testing.T) {
+	for _, profile := range []ParseProfile{ProfileMarkdownPlus, ProfileGFM} {
+		t.Run(profile.String(), func(t *testing.T) {
+			differentialProfile = profile
+			defer func() { differentialProfile = ProfileMarkdownPlus }()
+			checkFastPathMatchesFullParser(t)
+		})
+	}
+}
+
+func checkFastPathMatchesFullParser(t *testing.T) {
 	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
 	dumpWithoutRanges = os.Getenv("MDPP_FASTPATH_NORANGES") != ""
 	defer func() { dumpWithoutRanges = false }()

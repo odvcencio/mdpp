@@ -101,10 +101,11 @@ func ParseContextWithOptions(ctx context.Context, source []byte, options ParseOp
 		}
 		if doc != nil {
 			doc.sourceHadCR = sourceHadCR
+			doc.profile = options.Profile
 		}
 	}()
 	budget := newParseBudget(ctx, len(source), options)
-	parseCtx := &parseCtx{budget: budget}
+	parseCtx := &parseCtx{budget: budget, profile: options.Profile}
 	if !budget.reserveParserWork(len(source)) {
 		return budgetFallback(source, budget), nil
 	}
@@ -282,7 +283,9 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 	// to the lowered copy that the grammar reads.
 	original := source
 	var inserts []int
-	if _, frontmatterEnd, ok := parseFrontmatter(source, nil); ok {
+	if ctx.gfm() {
+		// GFM has no alerts to lower and no front matter to skip.
+	} else if _, frontmatterEnd, ok := parseFrontmatter(source, nil); ok {
 		body, bodyInserts := lowerMarkdownPlusSource(source[frontmatterEnd:])
 		if len(bodyInserts) > 0 {
 			preserved := append([]byte(nil), source[:frontmatterEnd]...)
@@ -329,7 +332,7 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 	}
 	if hasProblematicLongLine(source, maxGLRLineBytes) {
 		releasePrev()
-		doc := parseLongLineFallback(source)
+		doc := parseLongLineFallback(source, ctx)
 		if topLevel && ctx != nil {
 			ctx.cache.pruneNotIn(ctx.seen)
 		}
@@ -337,7 +340,7 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 	}
 	candidate := bytes.TrimSpace(source)
 	if len(candidate) > 0 && candidate[0] == '[' && bytes.Contains(candidate, []byte("]:")) {
-		if doc := parseOnlyReferenceDefinitions(source); doc != nil {
+		if doc := parseOnlyReferenceDefinitions(source, ctx); doc != nil {
 			releasePrev()
 			if topLevel && ctx != nil {
 				ctx.cache.pruneNotIn(ctx.seen)
@@ -358,7 +361,7 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 	// (punctuation leaves instead of an indented_code_block). Fall back to
 	// a synthetic NodeCodeBlock when every non-blank line in the source is
 	// indented 4+ spaces or a leading tab.
-	if doc := parseAllIndentedDocument(source); doc != nil {
+	if doc := parseAllIndentedDocument(source, ctx); doc != nil {
 		releasePrev()
 		if topLevel && ctx != nil {
 			ctx.cache.pruneNotIn(ctx.seen)
@@ -477,15 +480,15 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 		})
 	}
 	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode())
-	doc.extractFrontmatter()
-	postProcess(doc)
+	doc.extractFrontmatterCtx(ctx)
+	postProcess(doc, ctx)
 	if topLevel && ctx != nil {
 		ctx.cache.pruneNotIn(ctx.seen)
 	}
 	return doc, tree
 }
 
-func parseOnlyReferenceDefinitions(source []byte) *Document {
+func parseOnlyReferenceDefinitions(source []byte, ctx *parseCtx) *Document {
 	parseSource := append(append([]byte(nil), source...), '\n')
 	tree, err := parsePooled(blockLang(), mdEntry, parseSource)
 	if err != nil || tree == nil {
@@ -517,8 +520,8 @@ func parseOnlyReferenceDefinitions(source []byte) *Document {
 	}
 	root.Range = sourceRange(source, 0, len(source))
 	doc := &Document{Root: root, Source: source, linkRefDefs: collectLinkRefDefs(bt, bt.RootNode())}
-	doc.extractFrontmatter()
-	postProcess(doc)
+	doc.extractFrontmatterCtx(ctx)
+	postProcess(doc, ctx)
 	return doc
 }
 
@@ -818,7 +821,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 		remapQuoteRanges(quote, source, lines, contentLines, offsets)
 	}
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{quote}, Range: sourceRange(source, 0, len(source))}, Source: source}
-	doc.extractFrontmatter()
+	doc.extractFrontmatterCtx(ctx)
 	return doc
 }
 
@@ -1052,7 +1055,7 @@ type problematicLine struct {
 // document, then replaces each containing top-level block with its original
 // source as escaped paragraph text. The same byte lengths keep tree ranges
 // stable, and unaffected blocks retain their normal structure.
-func parseLongLineFallback(source []byte) *Document {
+func parseLongLineFallback(source []byte, ctx *parseCtx) *Document {
 	lines := problematicLongLines(source, maxGLRLineBytes)
 	masked := append([]byte(nil), source...)
 	for _, line := range lines {
@@ -1184,8 +1187,8 @@ func parseSegmentedDocumentCtx(source []byte, ctx *parseCtx) *Document {
 		diagnostics: diagnostics,
 		linkRefDefs: linkRefs,
 	}
-	doc.extractFrontmatter()
-	postProcess(doc)
+	doc.extractFrontmatterCtx(ctx)
+	postProcess(doc, ctx)
 	return doc
 }
 
@@ -1352,7 +1355,7 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			continue
 		}
 		if isMarkdownFenceLine(trimmed) {
-			node, next, ok := fastFenceNode(source, lines, i)
+			node, next, ok := fastFenceNode(source, lines, i, ctx)
 			if !ok {
 				return nil, false
 			}
@@ -1419,8 +1422,9 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			i++
 			continue
 		}
-		if isLikelyReferenceDefinitionLine(trimmed) || strings.HasPrefix(trimmed, "<") {
-			return nil, false
+		if isLikelyReferenceDefinitionLine(trimmed) || strings.HasPrefix(trimmed, "<") ||
+			(ctx.gfm() && strings.HasPrefix(trimmed, "[^") && strings.Contains(trimmed, "]:")) {
+			return nil, false // in GFM "[^1]: x" is a link reference definition
 		}
 
 		para, next := fastParagraphNode(source, lines, i, ctx)
@@ -1451,8 +1455,8 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 		i = next
 	}
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: children, Range: sourceRange(source, 0, len(source))}, Source: source}
-	doc.extractFrontmatter()
-	postProcess(doc)
+	doc.extractFrontmatterCtx(ctx)
+	postProcess(doc, ctx)
 	return doc, true
 }
 
@@ -1478,7 +1482,7 @@ func fastHeadingLevel(line string) int {
 	return level
 }
 
-func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bool) {
+func fastFenceNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int, bool) {
 	open := strings.TrimSpace(lines[start].text)
 	fenceChar := open[0]
 	fenceLen := 0
@@ -1508,7 +1512,7 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 	if language := normalizedFenceLanguage(lang); language != "" {
 		attrs["language"] = language
 	}
-	if highlights != "" {
+	if highlights != "" && !ctx.gfm() {
 		attrs["highlights"] = highlights
 	}
 	cb := &Node{
@@ -1516,6 +1520,9 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 		Literal: literal.String(),
 		Attrs:   attrs,
 		Range:   sourceRange(source, lines[start].start, lines[end].next),
+	}
+	if ctx.gfm() {
+		return cb, end + 1, true
 	}
 	return codeBlockToDiagram(cb), end + 1, true
 }
@@ -1849,6 +1856,9 @@ func isLikelyReferenceDefinitionLine(line string) bool {
 }
 
 func fastFootnoteDefinitionNode(source []byte, line sourceLine, ctx *parseCtx) *Node {
+	if ctx.gfm() {
+		return nil // a link reference definition in GFM
+	}
 	match := footnoteDefinitionRawRe.FindStringSubmatchIndex(line.text)
 	if match == nil {
 		return nil
@@ -1870,7 +1880,7 @@ func fastParagraphNode(source []byte, lines []sourceLine, start int, ctx *parseC
 		if end > start && isThematicBreakLine(lines[end].text) && !isSetextUnderlineLine([]byte(lines[end].text)) {
 			break
 		}
-		if end > start && htmlBlockStart(lines[end].text, false) != "" {
+		if end > start && htmlBlockStart(lines[end].text, false, ctx.gfm()) != "" {
 			break // an HTML block of start condition 1 to 6 interrupts a paragraph
 		}
 		if trimmed == "" || isATXHeadingLine([]byte(lines[end].text)) || isMarkdownFenceLine(trimmed) ||
@@ -1905,6 +1915,9 @@ func parseContainerDocument(source []byte) *Document {
 }
 
 func parseContainerDocumentCtx(source []byte, ctx *parseCtx) *Document {
+	if ctx.gfm() {
+		return nil // ":::note" is text in GFM
+	}
 	if !bytes.Contains(source, []byte(":::")) {
 		return nil
 	}
@@ -1915,7 +1928,7 @@ func parseContainerDocumentCtx(source []byte, ctx *parseCtx) *Document {
 	}
 	root := &Node{Type: NodeDocument, Children: children, Range: sourceRange(source, 0, len(source))}
 	doc := &Document{Root: root, Source: source, diagnostics: diagnostics}
-	doc.extractFrontmatter()
+	doc.extractFrontmatterCtx(ctx)
 	processTOC(doc)
 	return doc
 }
@@ -2441,7 +2454,7 @@ func isMarkdownFenceLine(line string) bool {
 // or a leading tab. tree-sitter-markdown does not emit indented_code_block
 // for this shape; CommonMark spec does (§ 4.4 allows them at document
 // start).
-func parseAllIndentedDocument(source []byte) *Document {
+func parseAllIndentedDocument(source []byte, ctx *parseCtx) *Document {
 	text := strings.TrimRight(string(source), "\n")
 	if text == "" {
 		return nil
@@ -2475,7 +2488,7 @@ func parseAllIndentedDocument(source []byte) *Document {
 		Range:   sourceRange(source, 0, len(source)),
 	}
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{code}, Range: sourceRange(source, 0, len(source))}, Source: source}
-	doc.extractFrontmatter()
+	doc.extractFrontmatterCtx(ctx)
 	return doc
 }
 
@@ -2592,7 +2605,7 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 	}
 	fitNestedListRanges(rootList, source)
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{rootList}, Range: sourceRange(source, 0, len(source))}, Source: source}
-	postProcess(doc)
+	postProcess(doc, ctx)
 	return doc
 }
 
@@ -2860,7 +2873,7 @@ func clearNodeRanges(root *Node) {
 	})
 }
 
-func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ string) *Node {
+func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ string, ctx *parseCtx) *Node {
 	cb := newNodeFromTree(NodeCodeBlock, n)
 	cb.Attrs = make(map[string]string)
 	for i := 0; i < n.ChildCount(); i++ {
@@ -2876,7 +2889,7 @@ func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ stri
 			if lang != "" {
 				cb.Attrs["language"] = lang
 			}
-			if highlights != "" {
+			if highlights != "" && !ctx.gfm() {
 				cb.Attrs["highlights"] = highlights
 			}
 		case "code_fence_content":
@@ -2885,6 +2898,9 @@ func convertCodeBlock(bt *gotreesitter.BoundTree, n *gotreesitter.Node, typ stri
 	}
 	if typ == "indented_code_block" {
 		cb.Literal = stripIndentedCodeBlock(bt.NodeText(n))
+	}
+	if ctx.gfm() {
+		return cb // a diagram fence is a code block in GFM
 	}
 	return codeBlockToDiagram(cb)
 }
@@ -3567,7 +3583,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 		return para
 
 	case "fenced_code_block", "indented_code_block":
-		return convertCodeBlock(bt, n, typ)
+		return convertCodeBlock(bt, n, typ, ctx)
 
 	case "block_quote":
 		bq := newNodeFromTree(NodeBlockquote, n)
@@ -3617,7 +3633,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 
 	case "link_reference_definition":
 		raw := strings.TrimRight(bt.NodeText(n), "\n")
-		if match := footnoteDefinitionRawRe.FindStringSubmatchIndex(raw); match != nil {
+		if match := footnoteDefinitionRawRe.FindStringSubmatchIndex(raw); match != nil && !ctx.gfm() {
 			fn := newNodeFromTree(NodeFootnoteDef, n)
 			fn.Attrs = map[string]string{"id": raw[match[2]:match[3]]}
 			if body := raw[match[4]:match[5]]; strings.TrimSpace(body) != "" {
@@ -3643,7 +3659,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 			}
 		}
 		// Footnote defs have labels like [^id]
-		if match := footnoteDefinitionLabelRe.FindStringSubmatch(label); match != nil {
+		if match := footnoteDefinitionLabelRe.FindStringSubmatch(label); match != nil && !ctx.gfm() {
 			fn := newNodeFromTree(NodeFootnoteDef, n)
 			fn.Attrs = map[string]string{"id": match[1]}
 			if strings.TrimSpace(dest) != "" {
@@ -3744,6 +3760,9 @@ func parseFootnoteDefinitionInline(text string, source []byte, baseOffset int, c
 // convertFootnoteDefinitionParagraph reads a paragraph made only of footnote
 // definition lines. baseOffset is the byte offset of text in source, or -1.
 func convertFootnoteDefinitionParagraph(text string, source []byte, baseOffset int, ctx *parseCtx) *Node {
+	if ctx.gfm() {
+		return nil
+	}
 	if !strings.Contains(text, "[^") {
 		return nil
 	}
@@ -4027,7 +4046,7 @@ func parseInlineBaseAt(text string, source []byte, baseOffset int, ctx *parseCtx
 	if !needsInlineTreeParser(text) {
 		return splitTextNewlines([]*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))})
 	}
-	if nodes, ok := parseInlineSimpleAt(text, source, baseOffset); ok {
+	if nodes, ok := parseInlineSimpleAt(text, source, baseOffset, ctx.gfm()); ok {
 		return splitTextNewlines(nodes)
 	}
 	if len(text) > maxInlineParseChunk {
@@ -4061,7 +4080,7 @@ func needsInlineTreeParser(text string) bool {
 	return strings.ContainsAny(text, "*_`[<\\~")
 }
 
-func parseInlineSimpleAt(text string, source []byte, baseOffset int) ([]*Node, bool) {
+func parseInlineSimpleAt(text string, source []byte, baseOffset int, gfm bool) ([]*Node, bool) {
 	if strings.Contains(text, "  \n") || strings.Contains(text, "\\\n") {
 		return nil, false
 	}
@@ -4124,7 +4143,7 @@ func parseInlineSimpleAt(text string, source []byte, baseOffset int) ([]*Node, b
 				end := strings.Index(text[i+2:], "**")
 				if end >= 0 {
 					end += i + 2
-					children, ok := parseInlineSimpleAt(text[i+2:end], source, addBaseOffset(baseOffset, i+2))
+					children, ok := parseInlineSimpleAt(text[i+2:end], source, addBaseOffset(baseOffset, i+2), gfm)
 					if !ok {
 						return nil, false
 					}
@@ -4146,7 +4165,7 @@ func parseInlineSimpleAt(text string, source []byte, baseOffset int) ([]*Node, b
 				i = end + 1
 				continue
 			}
-			children, ok := parseInlineSimpleAt(text[i+1:end], source, addBaseOffset(baseOffset, i+1))
+			children, ok := parseInlineSimpleAt(text[i+1:end], source, addBaseOffset(baseOffset, i+1), gfm)
 			if !ok {
 				return nil, false
 			}
@@ -4174,8 +4193,9 @@ func parseInlineSimpleAt(text string, source []byte, baseOffset int) ([]*Node, b
 				i = end + len(delim)
 				continue
 			}
-			if double {
-				children, ok := parseInlineSimpleAt(text[contentStart:end], source, addBaseOffset(baseOffset, contentStart))
+			if double || gfm {
+				// GFM reads one tilde pair as strikethrough, too.
+				children, ok := parseInlineSimpleAt(text[contentStart:end], source, addBaseOffset(baseOffset, contentStart), gfm)
 				if !ok {
 					return nil, false
 				}
@@ -4191,7 +4211,7 @@ func parseInlineSimpleAt(text string, source []byte, baseOffset int) ([]*Node, b
 			i = end + len(delim)
 		case '!':
 			if i+1 < len(text) && text[i+1] == '[' {
-				n, next, ok := parseSimpleImage(text, source, baseOffset, i)
+				n, next, ok := parseSimpleImage(text, source, baseOffset, i, gfm)
 				if !ok {
 					return nil, false
 				}
@@ -4204,7 +4224,7 @@ func parseInlineSimpleAt(text string, source []byte, baseOffset int) ([]*Node, b
 			appendTextRange(&nodes, text[i:i+1], inlineSpanRange(source, baseOffset, i, i+1))
 			i++
 		case '[':
-			n, next, ok := parseSimpleLink(text, source, baseOffset, i)
+			n, next, ok := parseSimpleLink(text, source, baseOffset, i, gfm)
 			if !ok {
 				return nil, false
 			}
@@ -4258,14 +4278,14 @@ func addBaseOffset(baseOffset int, delta int) int {
 	return baseOffset + delta
 }
 
-func parseSimpleLink(text string, source []byte, baseOffset int, start int) (*Node, int, bool) {
+func parseSimpleLink(text string, source []byte, baseOffset int, start int, gfm bool) (*Node, int, bool) {
 	close := strings.IndexByte(text[start+1:], ']')
 	if close < 0 {
 		return nil, start, true
 	}
 	close += start + 1
 	label := text[start+1 : close]
-	labelChildren, ok := parseInlineSimpleAt(label, source, addBaseOffset(baseOffset, start+1))
+	labelChildren, ok := parseInlineSimpleAt(label, source, addBaseOffset(baseOffset, start+1), gfm)
 	if !ok {
 		return nil, 0, false
 	}
@@ -4293,7 +4313,7 @@ func parseSimpleLink(text string, source []byte, baseOffset int, start int) (*No
 	return link, close + 1, true
 }
 
-func parseSimpleImage(text string, source []byte, baseOffset int, start int) (*Node, int, bool) {
+func parseSimpleImage(text string, source []byte, baseOffset int, start int, gfm bool) (*Node, int, bool) {
 	close := strings.IndexByte(text[start+2:], ']')
 	if close < 0 {
 		return nil, start, true
@@ -5265,6 +5285,12 @@ func convertInlineChildren(bt *gotreesitter.BoundTree, n *gotreesitter.Node, sou
 			s.Range = inlineSpanRange(source, baseOffset, int(n.StartByte()), int(n.EndByte()))
 			s.Children = collectStrikethroughText(bt, n, source, baseOffset, ctx)
 			nodes = append(nodes, s)
+		} else if ctx.gfm() {
+			// GFM: one tilde pair is strikethrough, too.
+			s := newNode(NodeStrikethrough)
+			s.Range = inlineSpanRange(source, baseOffset, int(n.StartByte()), int(n.EndByte()))
+			s.Children = collectStrikethroughText(bt, n, source, baseOffset, ctx)
+			nodes = append(nodes, s)
 		} else {
 			// Single tilde: subscript (~text~)
 			sub := newNode(NodeSubscript)
@@ -5669,7 +5695,7 @@ func synthesiseSectionContent(bt *gotreesitter.BoundTree, n *gotreesitter.Node, 
 		}
 	}
 	if hasFenceDelim {
-		return convertCodeBlock(bt, n, "fenced_code_block")
+		return convertCodeBlock(bt, n, "fenced_code_block", ctx)
 	}
 
 	// Pattern: pipe_table_header + pipe_table_delimiter_row + pipe_table_row = table

@@ -57,6 +57,23 @@ Parse to JSON:
 mdpp parse --json README.md
 ```
 
+Read a file as GitHub-flavoured Markdown, with every Markdown++ extension off,
+to see how GitHub reads it. `--profile gfm` works with `mdpp render` and
+`mdpp parse`; the default is `--profile markdown++`:
+
+```bash
+mdpp render --profile gfm README.md
+mdpp parse --json --profile gfm README.md
+```
+
+In the `gfm` profile a heading, a list, a block quote or a raw HTML tag is read
+as CommonMark 0.31.2 and the GFM extensions say. Components (`<Card/>`),
+`{expressions}`, `:::` containers, `> [!NOTE]` alerts, front matter, `[[toc]]`,
+embeds, diagrams, math, footnotes, definition lists, superscript, emoji
+shortcodes, the merge of interrupted lists and the `{1-3}` fence attribute are
+off. Task list items, tables, strikethrough (one or two tildes), autolinks and
+reference links stay.
+
 ## Go API
 
 ```go
@@ -70,7 +87,8 @@ if err != nil {
 }
 ```
 
-`Parse` uses a deterministic work budget of 256 parser-work units per input
+In Go, `mdpp.ParseWithOptions(src, mdpp.ParseOptions{Profile: mdpp.ProfileGFM})`
+selects the same profile. `Parse` uses a deterministic work budget of 256 parser-work units per input
 byte, with a 64,000-unit floor. Its wall-clock deadline starts at 20 seconds
 and adds 10 seconds per MiB. The deadline is a backstop for real runaways. Pass
 tighter values with `ParseOptions`, or pass a context with an earlier deadline:

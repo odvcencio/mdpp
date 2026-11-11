@@ -36,6 +36,9 @@ type profileParser struct {
 
 var rangeTestProfiles = []profileParser{
 	{"default", func(src string) (*Document, error) { return Parse([]byte(src)) }},
+	{"gfm", func(src string) (*Document, error) {
+		return ParseWithOptions([]byte(src), ParseOptions{Profile: ProfileGFM})
+	}},
 }
 
 func firstLine(s string) string {
