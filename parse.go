@@ -2367,7 +2367,11 @@ func advanceTextPosition(line int, col int, text string) (int, int) {
 }
 
 func textNodeRange(text string, r Range) *Node {
-	node := textNode(decodeMarkdownText(text))
+	decoded := decodeMarkdownText(text)
+	node := textNode(decoded)
+	if decoded != text {
+		node.raw = text
+	}
 	node.Range = r
 	return node
 }
@@ -5509,11 +5513,18 @@ func findChild(bt *gotreesitter.BoundTree, n *gotreesitter.Node, nodeType string
 func splitTextNewlines(nodes []*Node) []*Node {
 	var out []*Node
 	for _, n := range nodes {
-		if n.Type != NodeText || !strings.Contains(n.Literal, "\n") {
+		// Split at the line ends of the source, before escapes and entities
+		// are decoded: a decoded line feed ("&#10;") is not a line end of the
+		// source and stays in the text.
+		src := n.Literal
+		if n.raw != "" && decodeMarkdownText(n.raw) == n.Literal {
+			src = n.raw
+		}
+		if n.Type != NodeText || !strings.Contains(src, "\n") {
 			out = append(out, n)
 			continue
 		}
-		lines := strings.Split(n.Literal, "\n")
+		lines := strings.Split(src, "\n")
 		cursor := 0
 		// Track the line and column at cursor as it advances. Rescanning the
 		// prefix for every piece (textSliceRange) made long text nodes quadratic.
