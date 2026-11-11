@@ -1457,6 +1457,11 @@ func fastParagraphNode(source []byte, lines []sourceLine, start int, ctx *parseC
 	var text strings.Builder
 	for end < len(lines) {
 		trimmed := strings.TrimSpace(lines[end].text)
+		// A thematic break interrupts a paragraph (CommonMark 4.8). A "---"
+		// line is a setext underline instead and is handled by the caller.
+		if end > start && isThematicBreakLine(lines[end].text) && !isSetextUnderlineLine([]byte(lines[end].text)) {
+			break
+		}
 		if trimmed == "" || isATXHeadingLine([]byte(lines[end].text)) || isMarkdownFenceLine(trimmed) ||
 			strings.HasPrefix(strings.TrimLeft(lines[end].text, " \t"), ">") ||
 			isLooseListMarkerLine(trimmed) || fastFootnoteDefinitionNode(source, lines[end], ctx) != nil ||
