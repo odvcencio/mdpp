@@ -1194,6 +1194,14 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 		}
 
 		para, next := fastParagraphNode(source, lines, i, ctx)
+		// A setext underline below the first line turns the whole paragraph
+		// into a heading (CommonMark 4.3). The fast path builds only
+		// one-line headings, so hand such chunks to the full parser.
+		for j := i + 1; j < next; j++ {
+			if isSetextUnderlineLine([]byte(lines[j].text)) {
+				return nil, false
+			}
+		}
 		children = append(children, para)
 		i = next
 	}
