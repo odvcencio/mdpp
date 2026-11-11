@@ -118,6 +118,29 @@ type linkRefDef struct {
 }
 
 // Document is the top-level result of parsing a Markdown source.
+//
+// # Diagnostics and exact readings
+//
+// Parse never fails on a source: when a part of it exceeds a limit or the
+// grammar cannot read it, the parser keeps that part as text and records a
+// Diagnostic with the Range of the source it affects. The tree is then a
+// reading of the document in which that range holds no structure. The codes
+// that say so are DiagPanic (MDPP-PARSE-000), DiagContainerAutoClosed (002),
+// DiagDepthExceeded (003), DiagComplexityLimit (004), DiagBudgetExceeded (005),
+// DiagSyntaxRecovery (006) and DiagNoTree (007). A caller that needs an exact
+// structural reading, for example to find every heading, list item, task item
+// or HTML tag in a text, must:
+//
+//  1. check Document.StructureCertified, or read Document.UncertifiedRanges;
+//  2. treat the nodes that overlap an uncertified range as text, and refuse to
+//     conclude from the tree that the range holds no heading, task item, link
+//     or HTML (a block kept as text has none);
+//  3. treat a document with an uncertified range as unreadable when the caller
+//     cannot accept a partial answer, and report the diagnostic.
+//
+// Diagnostic.StructureUncertain is true for each of these codes. Every range
+// is in Document.Source, like the ranges of nodes. A fallback never goes
+// without a diagnostic.
 type Document struct {
 	Root            *Node
 	Source          []byte
@@ -156,7 +179,8 @@ func (d *Document) Frontmatter() map[string]any {
 	return d.frontmatterData
 }
 
-// Diagnostics returns recoverable parse diagnostics.
+// Diagnostics returns recoverable parse diagnostics. See Document for what a
+// caller that needs an exact structural reading does with them.
 func (d *Document) Diagnostics() []Diagnostic {
 	if d == nil || len(d.diagnostics) == 0 {
 		return nil

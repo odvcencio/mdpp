@@ -414,7 +414,7 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 	lang := blockLang()
 	if lang == nil {
 		releasePrev()
-		return &Document{Root: &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}, Source: source}, nil
+		return noTreeDocument(source), nil
 	}
 
 	var tree *gotreesitter.Tree
@@ -451,7 +451,7 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 		return budgetFallback(source, ctx.budget), nil
 	}
 	if err != nil || tree == nil {
-		return &Document{Root: &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}, Source: source}, nil
+		return noTreeDocument(source), nil
 	}
 
 	bt := gotreesitter.Bind(tree)
@@ -472,12 +472,16 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 	// If any inline span hit its work or deadline budget during conversion,
 	// attach a diagnostic so callers know the inline parse stopped early.
 	if ctx != nil && ctx.inlineTimeoutOccurred {
-		doc.diagnostics = append(doc.diagnostics, Diagnostic{
-			Code:     "MDPP-PARSE-005",
-			Severity: SeverityWarning,
-			Message:  "inline parse aborted: one or more spans reached a parser work or deadline limit; affected spans treated as raw text",
-			Range:    sourceRange(source, 0, len(source)),
-		})
+		for _, r := range ctx.inlineStopRanges(source) {
+			doc.diagnostics = append(doc.diagnostics, Diagnostic{
+				Code:     DiagBudgetExceeded,
+				Severity: SeverityWarning,
+				Message:  "inline parse aborted: the span reached a parser work or deadline limit; treated as raw text",
+				Range:    r,
+			})
+		}
+		ctx.inlineTimeoutOccurred = false
+		ctx.inlineStops = nil
 	}
 	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode())
 	doc.extractFrontmatterCtx(ctx)
@@ -486,6 +490,16 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 		ctx.cache.pruneNotIn(ctx.seen)
 	}
 	return doc, tree
+}
+
+// noTreeDocument is the document for a source that the block grammar returned
+// no tree for: the source as text, with a diagnostic that covers all of it.
+func noTreeDocument(source []byte) *Document {
+	return textFallbackDocument(source, Diagnostic{
+		Code:     DiagNoTree,
+		Severity: SeverityWarning,
+		Message:  "the block grammar produced no tree; source returned as text",
+	})
 }
 
 func parseOnlyReferenceDefinitions(source []byte, ctx *parseCtx) *Document {
@@ -2027,8 +2041,8 @@ func parseContainerChildrenCtx(source []byte, lines []sourceLine, from int, to i
 			diagnostics = append(diagnostics, Diagnostic{
 				Code:     "MDPP-PARSE-002",
 				Severity: SeverityWarning,
-				Message:  "container directive auto-closed at end of document",
-				Range:    sourceRange(source, line.start, line.end),
+				Message:  "container directive auto-closed at end of document; its extent is a guess",
+				Range:    sourceRange(source, line.start, chunkEnd),
 			})
 		}
 
@@ -4496,6 +4510,7 @@ func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recov
 		// source as text with MDPP-PARSE-005.
 		if stopped && ctx != nil {
 			ctx.inlineTimeoutOccurred = true
+			ctx.noteInlineStop(source, baseOffset, text)
 		}
 		if tree != nil {
 			tree.Release()

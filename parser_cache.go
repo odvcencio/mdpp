@@ -199,6 +199,8 @@ type parseCtx struct {
 	// deadline budget. The block-level parse reads it after convertBlockCtx
 	// returns and attaches an MDPP-PARSE-005 diagnostic.
 	inlineTimeoutOccurred bool
+	// inlineStops holds the source spans whose inline parse stopped on a limit.
+	inlineStops []Range
 	// recoveryDiagnostics collects tree-sitter ERROR and MISSING recovery
 	// findings while a document is converted. The owning parse attaches and
 	// clears the slice before returning its Document.
@@ -506,4 +508,37 @@ func shiftRange(r Range, delta int, source []byte) Range {
 		EndLine:   r.EndLine,
 		EndCol:    r.EndCol,
 	}
+}
+
+// noteInlineStop records that the inline span text, which starts at baseOffset
+// in source, stopped on a limit and was kept as text. A span with no known
+// position is recorded as a zero Range, which stands for the whole source.
+func (c *parseCtx) noteInlineStop(source []byte, baseOffset int, text string) {
+	if baseOffset < 0 || baseOffset+len(text) > len(source) {
+		c.inlineStops = append(c.inlineStops, Range{})
+		return
+	}
+	c.inlineStops = append(c.inlineStops, sourceRange(source, baseOffset, baseOffset+len(text)))
+}
+
+// inlineStopRanges returns the ranges to report for the recorded stops: each
+// span, or the whole source for a stop whose position is unknown. Stops are
+// reported once per span and at most 64 times.
+func (c *parseCtx) inlineStopRanges(source []byte) []Range {
+	seen := map[Range]bool{}
+	var out []Range
+	for _, r := range c.inlineStops {
+		if r == (Range{}) {
+			r = sourceRange(source, 0, len(source))
+		}
+		if seen[r] || len(out) >= 64 {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	if len(out) == 0 {
+		out = append(out, sourceRange(source, 0, len(source)))
+	}
+	return out
 }
