@@ -5534,17 +5534,16 @@ func appendTextRange(nodes *[]*Node, text string, r Range) {
 	if len(*nodes) > 0 && (*nodes)[len(*nodes)-1].Type == NodeText {
 		last := (*nodes)[len(*nodes)-1]
 		// Keep the undecoded source of the merged text: splitting at line ends
-		// and mapping offsets use it.
-		source := last.Literal
-		if last.raw != "" {
-			source = last.raw
+		// and mapping offsets use it. Plain text needs none.
+		decoded := decodeMarkdownText(text)
+		if last.raw != "" || decoded != text {
+			source := last.raw
+			if source == "" {
+				source = last.Literal
+			}
+			last.raw = source + text
 		}
-		last.Literal += decodeMarkdownText(text)
-		if source += text; source != last.Literal {
-			last.raw = source
-		} else {
-			last.raw = ""
-		}
+		last.Literal += decoded
 		if last.Range.StartLine != 0 && r.StartLine != 0 {
 			last.Range.EndByte = r.EndByte
 			last.Range.EndLine = r.EndLine
