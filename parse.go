@@ -683,6 +683,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 
 	lines := strings.Split(text, "\n")
 	contentLines := make([]string, 0, len(lines))
+	prefixLens := make([]int, 0, len(lines)) // bytes of each line before its content
 	sawQuote := false
 	for _, line := range lines {
 		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
@@ -693,6 +694,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 				return nil // An unmarked blank line ends this block quote.
 			}
 			contentLines = append(contentLines, "")
+			prefixLens = append(prefixLens, len(line))
 			continue
 		}
 		content, ok := stripBlockquoteMarker(line)
@@ -705,6 +707,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 			return nil
 		}
 		contentLines = append(contentLines, content)
+		prefixLens = append(prefixLens, len(line)-len(content))
 		sawQuote = true
 	}
 	if !sawQuote {
@@ -720,15 +723,55 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 	} else {
 		inner = MustParse(innerSource)
 	}
-	quote := &Node{Type: NodeBlockquote, Range: sourceRange(source, 0, len(source))}
+	// The quote ends with its last line; blank lines after it are not part of it.
+	quoteEnd := len(bytes.TrimRight(source, " \t\r\n"))
+	if quoteEnd < len(source) && source[quoteEnd] != '\n' {
+		for quoteEnd < len(source) && source[quoteEnd] != '\n' {
+			quoteEnd++
+		}
+	}
+	if quoteEnd < len(source) {
+		quoteEnd++
+	}
+	quote := &Node{Type: NodeBlockquote, Range: sourceRange(source, 0, quoteEnd)}
 	if inner != nil && inner.Root != nil {
 		quote.Children = inner.Root.Children
-		clearNodeRanges(quote)
-		quote.Range = sourceRange(source, 0, len(source))
+		remapQuoteRanges(quote, source, lines, contentLines, prefixLens)
 	}
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{quote}, Range: sourceRange(source, 0, len(source))}, Source: source}
 	doc.extractFrontmatter()
 	return doc
+}
+
+// remapQuoteRanges moves the ranges of a block quote's content from the
+// stripped text back to the source that still has the "> " markers. Nodes
+// without a range keep none.
+func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, prefixLens []int) {
+	origStart := make([]int, len(lines)+1)
+	innerStart := make([]int, len(lines)+1)
+	for k := range lines {
+		origStart[k+1] = origStart[k] + len(lines[k]) + 1
+		innerStart[k+1] = innerStart[k] + len(contentLines[k]) + 1
+	}
+	mapPos := func(b int, isEnd bool) int {
+		k := sort.Search(len(lines), func(k int) bool { return innerStart[k+1] > b })
+		if k >= len(lines) {
+			return min(origStart[len(lines)], len(source))
+		}
+		col := b - innerStart[k]
+		if isEnd && col == 0 {
+			return origStart[k]
+		}
+		return origStart[k] + prefixLens[k] + col
+	}
+	for _, child := range quote.Children {
+		walkNodes(child, func(n *Node, parent *Node, index int) bool {
+			if n.Range.StartLine != 0 {
+				n.Range = sourceRange(source, min(mapPos(n.Range.StartByte, false), len(source)), min(mapPos(n.Range.EndByte, true), len(source)))
+			}
+			return true
+		})
+	}
 }
 
 // stripQuoteContinuationMarkers removes blockquote continuation markers
@@ -766,6 +809,10 @@ func stripQuoteContinuationMarkers(n *Node) {
 							i--
 						}
 						continue
+					}
+					if removed := len(child.Literal) - len(content); child.Range.StartLine != 0 && removed > 0 {
+						child.Range.StartByte += removed
+						child.Range.StartCol += removed
 					}
 					child.Literal = content
 				}
@@ -1115,7 +1162,14 @@ func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRef
 	return children
 }
 
+// fastBlockChunkDisabled turns the fast block path off. Tests set it to build
+// the reference reading that the fast path must match.
+var fastBlockChunkDisabled bool
+
 func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
+	if fastBlockChunkDisabled {
+		return nil, false
+	}
 	if len(source) == 0 || bytes.HasPrefix(source, []byte("---\n")) || bytes.Contains(source, []byte(":::")) {
 		return nil, false
 	}
@@ -1132,6 +1186,9 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			continue
 		}
 		if i+1 < len(lines) && isSetextUnderlineLine([]byte(lines[i+1].text)) {
+			return nil, false
+		}
+		if fastLineNeedsFullParser(line.text, trimmed) {
 			return nil, false
 		}
 		if isATXHeadingLine([]byte(line.text)) {
@@ -1159,6 +1216,13 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			for i < len(lines) && (strings.TrimSpace(lines[i].text) == "" || strings.HasPrefix(strings.TrimLeft(lines[i].text, " \t"), ">")) {
 				i++
 			}
+			if i < len(lines) && strings.TrimSpace(lines[i-1].text) != "" {
+				// The next line may continue the quote lazily (CommonMark 5.1).
+				return nil, false
+			}
+			for i > start+1 && strings.TrimSpace(lines[i-1].text) == "" {
+				i-- // trailing blank lines are not part of the quote
+			}
 			doc := parseSimpleBlockquoteDocument(source[lines[start].start:lines[i-1].next], ctx)
 			if doc == nil || doc.Root == nil {
 				return nil, false
@@ -1170,7 +1234,13 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			continue
 		}
 		if i+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(strings.TrimSpace(lines[i+1].text)) {
+			if len(splitFastTableCells(lines[i].text)) != len(splitFastTableCells(lines[i+1].text)) {
+				return nil, false // the header and delimiter rows must have the same cell count
+			}
 			table, next := fastTableNode(source, lines, i, ctx)
+			if next < len(lines) && strings.TrimSpace(lines[next].text) != "" {
+				return nil, false // the next line may be a row of the table
+			}
 			children = append(children, table)
 			i = next
 			continue
@@ -1182,12 +1252,18 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			if fastListLineHasTaskMarker(trimmed) {
 				return nil, false
 			}
+			if !fastListReadable(lines, i) {
+				return nil, false
+			}
 			list, next := fastListNode(source, lines, i, ctx)
 			children = append(children, list)
 			i = next
 			continue
 		}
 		if fn := fastFootnoteDefinitionNode(source, line, ctx); fn != nil {
+			if i+1 < len(lines) {
+				fn.Range = sourceRange(source, line.start, line.next) // the grammar's node runs to the next line
+			}
 			children = append(children, fn)
 			i++
 			continue
@@ -1197,6 +1273,21 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 		}
 
 		para, next := fastParagraphNode(source, lines, i, ctx)
+		for j := i + 1; j < next; j++ {
+			if t := lines[j].text; t != "" && (t[0] == ' ' || t[0] == '\t') {
+				return nil, false // the full parser strips the indent of a continuation line
+			}
+		}
+		for j := i; j < next; j++ {
+			if fastUnsupportedListMarker(strings.TrimSpace(lines[j].text)) {
+				return nil, false // a list marker form the fast path does not build
+			}
+		}
+		for j := i; j < next && j+1 < len(lines); j++ {
+			if fastLooksLikeTableDelimiterRow(lines[j+1].text) {
+				return nil, false // a table without leading pipes, or with uneven cells
+			}
+		}
 		// A setext underline below the first line turns the whole paragraph
 		// into a heading (CommonMark 4.3). The fast path builds only
 		// one-line headings, so hand such chunks to the full parser.
@@ -1219,7 +1310,7 @@ func fastHeadingNode(source []byte, line sourceLine, ctx *parseCtx) *Node {
 	heading := &Node{
 		Type:  NodeHeading,
 		Attrs: map[string]string{"level": levelStr(fastHeadingLevel(line.text))},
-		Range: sourceRange(source, line.start, line.end),
+		Range: sourceRange(source, line.start, line.next),
 	}
 	heading.Children = parseInlineAt(line.text[textStart:textEnd], source, line.start+textStart, ctx)
 	return heading
@@ -1247,7 +1338,8 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 	end := start + 1
 	for end < len(lines) {
 		trimmed := strings.TrimSpace(lines[end].text)
-		if len(trimmed) >= fenceLen && strings.Count(trimmed[:fenceLen], string(fenceChar)) == fenceLen {
+		indented := strings.HasPrefix(lines[end].text, "    ") || strings.HasPrefix(lines[end].text, "\t")
+		if !indented && len(trimmed) >= fenceLen && strings.Count(trimmed[:fenceLen], string(fenceChar)) == fenceLen {
 			break
 		}
 		end++
@@ -1261,7 +1353,10 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 		literal.WriteByte('\n')
 	}
 	lang, highlights := parseFenceInfo(info)
-	attrs := map[string]string{"language": normalizedFenceLanguage(lang)}
+	attrs := map[string]string{}
+	if language := normalizedFenceLanguage(lang); language != "" {
+		attrs["language"] = language
+	}
 	if highlights != "" {
 		attrs["highlights"] = highlights
 	}
@@ -1279,7 +1374,7 @@ func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) 
 	for end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end].text), "|") {
 		end++
 	}
-	table := &Node{Type: NodeTable, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[end-1].end)}
+	table := &Node{Type: NodeTable, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[end-1].next)}
 	aligns := fastTableAligns(lines[start+1].text)
 	if len(aligns) > 0 {
 		table.Attrs["align"] = strings.Join(aligns, ",")
@@ -1295,10 +1390,12 @@ func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) 
 		// the whole row, multiplying tables by their column count on
 		// every pass.
 		for _, cell := range splitFastTableCellSpans(lines[i].text) {
-			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start+cell.start, lines[i].start+cell.end)}
+			// A cell starts at its first character that is not a space.
+			lead := len(cell.text) - len(strings.TrimLeft(cell.text, " \t"))
+			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start+cell.start+lead, lines[i].start+cell.end)}
 			text := strings.TrimSpace(cell.text)
 			if text != "" {
-				c.Children = parseInlineAt(text, source, -1, ctx)
+				c.Children = parseInlineAt(text, source, lines[i].start+cell.start+lead, ctx)
 			}
 			row.Children = append(row.Children, c)
 		}
@@ -1365,9 +1462,126 @@ func splitFastTableCellSpans(line string) []fastCellSpan {
 	return spans
 }
 
+// fastLooksLikeTableDelimiterRow reports a line made only of pipes, colons,
+// dashes and spaces that could be the delimiter row of a table.
+func fastLooksLikeTableDelimiterRow(line string) bool {
+	if !strings.ContainsAny(line, "-") || !strings.ContainsAny(line, "|:") {
+		return false
+	}
+	return strings.Trim(line, "|:- \t") == ""
+}
+
+// fastUnsupportedListMarker reports a line that starts like a list item but
+// not in the form the fast path builds ("- " or "1. "): a marker followed by
+// a tab or by nothing, or an ordered marker ending in ")".
+func fastUnsupportedListMarker(trimmed string) bool {
+	if trimmed == "" {
+		return false
+	}
+	i := 0
+	if trimmed[0] == '-' || trimmed[0] == '*' || trimmed[0] == '+' {
+		i = 1
+	} else {
+		for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+			i++
+		}
+		if i == 0 || i > 9 || i >= len(trimmed) || (trimmed[i] != '.' && trimmed[i] != ')') {
+			return false
+		}
+		if trimmed[i] == ')' {
+			return i+1 == len(trimmed) || trimmed[i+1] == ' ' || trimmed[i+1] == '\t'
+		}
+		i++
+	}
+	return i == len(trimmed) || trimmed[i] == '\t'
+}
+
+// fastLineNeedsFullParser reports a line that starts a block the fast path
+// does not build: indented code, and list markers with no text or with a tab.
+func fastLineNeedsFullParser(text, trimmed string) bool {
+	if text != "" && (text[0] == '\t' || text[0] == ' ') {
+		return true
+	}
+	if trimmed != "" && trimmed[0] == '[' && !strings.Contains(trimmed, "]") {
+		return true // a multi-line link reference definition label
+	}
+	switch trimmed {
+	case "-", "*", "+":
+		return true
+	}
+	if hashes := len(trimmed) - len(strings.TrimLeft(trimmed, "#")); hashes > 0 && hashes <= 6 &&
+		(hashes == len(trimmed) || trimmed[hashes] == ' ' || trimmed[hashes] == '\t') {
+		// An ATX heading, possibly with empty content.
+		return !isATXHeadingLine([]byte(text))
+	}
+	if n := len(trimmed); n >= 2 {
+		if (trimmed[0] == '-' || trimmed[0] == '*' || trimmed[0] == '+') && trimmed[1] == '\t' {
+			return true
+		}
+		i := 0
+		for i < n && trimmed[i] >= '0' && trimmed[i] <= '9' {
+			i++
+		}
+		if i > 0 && i < n && trimmed[i] == '.' && (i+1 == n || trimmed[i+1] == '\t' || i > 9) {
+			return true
+		}
+	}
+	return false
+}
+
+// fastListItemSimple reports whether the text of a list item is plain
+// paragraph text that needs no nested block.
+func fastListItemSimple(item string) bool {
+	if item == "" || item[0] == ' ' || item[0] == '\t' || item[0] == '>' || item[0] == '<' {
+		return false
+	}
+	return !isLooseListMarkerLine(item) && !isThematicBreakLine(item) && !isATXHeadingLine([]byte(item)) && !isMarkdownFenceLine(item)
+}
+
+// fastListReadable reports whether the list at lines[start] is one the fast
+// path reads exactly: consecutive one-line items of one marker. It is false for
+// items of another marker, nested or continued items, lazy continuation lines
+// and blank lines inside the list.
+func fastListReadable(lines []sourceLine, start int) bool {
+	firstTrimmed := strings.TrimSpace(lines[start].text)
+	_, ordered := fastOrderedListStart(firstTrimmed)
+	i := start
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i].text)
+		if trimmed == "" {
+			break
+		}
+		itemText, ok := fastListItemText(trimmed, ordered)
+		if !ok {
+			break
+		}
+		if lines[i].text != trimmed || fastListLineHasTaskMarker(trimmed) || !fastListItemSimple(itemText) || (!ordered && trimmed[0] != firstTrimmed[0]) {
+			return false
+		}
+		i++
+	}
+	// What follows the list decides whether it is complete.
+	j := i
+	for j < len(lines) && strings.TrimSpace(lines[j].text) == "" {
+		j++
+	}
+	if j == len(lines) {
+		return true
+	}
+	next := lines[j].text
+	nextTrimmed := strings.TrimSpace(next)
+	if j > i {
+		// A blank line inside the list, or an indented block after it.
+		return !isLooseListMarkerLine(nextTrimmed) && next == nextTrimmed
+	}
+	// No blank line: only a block that interrupts a list may follow.
+	return isATXHeadingLine([]byte(next)) || isMarkdownFenceLine(nextTrimmed) ||
+		strings.HasPrefix(next, ">") || isThematicBreakLine(next)
+}
+
 func fastListNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int) {
 	markerStart, ordered := fastOrderedListStart(strings.TrimSpace(lines[start].text))
-	list := &Node{Type: NodeList, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[start].end)}
+	list := &Node{Type: NodeList, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[start].next)}
 	if ordered {
 		list.Attrs["ordered"] = "true"
 		if markerStart != "1" {
@@ -1387,13 +1601,24 @@ func fastListNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (
 		if !ok {
 			break
 		}
-		item := &Node{Type: NodeListItem, Range: sourceRange(source, lines[i].start, lines[i].end)}
-		para := &Node{Type: NodeParagraph, Range: item.Range}
-		para.Children = parseInlineAt(itemText, source, -1, ctx)
+		item := &Node{Type: NodeListItem, Range: sourceRange(source, lines[i].start, lines[i].next)}
+		contentStart := lines[i].start + len(lines[i].text) - len(itemText)
+		para := &Node{Type: NodeParagraph, Range: sourceRange(source, contentStart, lines[i].next)}
+		para.Children = parseInlineAt(itemText, source, contentStart, ctx)
 		item.Children = []*Node{para}
 		list.Children = append(list.Children, item)
-		list.Range.EndByte = lines[i].end
+		list.Range = sourceRange(source, lines[start].start, lines[i].next)
 		i++
+	}
+	// The list and its last item run over the blank lines that follow.
+	if len(list.Children) > 0 {
+		end := lines[i-1].next
+		for k := i; k < len(lines) && strings.TrimSpace(lines[k].text) == ""; k++ {
+			end = lines[k].next
+		}
+		last := list.Children[len(list.Children)-1]
+		last.Range = sourceRange(source, last.Range.StartByte, end)
+		list.Range = sourceRange(source, lines[start].start, end)
 	}
 	return list, i
 }
@@ -1452,13 +1677,13 @@ func isLikelyReferenceDefinitionLine(line string) bool {
 }
 
 func fastFootnoteDefinitionNode(source []byte, line sourceLine, ctx *parseCtx) *Node {
-	match := footnoteDefinitionRawRe.FindStringSubmatch(line.text)
+	match := footnoteDefinitionRawRe.FindStringSubmatchIndex(line.text)
 	if match == nil {
 		return nil
 	}
-	fn := &Node{Type: NodeFootnoteDef, Attrs: map[string]string{"id": match[1]}, Range: sourceRange(source, line.start, line.end)}
-	if strings.TrimSpace(match[2]) != "" {
-		fn.Children = parseFootnoteDefinitionInline(match[2], source, ctx)
+	fn := &Node{Type: NodeFootnoteDef, Attrs: map[string]string{"id": line.text[match[2]:match[3]]}, Range: sourceRange(source, line.start, line.end)}
+	if body := line.text[match[4]:match[5]]; strings.TrimSpace(body) != "" {
+		fn.Children = parseFootnoteDefinitionInline(body, source, line.start+match[4], ctx)
 	}
 	return fn
 }
@@ -1473,9 +1698,12 @@ func fastParagraphNode(source []byte, lines []sourceLine, start int, ctx *parseC
 		if end > start && isThematicBreakLine(lines[end].text) && !isSetextUnderlineLine([]byte(lines[end].text)) {
 			break
 		}
+		if end > start && htmlBlockStart(lines[end].text, false) != "" {
+			break // an HTML block of start condition 1 to 6 interrupts a paragraph
+		}
 		if trimmed == "" || isATXHeadingLine([]byte(lines[end].text)) || isMarkdownFenceLine(trimmed) ||
 			strings.HasPrefix(strings.TrimLeft(lines[end].text, " \t"), ">") ||
-			isLooseListMarkerLine(trimmed) || fastFootnoteDefinitionNode(source, lines[end], ctx) != nil ||
+			isLooseListMarkerLine(trimmed) || (end == start && fastFootnoteDefinitionNode(source, lines[end], ctx) != nil) ||
 			(end+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(strings.TrimSpace(lines[end+1].text))) {
 			break
 		}
@@ -1488,8 +1716,8 @@ func fastParagraphNode(source []byte, lines []sourceLine, start int, ctx *parseC
 	if end == start {
 		end++
 	}
-	para := &Node{Type: NodeParagraph, Range: sourceRange(source, lines[start].start, lines[end-1].end)}
-	para.Children = parseInlineAt(text.String(), source, lines[start].start, ctx)
+	para := &Node{Type: NodeParagraph, Range: sourceRange(source, lines[start].start, lines[end-1].next)}
+	para.Children = splitTextNewlines(parseInlineAt(strings.TrimRight(text.String(), " \t"), source, lines[start].start, ctx))
 	return para, end
 }
 
@@ -2110,11 +2338,16 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 		level  int
 		marker byte
 		text   string
+		start  int // byte offset of the marker
+		next   int // byte offset after the line end
 	}
 	lines := strings.Split(text, "\n")
 	items := make([]listLine, 0, len(lines))
 	maxLevel := 0
+	lineStart := 0
 	for _, line := range lines {
+		thisStart := lineStart
+		lineStart += len(line) + 1
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -2135,7 +2368,7 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 		if rest[1] != ' ' {
 			return nil
 		}
-		items = append(items, listLine{level: level, marker: marker, text: rest[2:]})
+		items = append(items, listLine{level: level, marker: marker, text: rest[2:], start: thisStart + 2*level, next: min(thisStart+len(line)+1, len(source))})
 		if level > maxLevel {
 			maxLevel = level
 		}
@@ -2175,8 +2408,9 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 				target = listFrame{level: it.level - 1, list: sub}
 			}
 		}
-		para := &Node{Type: NodeParagraph, Children: parseInlineAt(it.text, source, -1, ctx)}
-		item := &Node{Type: NodeListItem, Children: []*Node{para}}
+		contentStart := it.start + 2
+		para := &Node{Type: NodeParagraph, Range: sourceRange(source, contentStart, it.next), Children: parseInlineAt(it.text, source, contentStart, ctx)}
+		item := &Node{Type: NodeListItem, Range: sourceRange(source, it.start, it.next), Children: []*Node{para}}
 		target.list.Children = append(target.list.Children, item)
 		if target.level == it.level-1 || target.list == rootList {
 			stack = append(stack, listFrame{level: it.level, list: target.list, last: item})
@@ -2184,9 +2418,31 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 			stack[len(stack)-1].last = item
 		}
 	}
+	fitNestedListRanges(rootList, source)
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{rootList}, Range: sourceRange(source, 0, len(source))}, Source: source}
 	postProcess(doc)
 	return doc
+}
+
+// fitNestedListRanges gives each list the span of its items and grows each
+// item to cover the lists nested in it.
+func fitNestedListRanges(n *Node, source []byte) {
+	for _, c := range n.Children {
+		fitNestedListRanges(c, source)
+	}
+	switch n.Type {
+	case NodeListItem:
+		for _, c := range n.Children {
+			if c.Type == NodeList && c.Range.EndByte > n.Range.EndByte {
+				n.Range = sourceRange(source, n.Range.StartByte, c.Range.EndByte)
+			}
+		}
+	case NodeList:
+		if len(n.Children) > 0 {
+			first, last := n.Children[0], n.Children[len(n.Children)-1]
+			n.Range = sourceRange(source, first.Range.StartByte, last.Range.EndByte)
+		}
+	}
 }
 
 // normalizeLineEndings converts CRLF and lone CR to LF so downstream
@@ -3058,7 +3314,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 
 	case "paragraph":
 		nodeText := strings.TrimRight(bt.NodeText(n), "\n")
-		if footnoteDefs := convertFootnoteDefinitionParagraph(nodeText, source, ctx); footnoteDefs != nil {
+		if footnoteDefs := convertFootnoteDefinitionParagraph(nodeText, source, int(n.StartByte()), ctx); footnoteDefs != nil {
 			applyTreeRange(footnoteDefs, n)
 			return footnoteDefs
 		}
@@ -3185,17 +3441,18 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 
 	case "link_reference_definition":
 		raw := strings.TrimRight(bt.NodeText(n), "\n")
-		if match := footnoteDefinitionRawRe.FindStringSubmatch(raw); match != nil {
+		if match := footnoteDefinitionRawRe.FindStringSubmatchIndex(raw); match != nil {
 			fn := newNodeFromTree(NodeFootnoteDef, n)
-			fn.Attrs = map[string]string{"id": match[1]}
-			if strings.TrimSpace(match[2]) != "" {
-				fn.Children = append(fn.Children, parseFootnoteDefinitionInline(match[2], source, ctx)...)
+			fn.Attrs = map[string]string{"id": raw[match[2]:match[3]]}
+			if body := raw[match[4]:match[5]]; strings.TrimSpace(body) != "" {
+				fn.Children = append(fn.Children, parseFootnoteDefinitionInline(body, source, int(n.StartByte())+match[4], ctx)...)
 			}
 			return fn
 		}
 
 		// Detect footnote definitions: [^id]: content
 		var label, dest, title string
+		destStart := -1
 		for i := 0; i < n.ChildCount(); i++ {
 			child := n.Child(i)
 			ct := bt.NodeType(child)
@@ -3204,6 +3461,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 				label = bt.NodeText(child)
 			case "link_destination":
 				dest = bt.NodeText(child)
+				destStart = int(child.StartByte())
 			case "link_title":
 				title = stripQuotes(bt.NodeText(child))
 			}
@@ -3213,7 +3471,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 			fn := newNodeFromTree(NodeFootnoteDef, n)
 			fn.Attrs = map[string]string{"id": match[1]}
 			if strings.TrimSpace(dest) != "" {
-				fn.Children = append(fn.Children, parseFootnoteDefinitionInline(dest, source, ctx)...)
+				fn.Children = append(fn.Children, parseFootnoteDefinitionInline(dest, source, destStart, ctx)...)
 			}
 			return fn
 		}
@@ -3279,48 +3537,58 @@ func validReferenceDefinitionSyntax(raw string) bool {
 	return true
 }
 
-func parseFootnoteDefinitionInline(text string, source []byte, ctx *parseCtx) []*Node {
+// parseFootnoteDefinitionInline reads the inline content of a footnote
+// definition. baseOffset is the byte offset of text in source, or -1 when the
+// text has no place in source.
+func parseFootnoteDefinitionInline(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
 	matches := inlineMarkdownLinkRe.FindAllStringSubmatchIndex(text, -1)
 	if len(matches) == 0 {
-		return parseInlineAt(text, source, -1, ctx)
+		return parseInlineAt(text, source, baseOffset, ctx)
 	}
 
 	nodes := make([]*Node, 0, len(matches)*2+1)
 	cursor := 0
 	for _, match := range matches {
 		if match[0] > cursor {
-			nodes = append(nodes, parseInlineAt(text[cursor:match[0]], source, -1, ctx)...)
+			nodes = append(nodes, parseInlineAt(text[cursor:match[0]], source, addBaseOffset(baseOffset, cursor), ctx)...)
 		}
 		link := newNode(NodeLink)
 		link.Attrs = map[string]string{"href": text[match[4]:match[5]]}
-		link.Children = append(link.Children, textNode(text[match[2]:match[3]]))
+		link.Range = inlineSpanRange(source, baseOffset, match[0], match[1])
+		link.Children = append(link.Children, textNodeRange(text[match[2]:match[3]], inlineSpanRange(source, baseOffset, match[2], match[3])))
 		nodes = append(nodes, link)
 		cursor = match[1]
 	}
 	if cursor < len(text) {
-		nodes = append(nodes, parseInlineAt(text[cursor:], source, -1, ctx)...)
+		nodes = append(nodes, parseInlineAt(text[cursor:], source, addBaseOffset(baseOffset, cursor), ctx)...)
 	}
 	return nodes
 }
 
-func convertFootnoteDefinitionParagraph(text string, source []byte, ctx *parseCtx) *Node {
+// convertFootnoteDefinitionParagraph reads a paragraph made only of footnote
+// definition lines. baseOffset is the byte offset of text in source, or -1.
+func convertFootnoteDefinitionParagraph(text string, source []byte, baseOffset int, ctx *parseCtx) *Node {
 	if !strings.Contains(text, "[^") {
 		return nil
 	}
 	lines := strings.Split(text, "\n")
 	defs := make([]*Node, 0, len(lines))
+	lineOffset := 0
 	for _, line := range lines {
+		start := lineOffset
+		lineOffset += len(line) + 1
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		match := footnoteDefinitionRawRe.FindStringSubmatch(line)
+		match := footnoteDefinitionRawRe.FindStringSubmatchIndex(line)
 		if match == nil {
 			return nil
 		}
 		def := newNode(NodeFootnoteDef)
-		def.Attrs = map[string]string{"id": match[1]}
-		if strings.TrimSpace(match[2]) != "" {
-			def.Children = append(def.Children, parseFootnoteDefinitionInline(match[2], source, ctx)...)
+		def.Attrs = map[string]string{"id": line[match[2]:match[3]]}
+		def.Range = inlineSpanRange(source, baseOffset, start, start+len(line))
+		if body := line[match[4]:match[5]]; strings.TrimSpace(body) != "" {
+			def.Children = append(def.Children, parseFootnoteDefinitionInline(body, source, addBaseOffset(baseOffset, start+match[4]), ctx)...)
 		}
 		defs = append(defs, def)
 	}
@@ -4586,24 +4854,27 @@ func appendLooseBlockText(nodes *[]*Node, text string, attach bool, source []byt
 	if !attach && appendRecoveredBlockText(nodes, text, source, offset, ctx) {
 		return
 	}
-	segments := looseParagraphSegments(text)
+	segments, spans := looseParagraphSegmentSpans(text)
 	for i, segment := range segments {
 		trimmed := strings.TrimSpace(segment)
 		if trimmed == "" {
 			continue
 		}
-		if def := convertFootnoteDefinitionParagraph(trimmed, source, ctx); def != nil {
+		segStart := addBaseOffset(offset, spans[i])
+		trimmedStart := addBaseOffset(segStart, len(segment)-len(strings.TrimLeft(segment, " \t\n")))
+		if def := convertFootnoteDefinitionParagraph(trimmed, source, trimmedStart, ctx); def != nil {
 			appendBlockNode(nodes, def)
 			continue
 		}
 		if attach && i == 0 && len(*nodes) > 0 && (*nodes)[len(*nodes)-1].Type == NodeParagraph {
 			last := (*nodes)[len(*nodes)-1]
-			last.Children = append(last.Children, parseInlineAt(segment, source, -1, ctx)...)
+			last.Children = append(last.Children, parseInlineAt(segment, source, segStart, ctx)...)
 			last.Children = splitTextNewlines(last.Children)
 			continue
 		}
 		para := newNode(NodeParagraph)
-		para.Children = append(para.Children, parseInlineAt(trimmed, source, -1, ctx)...)
+		para.Range = inlineSpanRange(source, trimmedStart, 0, len(trimmed))
+		para.Children = append(para.Children, parseInlineAt(trimmed, source, trimmedStart, ctx)...)
 		para.Children = splitTextNewlines(para.Children)
 		*nodes = append(*nodes, para)
 	}
@@ -4701,6 +4972,40 @@ func isRecoveredStructuredBlock(n *Node) bool {
 	default:
 		return false
 	}
+}
+
+// looseParagraphSegmentSpans is looseParagraphSegments plus the byte offset
+// of each segment in text. Segments are copies of text with the line ends
+// kept, so segment i is text[spans[i]:spans[i]+len(segments[i])].
+func looseParagraphSegmentSpans(text string) ([]string, []int) {
+	var segments []string
+	var spans []int
+	lineStart := 0
+	current := -1
+	for lineStart <= len(text) {
+		lineEnd := strings.IndexByte(text[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(text)
+		} else {
+			lineEnd += lineStart
+		}
+		line := text[lineStart:lineEnd]
+		if strings.TrimSpace(line) == "" {
+			if current >= 0 {
+				segments = append(segments, text[current:lineStart-1])
+				spans = append(spans, current)
+				current = -1
+			}
+		} else if current < 0 {
+			current = lineStart
+		}
+		lineStart = lineEnd + 1
+	}
+	if current >= 0 {
+		segments = append(segments, text[current:])
+		spans = append(spans, current)
+	}
+	return segments, spans
 }
 
 func looseParagraphSegments(text string) []string {

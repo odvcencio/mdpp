@@ -1,0 +1,131 @@
+package mdpp
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// rangeExemptTypes are node kinds that are synthesized and have no source
+// text of their own: a table of contents is built from the headings, and
+// its list, items and links point at no bytes.
+//
+// Two more kinds are exempt for now because their post-parse passes rebuild
+// the nodes from lowered text without a mapping back to the source: the body
+// of an alert ("> [!NOTE]") and a definition list.
+func rangeExempt(n *Node, ancestors []*Node) bool {
+	if n.Type == NodeDefinitionList {
+		return true
+	}
+	for _, a := range ancestors {
+		switch a.Type {
+		case NodeTableOfContents, NodeAdmonition, NodeDefinitionList:
+			return true
+		}
+	}
+	return false
+}
+
+// checkNodeRanges returns every node whose range is empty or lies outside
+// its parent's range.
+func checkNodeRanges(doc *Document) []string {
+	var problems []string
+	var visit func(n *Node, parent *Node, ancestors []*Node)
+	visit = func(n *Node, parent *Node, ancestors []*Node) {
+		if !rangeExempt(n, ancestors) && n.Type != NodeDocument {
+			r := n.Range
+			switch {
+			case r.StartLine == 0 || r.EndByte <= r.StartByte:
+				problems = append(problems, fmt.Sprintf("%v %q has the empty range %+v", n.Type, n.Literal, r))
+			case r.EndByte > len(doc.Source):
+				problems = append(problems, fmt.Sprintf("%v %q ends at %d, past the source (%d bytes)", n.Type, n.Literal, r.EndByte, len(doc.Source)))
+			case parent != nil && parent.Type != NodeDocument && parent.Range.StartLine != 0 &&
+				(r.StartByte < parent.Range.StartByte || r.EndByte > parent.Range.EndByte):
+				problems = append(problems, fmt.Sprintf("%v %q range %d-%d lies outside its parent %v %d-%d", n.Type, n.Literal, r.StartByte, r.EndByte, parent.Type, parent.Range.StartByte, parent.Range.EndByte))
+			}
+		}
+		for _, c := range n.Children {
+			visit(c, n, append(ancestors, n))
+		}
+	}
+	visit(doc.Root, nil, nil)
+	return problems
+}
+
+func TestNodeRangesPointIntoSource(t *testing.T) {
+	inputs := append(conformanceInputs(t), differentialInputs()...)
+	failures := map[string]string{}
+	for _, src := range inputs {
+		doc, err := Parse([]byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if problems := checkNodeRanges(doc); len(problems) > 0 {
+			failures[src] = problems[0]
+		}
+	}
+	if len(failures) == 0 {
+		return
+	}
+	var keys []string
+	for k := range failures {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) < len(keys[j]) })
+	var sb strings.Builder
+	for i, k := range keys {
+		if i == 12 {
+			break
+		}
+		fmt.Fprintf(&sb, "\n  %q: %s", k, failures[k])
+	}
+	t.Errorf("%d of %d inputs have a node with a bad range, for example:%s", len(failures), len(inputs), sb.String())
+}
+
+// Text nodes whose literal is plain source text must cover exactly that
+// text. These cases were built with no range before: fast-path list items and
+// table cells, the nested list builder, footnote definition bodies, loose
+// paragraphs and block quote content.
+func TestPlainTextNodesCoverTheirSource(t *testing.T) {
+	cases := []struct{ name, src string }{
+		{"fast list item", "<!-- c -->\n\n- ab cd\n- ef\n"},
+		{"fast ordered list item", "***\n\n3. ab cd\n4. ef\n"},
+		{"fast table cell", "***\n\n| h1 | h2 |\n|---|---|\n| x y |  z |\n"},
+		{"nested list builder", "- a1\n  - b1\n    - c1\n      - d1\n        - e1\n          - f1\n"},
+		{"footnote body alone", "[^1]: some note\n"},
+		{"footnote body after paragraph", "text\n\n[^1]: some note\n"},
+		{"footnote body with link", "***\n\n[^1]: see [the docs](https://x.y) now\n\nafter\n"},
+		{"loose paragraph", "***\n\n[link \\[bar](/uri)\n"},
+		{"block quote content", "> ab\n> cd\n"},
+		{"nested block quote", "> > ab\n> cd\n"},
+		{"quote after paragraph", "***\n\nPa\n> q\n> r\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := MustParse([]byte(tc.src))
+			if problems := checkNodeRanges(doc); len(problems) > 0 {
+				t.Errorf("bad ranges in %q: %v\n%s", tc.src, problems, DumpTreeForSnapshot(doc.Root))
+			}
+			doc.Root.Walk(func(n *Node) bool {
+				if n.Type != NodeText || n.Range.StartLine == 0 || strings.ContainsAny(n.Literal, "\\&") {
+					return true
+				}
+				if got := string(doc.Source[n.Range.StartByte:n.Range.EndByte]); got != n.Literal {
+					t.Errorf("text %q has range %d-%d covering %q", n.Literal, n.Range.StartByte, n.Range.EndByte, got)
+				}
+				return true
+			})
+			texts := 0
+			doc.Root.Walk(func(n *Node) bool {
+				if n.Type == NodeText {
+					texts++
+				}
+				return true
+			})
+			if texts == 0 {
+				t.Errorf("no text nodes in %q", tc.src)
+			}
+		})
+	}
+}

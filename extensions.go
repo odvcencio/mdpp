@@ -640,6 +640,10 @@ func mergeInterruptedLists(root *Node) {
 		for k := i + 1; k < j; k++ {
 			lastItem.Children = append(lastItem.Children, root.Children[k])
 		}
+		// The folded paragraphs now belong to the item, and the second
+		// list's items to the first list: their ranges must cover them.
+		lastItem.Range = extendRangeTo(lastItem.Range, root.Children[j-1].Range)
+		list.Range = extendRangeTo(list.Range, next.Range)
 		// Append `next`'s items to `list`.
 		list.Children = append(list.Children, next.Children...)
 		// Drop the paragraphs and the second list from root.
@@ -647,6 +651,16 @@ func mergeInterruptedLists(root *Node) {
 		// Re-check at same index in case another list follows (chain merging).
 		i--
 	}
+}
+
+// extendRangeTo returns r grown to end where end ends. A range without a
+// position stays without one.
+func extendRangeTo(r, end Range) Range {
+	if r.StartLine == 0 || end.StartLine == 0 || end.EndByte <= r.EndByte {
+		return r
+	}
+	r.EndByte, r.EndLine, r.EndCol = end.EndByte, end.EndLine, end.EndCol
+	return r
 }
 
 // sameListKind returns true when both lists are both ordered (or both
