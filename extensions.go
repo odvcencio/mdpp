@@ -1227,20 +1227,32 @@ func spanOfNodes(nodes []*Node) Range {
 // heading in a list item after the indentation of the next line ("Bar\n  ---\n  "),
 // which is not part of the heading.
 func trimHeadingRanges(doc *Document) {
-	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
-		if n.Type != NodeHeading || n.Range.StartLine == 0 || n.Range.EndByte > len(doc.Source) {
-			return true
+	var visit func(n *Node)
+	visit = func(n *Node) {
+		for _, c := range n.Children {
+			switch c.Type {
+			case NodeHeading:
+				trimHeadingRange(doc, c)
+			case NodeBlockquote, NodeList, NodeListItem, NodeTaskListItem, NodeAdmonition, NodeContainerDirective, NodeFootnoteDef:
+				visit(c)
+			}
 		}
-		start, end := n.Range.StartByte, n.Range.EndByte
-		cut := end
-		for cut > start && (doc.Source[cut-1] == ' ' || doc.Source[cut-1] == '\t') {
-			cut--
-		}
-		if cut < end && cut > start && doc.Source[cut-1] == '\n' {
-			n.Range = sourceRange(doc.Source, start, cut)
-		}
-		return true
-	})
+	}
+	visit(doc.Root)
+}
+
+func trimHeadingRange(doc *Document, n *Node) {
+	if n.Range.StartLine == 0 || n.Range.EndByte > len(doc.Source) {
+		return
+	}
+	start, end := n.Range.StartByte, n.Range.EndByte
+	cut := end
+	for cut > start && (doc.Source[cut-1] == ' ' || doc.Source[cut-1] == '\t') {
+		cut--
+	}
+	if cut < end && cut > start && doc.Source[cut-1] == '\n' {
+		n.Range = sourceRange(doc.Source, start, cut)
+	}
 }
 
 // extendIndentedCodeRanges starts a top-level indented code block at the
