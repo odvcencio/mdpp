@@ -26,6 +26,9 @@ var (
 type headingTextRepair struct {
 	ordinal int
 	text    string
+	// offset is the byte offset of text in the source, so that the re-parsed
+	// inline nodes keep their source ranges.
+	offset int
 }
 
 // Cached languages, initialised once.
@@ -1916,7 +1919,8 @@ func protectSlowATXHeadingPunctuation(source []byte) ([]byte, []headingTextRepai
 			for _, off := range htmlOffsets {
 				protected[start+off] = '0'
 			}
-			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text})
+			textStart, _, _ := atxHeadingTextRange(line)
+			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text, offset: start + textStart})
 			headingOrdinal++
 			previousLineCanBeSetextHeading = false
 		} else if text, punctOffset, ok := slowATXHeadingPunctuation(line); ok {
@@ -1924,7 +1928,8 @@ func protectSlowATXHeadingPunctuation(source []byte) ([]byte, []headingTextRepai
 				protected = append([]byte(nil), source...)
 			}
 			protected[start+punctOffset] = '0'
-			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text})
+			textStart, _, _ := atxHeadingTextRange(line)
+			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text, offset: start + textStart})
 			headingOrdinal++
 			previousLineCanBeSetextHeading = false
 		} else if isATXHeadingLine(line) {
@@ -2590,7 +2595,7 @@ func repairProtectedHeadings(root *Node, repairs []headingTextRepair, source []b
 			return true
 		}
 		if repairIndex < len(repairs) && repairs[repairIndex].ordinal == headingOrdinal {
-			n.Children = parseInlineAt(repairs[repairIndex].text, source, -1, ctx)
+			n.Children = parseInlineAt(repairs[repairIndex].text, source, repairs[repairIndex].offset, ctx)
 			repairIndex++
 		}
 		headingOrdinal++
