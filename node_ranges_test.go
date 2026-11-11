@@ -7,20 +7,12 @@ import (
 	"testing"
 )
 
-// rangeExemptTypes are node kinds that are synthesized and have no source
-// text of their own: a table of contents is built from the headings, and
-// its list, items and links point at no bytes.
-//
-// Two more kinds are exempt for now because their post-parse passes rebuild
-// the nodes from lowered text without a mapping back to the source: the body
-// of an alert ("> [!NOTE]") and a definition list.
+// rangeExempt reports whether a node has no source text of its own: a table
+// of contents is built from the headings, and its list, items and links point
+// at no bytes. Such a node has the zero Range (HasSourceRange is false).
 func rangeExempt(n *Node, ancestors []*Node) bool {
-	if n.Type == NodeDefinitionList {
-		return true
-	}
 	for _, a := range ancestors {
-		switch a.Type {
-		case NodeTableOfContents, NodeAdmonition, NodeDefinitionList:
+		if a.Type == NodeTableOfContents {
 			return true
 		}
 	}

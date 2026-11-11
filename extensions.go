@@ -20,10 +20,12 @@ func postProcess(doc *Document) {
 		return true
 	})
 	repairStandaloneHTMLBlocks(doc)
+	trimHeadingRanges(doc)
+	extendIndentedCodeRanges(doc)
 	annotateListTightness(doc)
 	repairListCodeTabs(doc)
 	processAdmonitions(doc.Root)
-	processBlockquoteHeadings(doc.Root)
+	processBlockquoteHeadings(doc.Root, doc.Source)
 	footnoteDefs := processFootnotes(doc.Root)
 	processInlineMath(doc.Root, doc.Source)
 	processSuperscripts(doc.Root)
@@ -237,10 +239,14 @@ func extractAdmonitionCaption(children []*Node) (string, []*Node) {
 			caption.WriteString(line)
 			if hasBreak {
 				if tail != "" {
-					clone := *child
-					clone.Literal = tail
-					clone.Range = Range{}
-					rest = append(rest, &clone)
+					captionWasEmpty := caption.Len() == len(line)
+					rest = append(rest, cleanedTextCopy(child, suffixCleaner(func(s string) string {
+						if captionWasEmpty {
+							s = strings.TrimLeft(s, " \t")
+						}
+						_, after, _ := strings.Cut(s, "\n")
+						return after
+					})))
 				}
 				rest = append(rest, children[i+1:]...)
 				foundBreak = true
@@ -288,13 +294,11 @@ func cleanAdmonitionLeadingChildren(children []*Node) []*Node {
 			continue
 		}
 		if leading && child.Type == NodeText {
-			clone := *child
-			clone.Literal = cleanAdmonitionText(clone.Literal)
-			clone.Range = Range{}
+			clone := cleanedTextCopy(child, cleanAdmonitionTextAt)
 			if clone.Literal == "" {
 				continue
 			}
-			cleaned = append(cleaned, &clone)
+			cleaned = append(cleaned, clone)
 			leading = false
 			continue
 		}
@@ -305,24 +309,38 @@ func cleanAdmonitionLeadingChildren(children []*Node) []*Node {
 }
 
 func cleanAdmonitionText(text string) string {
-	text = strings.TrimLeft(text, "\n")
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimPrefix(line, "> ")
-		lines[i] = strings.TrimPrefix(lines[i], ">")
-	}
-	cleaned := strings.TrimLeft(strings.Join(lines, "\n"), " \t")
-	if strings.TrimSpace(cleaned) == "" {
-		return ""
-	}
+	cleaned, _ := cleanAdmonitionTextAt(text)
 	return cleaned
+}
+
+// cleanAdmonitionTextAt cleans text as cleanAdmonitionText does and also
+// returns the offset in text of the first byte that is kept.
+func cleanAdmonitionTextAt(text string) (string, int) {
+	trimmed := strings.TrimLeft(text, "\n")
+	from := len(text) - len(trimmed)
+	lines := strings.Split(trimmed, "\n")
+	for i, line := range lines {
+		stripped := strings.TrimPrefix(line, "> ")
+		stripped = strings.TrimPrefix(stripped, ">")
+		if i == 0 {
+			from += len(line) - len(stripped)
+		}
+		lines[i] = stripped
+	}
+	joined := strings.Join(lines, "\n")
+	cleaned := strings.TrimLeft(joined, " \t")
+	from += len(joined) - len(cleaned)
+	if strings.TrimSpace(cleaned) == "" {
+		return "", from
+	}
+	return cleaned, from
 }
 
 // --- Quote headings ---
 
 var bracketedQuoteHeadingRe = regexp.MustCompile(`^\[[^\^!][\s\S]*\]$`)
 
-func processBlockquoteHeadings(root *Node) {
+func processBlockquoteHeadings(root *Node, source []byte) {
 	walkNodes(root, func(n *Node, parent *Node, index int) bool {
 		if n.Type != NodeBlockquote || len(n.Children) == 0 {
 			return true
@@ -339,7 +357,14 @@ func processBlockquoteHeadings(root *Node) {
 		if !bracketedQuoteHeadingRe.MatchString(raw) {
 			return true
 		}
-		firstChild.Children[0] = newNode(NodeStrong, parseInline(bracketedQuoteHeadingText(raw), nil)...)
+		strong := newNode(NodeStrong, parseInline(bracketedQuoteHeadingText(raw), nil)...)
+		// The label sits one byte after the link's "[" when the link covers
+		// exactly the bracketed source; the parsed inline nodes then get ranges.
+		if r := firstNode.Range; r.StartLine != 0 && r.EndByte <= len(source) && string(source[r.StartByte:r.EndByte]) == raw {
+			strong.Range = r
+			strong.Children = parseInlineAt(bracketedQuoteHeadingText(raw), source, r.StartByte+1, nil)
+		}
+		firstChild.Children[0] = strong
 		firstChild.Children = cleanBlockquoteHeadingContinuation(firstChild.Children)
 		return true
 	})
@@ -362,24 +387,35 @@ func cleanBlockquoteHeadingContinuation(children []*Node) []*Node {
 			cleaned = append(cleaned, child)
 			continue
 		}
-		clone := *child
-		clone.Literal = cleanBlockquoteContinuationText(clone.Literal)
-		clone.Range = Range{}
+		clone := cleanedTextCopy(child, cleanBlockquoteContinuationTextAt)
 		if clone.Literal == "" {
 			continue
 		}
-		cleaned = append(cleaned, &clone)
+		cleaned = append(cleaned, clone)
 	}
 	return cleaned
 }
 
 func cleanBlockquoteContinuationText(text string) string {
+	cleaned, _ := cleanBlockquoteContinuationTextAt(text)
+	return cleaned
+}
+
+// cleanBlockquoteContinuationTextAt cleans text as
+// cleanBlockquoteContinuationText does and also returns the offset in text of
+// the first byte that is kept.
+func cleanBlockquoteContinuationTextAt(text string) (string, int) {
 	lines := strings.Split(text, "\n")
+	from := 0
 	for i, line := range lines {
-		lines[i] = strings.TrimPrefix(line, "> ")
-		lines[i] = strings.TrimPrefix(lines[i], ">")
+		stripped := strings.TrimPrefix(line, "> ")
+		stripped = strings.TrimPrefix(stripped, ">")
+		if i == 0 {
+			from = len(line) - len(stripped)
+		}
+		lines[i] = stripped
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), from
 }
 
 // --- Footnotes ---
@@ -526,10 +562,11 @@ func footnoteDefinitionChildren(children []*Node) ([]*Node, bool) {
 	firstText = strings.TrimPrefix(firstText, " ")
 	firstText = strings.TrimPrefix(firstText, "\t")
 	if firstText != "" {
-		clone := *first
-		clone.Literal = firstText
-		clone.Range = Range{}
-		out = append(out, &clone)
+		out = append(out, cleanedTextCopy(first, suffixCleaner(func(s string) string {
+			s = strings.TrimPrefix(s, ":")
+			s = strings.TrimPrefix(s, " ")
+			return strings.TrimPrefix(s, "\t")
+		})))
 	}
 	out = append(out, children[1:]...)
 	return out, true
@@ -789,6 +826,11 @@ func processDefinitionLists(root *Node) {
 		}
 		currentList.Children = append(currentList.Children, term)
 		currentList.Children = append(currentList.Children, descs...)
+		if currentList.Range.StartLine == 0 {
+			currentList.Range = child.Range
+		} else {
+			currentList.Range = extendRangeTo(currentList.Range, child.Range)
+		}
 	}
 	if currentList != nil {
 		out = append(out, currentList)
@@ -837,27 +879,27 @@ func splitDefinitionParagraph(para *Node) (*Node, []*Node, bool) {
 			// next text child so the description starts cleanly.
 			seg = seg[1:]
 			if len(seg) > 0 && seg[0] != nil && seg[0].Type == NodeText {
-				clone := *seg[0]
-				clone.Literal = strings.TrimLeft(clone.Literal, " \t")
-				clone.Range = Range{}
-				seg[0] = &clone
+				seg[0] = cleanedTextCopy(seg[0], suffixCleaner(func(s string) string {
+					return strings.TrimLeft(s, " \t")
+				}))
 			}
 		case lit == ": ":
 			seg = seg[1:]
 		case strings.HasPrefix(lit, ": "):
-			clone := *head
-			clone.Literal = strings.TrimLeft(lit[2:], " \t")
-			clone.Range = Range{}
-			seg = append([]*Node{&clone}, seg[1:]...)
+			clone := cleanedTextCopy(head, suffixCleaner(func(s string) string {
+				s = strings.TrimLeft(s, " \t")
+				return strings.TrimLeft(strings.TrimPrefix(s, ": "), " \t")
+			}))
+			seg = append([]*Node{clone}, seg[1:]...)
 		default:
 			return nil, nil, false
 		}
-		descs = append(descs, &Node{Type: NodeDefinitionDesc, Children: seg})
+		descs = append(descs, &Node{Type: NodeDefinitionDesc, Children: seg, Range: spanOfNodes(seg)})
 	}
 	if len(descs) == 0 {
 		return nil, nil, false
 	}
-	term := &Node{Type: NodeDefinitionTerm, Children: termChildren}
+	term := &Node{Type: NodeDefinitionTerm, Children: termChildren, Range: spanOfNodes(termChildren)}
 	return term, descs, true
 }
 
@@ -1028,7 +1070,7 @@ func processInlinePattern(root *Node, re *regexp.Regexp, factory func(match []st
 				newChildren = append(newChildren, child)
 				continue
 			}
-			split := splitTextByPattern(child.Literal, re, factory, child.Range)
+			split := splitTextByPattern(child, re, factory)
 			if len(split) == 1 && split[0].Type == NodeText {
 				newChildren = append(newChildren, child)
 				continue
@@ -1045,12 +1087,39 @@ func processInlinePattern(root *Node, re *regexp.Regexp, factory func(match []st
 	})
 }
 
-// splitTextByPattern splits a text string into alternating text and newly
-// created nodes based on a regex pattern.
-func splitTextByPattern(text string, re *regexp.Regexp, factory func(match []string) *Node, base Range) []*Node {
+// splitTextByPattern splits a text node into alternating text and newly
+// created nodes based on a regex pattern. Each new node's range is the part of
+// the text node's source text that it came from. When the literal is not the
+// source text (escapes and entities were decoded, or line prefixes were
+// removed) the offsets are mapped through the source text, and a node whose
+// source text cannot be established has no range.
+func splitTextByPattern(n *Node, re *regexp.Regexp, factory func(match []string) *Node) []*Node {
+	text, base := n.Literal, n.Range
 	locs := re.FindAllStringSubmatchIndex(text, -1)
 	if len(locs) == 0 {
 		return []*Node{textNodeRange(text, base)}
+	}
+
+	// span maps the literal's byte offsets a..b to a range in the source.
+	span := func(a, b int) Range {
+		if base.StartLine == 0 {
+			return Range{}
+		}
+		src := text
+		if n.raw != "" {
+			src = n.raw
+		}
+		if base.EndByte-base.StartByte != len(src) {
+			return Range{}
+		}
+		if n.raw != "" {
+			if decodeMarkdownText(n.raw) != text {
+				return Range{}
+			}
+			offsets := literalRawOffsets(n.raw)
+			a, b = offsets[a], offsets[b]
+		}
+		return textSliceRange(base, src, a, b)
 	}
 
 	var nodes []*Node
@@ -1058,7 +1127,7 @@ func splitTextByPattern(text string, re *regexp.Regexp, factory func(match []str
 
 	for _, loc := range locs {
 		if loc[0] > cursor {
-			nodes = append(nodes, textNodeRange(text[cursor:loc[0]], textSliceRange(base, text, cursor, loc[0])))
+			nodes = append(nodes, textNodeRange(text[cursor:loc[0]], span(cursor, loc[0])))
 		}
 
 		match := make([]string, len(loc)/2)
@@ -1070,15 +1139,125 @@ func splitTextByPattern(text string, re *regexp.Regexp, factory func(match []str
 
 		node := factory(match)
 		if node != nil {
-			node.Range = textSliceRange(base, text, loc[0], loc[1])
+			node.Range = span(loc[0], loc[1])
 			nodes = append(nodes, node)
 		}
 		cursor = loc[1]
 	}
 
 	if cursor < len(text) {
-		nodes = append(nodes, textNodeRange(text[cursor:], textSliceRange(base, text, cursor, len(text))))
+		nodes = append(nodes, textNodeRange(text[cursor:], span(cursor, len(text))))
 	}
 
 	return nodes
+}
+
+// cleanedTextCopy returns a copy of the text node n whose literal is what
+// clean makes of it, with a range that covers the kept source text. clean
+// returns the cleaned literal and the offset in its argument of the first kept
+// byte; it must only delete text before that byte and at the starts of the
+// following lines, so the node's range runs from that byte to the end of the
+// node's source text. When the offset cannot be established (the source text
+// and the range disagree) the copy has no range, which a caller can test with
+// HasSourceRange.
+func cleanedTextCopy(n *Node, clean func(string) (string, int)) *Node {
+	literal, from := clean(n.Literal)
+	clone := *n
+	clone.Literal = literal
+	clone.Range = Range{}
+	clone.raw = ""
+	if literal == "" || n.Range.StartLine == 0 {
+		return &clone
+	}
+	src := n.Literal
+	if n.raw != "" {
+		src = n.raw
+	}
+	if n.Range.EndByte-n.Range.StartByte != len(src) {
+		return &clone
+	}
+	if n.raw != "" {
+		cleanedRaw, rawFrom := clean(src)
+		if decodeMarkdownText(cleanedRaw) != literal {
+			return &clone
+		}
+		if cleanedRaw != literal {
+			clone.raw = cleanedRaw
+		}
+		from = rawFrom
+	}
+	if from < 0 || from >= len(src) {
+		return &clone
+	}
+	clone.Range = textSliceRange(n.Range, src, from, len(src))
+	return &clone
+}
+
+// suffixCleaner adapts a function that only trims the start of a string.
+func suffixCleaner(trim func(string) string) func(string) (string, int) {
+	return func(s string) (string, int) {
+		cleaned := trim(s)
+		return cleaned, len(s) - len(cleaned)
+	}
+}
+
+// spanOfNodes returns the range from the start of the first node that has a
+// source range to the end of the last one. It is the zero Range when none has.
+func spanOfNodes(nodes []*Node) Range {
+	var span Range
+	for _, n := range nodes {
+		if n == nil || !n.HasSourceRange() {
+			continue
+		}
+		if span.StartLine == 0 {
+			span = n.Range
+			continue
+		}
+		if n.Range.StartByte < span.StartByte {
+			span.StartByte, span.StartLine, span.StartCol = n.Range.StartByte, n.Range.StartLine, n.Range.StartCol
+		}
+		if n.Range.EndByte > span.EndByte {
+			span.EndByte, span.EndLine, span.EndCol = n.Range.EndByte, n.Range.EndLine, n.Range.EndCol
+		}
+	}
+	return span
+}
+
+// trimHeadingRanges ends a heading at its last line. The grammar can end a
+// heading in a list item after the indentation of the next line ("Bar\n  ---\n  "),
+// which is not part of the heading.
+func trimHeadingRanges(doc *Document) {
+	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
+		if n.Type != NodeHeading || n.Range.StartLine == 0 || n.Range.EndByte > len(doc.Source) {
+			return true
+		}
+		start, end := n.Range.StartByte, n.Range.EndByte
+		cut := end
+		for cut > start && (doc.Source[cut-1] == ' ' || doc.Source[cut-1] == '\t') {
+			cut--
+		}
+		if cut < end && cut > start && doc.Source[cut-1] == '\n' {
+			n.Range = sourceRange(doc.Source, start, cut)
+		}
+		return true
+	})
+}
+
+// extendIndentedCodeRanges starts a top-level indented code block at the
+// beginning of its first line. The grammar starts the node after the
+// indentation, but the indentation is what makes the block.
+func extendIndentedCodeRanges(doc *Document) {
+	for _, n := range doc.Root.Children {
+		if n == nil || n.Type != NodeCodeBlock || n.Range.StartLine == 0 || n.Range.StartCol == 1 || n.Range.EndByte > len(doc.Source) {
+			continue
+		}
+		start := n.Range.StartByte
+		lineStart := start
+		for lineStart > 0 && (doc.Source[lineStart-1] == ' ' || doc.Source[lineStart-1] == '\t') {
+			lineStart--
+		}
+		if lineStart == 0 || doc.Source[lineStart-1] == '\n' {
+			n.Range = sourceRange(doc.Source, lineStart, n.Range.EndByte)
+		}
+	}
 }
