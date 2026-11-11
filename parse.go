@@ -754,7 +754,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 
 	lines := strings.Split(text, "\n")
 	contentLines := make([]string, 0, len(lines))
-	prefixLens := make([]int, 0, len(lines)) // bytes of each line before its content
+	offsets := make([][]int, 0, len(lines)) // for each content byte, its byte offset in its source line
 	sawQuote := false
 	for _, line := range lines {
 		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
@@ -765,10 +765,10 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 				return nil // An unmarked blank line ends this block quote.
 			}
 			contentLines = append(contentLines, "")
-			prefixLens = append(prefixLens, len(line))
+			offsets = append(offsets, []int{len(line)})
 			continue
 		}
-		content, ok := stripBlockquoteMarker(line)
+		content, offs, ok := stripBlockquoteMarkerMap(line, true)
 		if !ok {
 			return nil
 		}
@@ -778,7 +778,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 			return nil
 		}
 		contentLines = append(contentLines, content)
-		prefixLens = append(prefixLens, len(line)-len(content))
+		offsets = append(offsets, offs)
 		sawQuote = true
 	}
 	if !sawQuote {
@@ -815,7 +815,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 	quote := &Node{Type: NodeBlockquote, Range: sourceRange(source, min(quoteStart, quoteEnd), quoteEnd)}
 	if inner != nil && inner.Root != nil {
 		quote.Children = inner.Root.Children
-		remapQuoteRanges(quote, source, lines, contentLines, prefixLens)
+		remapQuoteRanges(quote, source, lines, contentLines, offsets)
 	}
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{quote}, Range: sourceRange(source, 0, len(source))}, Source: source}
 	doc.extractFrontmatter()
@@ -824,33 +824,16 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 
 // remapQuoteRanges moves the ranges of a block quote's content from the
 // stripped text back to the source that still has the "> " markers. Nodes
-// without a range keep none. A line whose indentation had tabs is rewritten
-// with spaces when it is stripped, so inside it only the start of the content
-// and the end of the line map to the source exactly; a node that starts or
-// ends anywhere else on such a line gets no range rather than a wrong one.
-func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, prefixLens []int) {
+// without a range keep none. offsets[k][c] is the byte offset in line k of the
+// source of content byte c. Where a tab was expanded to spaces, a position
+// inside the run of spaces has no source byte: a node that starts or ends
+// there gets no range rather than a wrong one.
+func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, offsets [][]int) {
 	origStart := make([]int, len(lines)+1)
 	innerStart := make([]int, len(lines)+1)
 	for k := range lines {
 		origStart[k+1] = origStart[k] + len(lines[k]) + 1
 		innerStart[k+1] = innerStart[k] + len(contentLines[k]) + 1
-	}
-	// exactPrefix reports whether the content of line k is a suffix of the line.
-	exactPrefix := func(k int) bool {
-		return prefixLens[k] >= 0 && strings.HasSuffix(lines[k], contentLines[k])
-	}
-	// contentStart is the offset in line k where its content starts.
-	contentStart := func(k int) int {
-		if exactPrefix(k) {
-			return prefixLens[k]
-		}
-		line := lines[k]
-		at := len(line) - len(strings.TrimLeft(line, " \t"))
-		at++ // the marker
-		if at < len(line) && line[at] == ' ' {
-			at++
-		}
-		return min(at, len(line))
 	}
 	mapPos := func(b int, isEnd bool) (int, bool) {
 		k := sort.Search(len(lines), func(k int) bool { return innerStart[k+1] > b })
@@ -861,15 +844,13 @@ func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, 
 		if isEnd && col == 0 {
 			return origStart[k], true
 		}
-		switch {
-		case exactPrefix(k):
-			return origStart[k] + prefixLens[k] + col, true
-		case col == 0:
-			return origStart[k] + contentStart(k), true
-		case col == len(contentLines[k]):
+		if col >= len(offsets[k]) {
 			return origStart[k] + len(lines[k]), true
 		}
-		return 0, false
+		if col > 0 && col < len(contentLines[k]) && offsets[k][col] == offsets[k][col-1] {
+			return 0, false // inside a run of spaces that came from one tab
+		}
+		return origStart[k] + offsets[k][col], true
 	}
 	for _, child := range quote.Children {
 		walkNodes(child, func(n *Node, parent *Node, index int) bool {
@@ -936,19 +917,55 @@ func stripQuoteContinuationMarkers(n *Node) {
 }
 
 func stripBlockquoteMarker(line string) (string, bool) {
+	content, _, ok := stripBlockquoteMarkerMap(line, false)
+	return content, ok
+}
+
+// stripBlockquoteMarkerMap strips the quote marker and its padding from line.
+// With wantMap it also returns, for each byte of the content and for the end,
+// the byte offset in line that the byte came from. The bytes of a tab that was
+// expanded to spaces all map to the tab.
+func stripBlockquoteMarkerMap(line string, wantMap bool) (string, []int, bool) {
 	trimmed := strings.TrimLeft(line, " \t")
 	if !strings.HasPrefix(trimmed, ">") {
-		return "", false
+		return "", nil, false
 	}
+	pos := len(line) - len(trimmed) + 1 // offset in line of the byte after the marker
 	content := strings.TrimPrefix(trimmed, ">")
+	var offs []int // offs[i] is the source offset of content[i]
+	if wantMap {
+		offs = make([]int, 0, len(content)+1)
+	}
+	fill := func(n, at int) {
+		if wantMap {
+			for i := 0; i < n; i++ {
+				offs = append(offs, at)
+			}
+		}
+	}
 	if strings.HasPrefix(content, "\t") {
 		// The marker occupies one column. A following tab reaches the
 		// next four-column stop, of which one column is marker padding.
 		column := len(line) - len(trimmed) + 1
 		padding := 4 - column%4
+		fill(padding-1, pos)
 		content = strings.Repeat(" ", padding-1) + content[1:]
-	} else if strings.HasPrefix(content, " ") {
-		content = content[1:]
+		pos++
+		if wantMap {
+			for i := pos; i < len(line); i++ {
+				offs = append(offs, i)
+			}
+		}
+	} else {
+		if strings.HasPrefix(content, " ") {
+			content = content[1:]
+			pos++
+		}
+		if wantMap {
+			for i := pos; i < len(line); i++ {
+				offs = append(offs, i)
+			}
+		}
 	}
 	// Expand indentation tabs against their original column before the
 	// stripped content is reparsed. Text tabs after the indentation stay raw.
@@ -958,16 +975,35 @@ func stripBlockquoteMarker(line string) (string, bool) {
 	}
 	if strings.Contains(content[:indent], "\t") {
 		column := 0
+		var expanded []int
 		for j := 0; j < indent; j++ {
 			if content[j] == '\t' {
-				column += 4 - (column+2)%4
+				n := 4 - (column+2)%4
+				column += n
+				if wantMap {
+					for i := 0; i < n; i++ {
+						expanded = append(expanded, offs[j])
+					}
+				}
 			} else {
 				column++
+				if wantMap {
+					expanded = append(expanded, offs[j])
+				}
 			}
 		}
 		content = strings.Repeat(" ", column) + content[indent:]
+		if wantMap {
+			offs = append(expanded, offs[indent:]...)
+		}
 	}
-	return content, true
+	if wantMap {
+		offs = append(offs, len(line))
+		// offs holds one entry per source byte after the marker plus the end; trim
+		// to the content length plus one.
+		offs = offs[:len(content)+1]
+	}
+	return content, offs, true
 }
 
 const segmentedDocumentMinBytes = 2048
@@ -1351,8 +1387,10 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 				return nil, false // the header and delimiter rows must have the same cell count
 			}
 			table, next := fastTableNode(source, lines, i, ctx)
-			if next < len(lines) && strings.TrimSpace(lines[next].text) != "" {
-				return nil, false // the next line may be a row of the table
+			if next < len(lines) && strings.TrimSpace(lines[next].text) != "" && !(strings.HasPrefix(lines[next].text, "#") && isATXHeadingLine([]byte(lines[next].text))) {
+				// The next line may be a row of the table. An unindented ATX heading
+				// is the exception: it ends a table for certain (GFM 4.10).
+				return nil, false
 			}
 			children = append(children, table)
 			i = next
@@ -1452,7 +1490,7 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 	for end < len(lines) {
 		trimmed := strings.TrimSpace(lines[end].text)
 		indented := strings.HasPrefix(lines[end].text, "    ") || strings.HasPrefix(lines[end].text, "\t")
-		if !indented && len(trimmed) >= fenceLen && strings.Count(trimmed[:fenceLen], string(fenceChar)) == fenceLen {
+		if !indented && fastClosesFence(trimmed, fenceChar, fenceLen) {
 			break
 		}
 		end++
@@ -1482,6 +1520,17 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 	return codeBlockToDiagram(cb), end + 1, true
 }
 
+// fastClosesFence reports whether a line is a closing fence for a fence of
+// fenceLen characters of fenceChar: a run at least as long, followed by
+// nothing but spaces or tabs (CommonMark 4.5).
+func fastClosesFence(trimmed string, fenceChar byte, fenceLen int) bool {
+	run := 0
+	for run < len(trimmed) && trimmed[run] == fenceChar {
+		run++
+	}
+	return run >= fenceLen && strings.Trim(trimmed[run:], " \t") == ""
+}
+
 func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int) {
 	end := start
 	for end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end].text), "|") {
@@ -1505,6 +1554,9 @@ func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) 
 		for _, cell := range splitFastTableCellSpans(lines[i].text) {
 			// A cell starts at its first character that is not a space.
 			lead := len(cell.text) - len(strings.TrimLeft(cell.text, " \t"))
+			if lead == len(cell.text) {
+				lead = 0 // a cell of spaces keeps its raw span
+			}
 			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start+cell.start+lead, lines[i].start+cell.end)}
 			text := strings.TrimSpace(cell.text)
 			if text != "" {
@@ -1647,6 +1699,13 @@ func fastLineNeedsFullParser(text, trimmed string) bool {
 func fastListItemSimple(item string) bool {
 	if item == "" || item[0] == ' ' || item[0] == '\t' || item[0] == '>' || item[0] == '<' {
 		return false
+	}
+	if hashes := len(item) - len(strings.TrimLeft(item, "#")); hashes > 0 && hashes <= 6 &&
+		(hashes == len(item) || item[hashes] == ' ' || item[hashes] == '\t') {
+		return false // an ATX heading, possibly empty
+	}
+	if fastUnsupportedListMarker(item) || isLikelyReferenceDefinitionLine(item) {
+		return false // a nested list marker the fast path does not build, or a reference definition
 	}
 	return !isLooseListMarkerLine(item) && !isThematicBreakLine(item) && !isATXHeadingLine([]byte(item)) && !isMarkdownFenceLine(item)
 }
@@ -3833,14 +3892,16 @@ func isOrderedListMarker(markerType string) bool {
 func orderedListStart(marker string) string {
 	marker = strings.TrimSpace(marker)
 	start := 0
+	digits := 0
 	for i := 0; i < len(marker); i++ {
 		if marker[i] < '0' || marker[i] > '9' {
 			break
 		}
 		start = start*10 + int(marker[i]-'0')
+		digits++
 	}
-	if start == 0 {
-		return ""
+	if digits == 0 {
+		return "" // no numeric marker; a start of 0 is a number (CommonMark 5.2)
 	}
 	return strconv.Itoa(start)
 }
@@ -5472,7 +5533,18 @@ func appendText(nodes *[]*Node, text string) {
 func appendTextRange(nodes *[]*Node, text string, r Range) {
 	if len(*nodes) > 0 && (*nodes)[len(*nodes)-1].Type == NodeText {
 		last := (*nodes)[len(*nodes)-1]
+		// Keep the undecoded source of the merged text: splitting at line ends
+		// and mapping offsets use it.
+		source := last.Literal
+		if last.raw != "" {
+			source = last.raw
+		}
 		last.Literal += decodeMarkdownText(text)
+		if source += text; source != last.Literal {
+			last.raw = source
+		} else {
+			last.raw = ""
+		}
 		if last.Range.StartLine != 0 && r.StartLine != 0 {
 			last.Range.EndByte = r.EndByte
 			last.Range.EndLine = r.EndLine
