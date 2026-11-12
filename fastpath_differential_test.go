@@ -231,14 +231,12 @@ func conformanceInputs(t testing.TB) []string {
 	return out
 }
 
+// TestFastPathMatchesFullParser compares the shortcut reading and the grammar
+// reading in the default profile. It does not run in the GFM profile: that
+// profile has no shortcut to compare (see TestGFMProfileTakesNoShortcut).
 func TestFastPathMatchesFullParser(t *testing.T) {
-	for _, profile := range []ParseProfile{ProfileMarkdownPlus, ProfileGFM} {
-		t.Run(profile.String(), func(t *testing.T) {
-			differentialProfile = profile
-			defer func() { differentialProfile = ProfileMarkdownPlus }()
-			checkFastPathMatchesFullParser(t)
-		})
-	}
+	differentialProfile = ProfileMarkdownPlus
+	checkFastPathMatchesFullParser(t)
 }
 
 func checkFastPathMatchesFullParser(t *testing.T) {
