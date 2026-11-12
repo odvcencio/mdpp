@@ -10,7 +10,7 @@ import (
 // The leading HTML comment sends the rest of the document through the
 // fast block path.
 func TestThematicBreakInterruptsParagraphAfterLeadingBlock(t *testing.T) {
-	breaks := []string{"***", "___", "* * *", "_ _ _", "- - -", "*****", "  ***"}
+	breaks := []string{"***", "___", "* * *", "_ _ _", "- - -", "*****", "  ***", "-\t-\t-"}
 	for _, br := range breaks {
 		for _, lead := range []string{"", "<!-- c -->\n\n"} {
 			for _, tc := range []struct {

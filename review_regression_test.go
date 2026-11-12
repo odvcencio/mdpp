@@ -102,11 +102,11 @@ func TestClosingFenceHasNoTrailingText(t *testing.T) {
 	}
 }
 
-// Explicit expected trees (written from the specification, not from the output
-// of either path) for the three classes in which the full parser is wrong. The
-// fast path must produce exactly this tree; the differential test only waives
-// the blocks that overlap the construct.
-func TestKnownFastPathCases(t *testing.T) {
+// Explicit expected trees, written from the specification and not from the
+// output of either path, for three classes in which the full path once read a
+// document wrongly. Both paths must produce exactly this tree. The
+// differential test waives nothing.
+func TestSpecificationTreesOnBothPaths(t *testing.T) {
 	cases := []struct{ name, src, want string }{
 		{"breaks after a break are breaks, not front matter (CommonMark 4.1)", "***\n\n***\n\n---\n\n---\n", `Document "" [0-19 1:1-8:1]
  ThematicBreak "" [0-4 1:1-2:1]
@@ -137,18 +137,10 @@ func TestKnownFastPathCases(t *testing.T) {
 `},
 	}
 	for _, tc := range cases {
-		if got := parseWithFastPath(tc.src, true); got != tc.want {
-			t.Errorf("%s: %q\ngot:\n%swant:\n%s", tc.name, tc.src, got, tc.want)
-		}
-	}
-}
-
-// The expected trees differ from the full parser's, which is the reason for the
-// waiver: if the full parser is fixed, this test fails and the waiver goes.
-func TestKnownFastPathDifferencesStillExist(t *testing.T) {
-	for _, src := range []string{"***\n\n***\n\n---\n\n---\n", "***\n\n[link](\\(foo\\))\n", "***\n|h|\n|-|\n|h|\n|-|\n# h\n"} {
-		if parseWithFastPath(src, true) == parseWithFastPath(src, false) {
-			t.Errorf("%q: the readings agree now; remove its waiver from knownFastPathDifferences", src)
+		for _, fast := range []bool{true, false} {
+			if got := parseWithFastPath(tc.src, fast); got != tc.want {
+				t.Errorf("%s: %q (fast path %v)\ngot:\n%swant:\n%s", tc.name, tc.src, fast, got, tc.want)
+			}
 		}
 	}
 }

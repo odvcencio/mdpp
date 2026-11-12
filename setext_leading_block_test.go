@@ -131,3 +131,64 @@ func TestSetextHeadingInSegmentedDocument(t *testing.T) {
 		t.Fatalf("two-line setext heading not read in a segmented document")
 	}
 }
+
+// An underline may be indented by up to three spaces and may end in white
+// space; four spaces of indentation make it paragraph text (CommonMark 4.3).
+func TestSetextUnderlineIndentationAndTrailingWhitespace(t *testing.T) {
+	cases := []struct {
+		name    string
+		src     string
+		heading bool
+	}{
+		{"no indent", "***\n\nT\nU\n===\n", true},
+		{"one space", "***\n\nT\nU\n ===\n", true},
+		{"three spaces", "***\n\nT\nU\n   ===\n", true},
+		{"four spaces", "***\n\nT\nU\n    ===\n", false},
+		{"trailing spaces", "***\n\nT\nU\n===  \n", true},
+		{"trailing tab", "***\n\nT\nU\n---\t\n", true},
+		{"inner space", "***\n\nT\nU\n= =\n", false},
+		{"text after", "***\n\nT\nU\n=== x\n", false},
+	}
+	for _, tc := range cases {
+		doc := MustParse([]byte(tc.src))
+		got := len(doc.Root.Children) == 2 && doc.Root.Children[1].Type == NodeHeading
+		if got != tc.heading {
+			t.Errorf("%s %q: heading = %v, want %v\n%s", tc.name, tc.src, got, tc.heading, DumpTreeForSnapshot(doc.Root))
+		}
+	}
+}
+
+// Ranges refer to Document.Source, in which CRLF is normalized to LF.
+func TestSetextHeadingAfterLeadingBlockExactRanges(t *testing.T) {
+	for _, src := range []string{"<!-- c -->\n\nT\nU\n=\n", "<!-- c -->\r\n\r\nT\r\nU\r\n=\r\n"} {
+		doc := MustParse([]byte(src))
+		kids := doc.Root.Children
+		if len(kids) != 2 || kids[1].Type != NodeHeading {
+			t.Fatalf("%q: unexpected blocks:\n%s", src, DumpTreeForSnapshot(doc.Root))
+		}
+		h := kids[1]
+		if got := string(doc.Source[h.Range.StartByte:h.Range.EndByte]); got != "T\nU\n=\n" {
+			t.Errorf("%q: heading covers %q", src, got)
+		}
+		if h.Range.StartLine != 3 || h.Range.StartCol != 1 || h.Range.EndLine != 6 || h.Range.EndCol != 1 {
+			t.Errorf("%q: heading points %+v", src, h.Range)
+		}
+		want := []struct {
+			typ         NodeType
+			raw         string
+			line, col   int
+			eLine, eCol int
+		}{{NodeText, "T", 3, 1, 3, 2}, {NodeSoftBreak, "\n", 3, 2, 4, 1}, {NodeText, "U", 4, 1, 4, 2}}
+		if len(h.Children) != len(want) {
+			t.Fatalf("%q: heading children:\n%s", src, DumpTreeForSnapshot(doc.Root))
+		}
+		for i, w := range want {
+			c := h.Children[i]
+			r := c.Range
+			if c.Type != w.typ || string(doc.Source[r.StartByte:r.EndByte]) != w.raw ||
+				r.StartLine != w.line || r.StartCol != w.col || r.EndLine != w.eLine || r.EndCol != w.eCol {
+				t.Errorf("%q: child %d %v has range %+v (%q)", src, i, c.Type, r, doc.Source[r.StartByte:r.EndByte])
+			}
+		}
+	}
+}
