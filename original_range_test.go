@@ -87,3 +87,55 @@ func TestOriginalRangeCRLFHeadingEnd(t *testing.T) {
 		t.Errorf("LF input: %d, %d, %v", s, e, ok)
 	}
 }
+
+// OriginalRange accepts only the input of the document: every byte of it, or
+// every byte but the final line feed that Parse adds. A truncated input, an
+// empty input, an extended input and an unrelated input are refused, and so is
+// a range outside the source or a range without a position.
+func TestOriginalRangeRefusesAnInputThatIsNotTheDocumentsInput(t *testing.T) {
+	for _, profile := range []ParseProfile{ProfileMarkdownPlus, ProfileGFM} {
+		input := []byte("# h\r\n\r\n- [x] a\r\n<!-- c -->")
+		doc, err := ParseWithOptions(input, ParseOptions{Profile: profile})
+		if err != nil {
+			t.Fatal(err)
+		}
+		heading := doc.Root.Find(NodeHeading)[0]
+		if s, e, ok := doc.OriginalRange(input, heading.Range); !ok || s != 0 || e != 5 {
+			t.Errorf("%v: the document's own input: %d, %d, %v", profile, s, e, ok)
+		}
+		// The input without its final line feed is the document's input: Parse
+		// added the line feed. With it, the input is a different text.
+		withFinal := append(append([]byte(nil), input...), '\n')
+		if _, _, ok := doc.OriginalRange(withFinal, heading.Range); !ok {
+			t.Errorf("%v: the input with the line feed that Parse adds was refused", profile)
+		}
+		for name, bad := range map[string][]byte{
+			"truncated to a prefix":    []byte("#"),
+			"truncated by one line":    []byte("# h\r\n\r\n- [x] a\r\n"),
+			"empty":                    {},
+			"nil":                      nil,
+			"extended":                 append(append([]byte(nil), input...), []byte("\r\nmore")...),
+			"extended by a blank line": append(append([]byte(nil), input...), '\n', '\n'),
+			"unrelated, same length":   []byte("# x\r\n\r\n- [x] a\r\n<!-- c -->"),
+			"unrelated":                []byte("hello"),
+		} {
+			if s, e, ok := doc.OriginalRange(bad, heading.Range); ok || s != 0 || e != 0 {
+				t.Errorf("%v: %s: OriginalRange = %d, %d, %v, want 0, 0, false", profile, name, s, e, ok)
+			}
+		}
+		for name, r := range map[string]Range{
+			"past the source": {StartByte: 0, EndByte: len(doc.Source) + 1, StartLine: 1, StartCol: 1, EndLine: 9, EndCol: 1},
+			"reversed":        {StartByte: 5, EndByte: 2, StartLine: 1, StartCol: 1, EndLine: 1, EndCol: 1},
+			"no position":     {},
+		} {
+			if s, e, ok := doc.OriginalRange(input, r); ok || s != 0 || e != 0 {
+				t.Errorf("%v: range %s: OriginalRange = %d, %d, %v, want 0, 0, false", profile, name, s, e, ok)
+			}
+		}
+	}
+	// The empty document: its input is empty.
+	empty := MustParse(nil)
+	if _, _, ok := empty.OriginalRange([]byte("x"), Range{StartByte: 0, EndByte: 0, StartLine: 1, StartCol: 1, EndLine: 1, EndCol: 1}); ok {
+		t.Errorf("the empty document accepted a non-empty input")
+	}
+}
