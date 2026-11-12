@@ -139,8 +139,16 @@ type linkRefDef struct {
 //     cannot accept a partial answer, and report the diagnostic.
 //
 // Diagnostic.StructureUncertain is true for each of these codes. Every range
-// is in Document.Source, like the ranges of nodes. A fallback never goes
-// without a diagnostic.
+// is in Document.Source, like the ranges of nodes. Each fallback in the block
+// and inline readers records a diagnostic, and the range covers everything the
+// fallback kept as text, including structure outside the place where the
+// grammar reported its error.
+//
+// A certified document is one in which the parser took no fallback. It does not
+// say that the grammar's reading agrees with the specification for every
+// input: where the grammar misreads a construct without reporting an error,
+// there is no diagnostic to give. testdata/spec/known-failures.json lists the
+// specification examples that read differently.
 type Document struct {
 	Root            *Node
 	Source          []byte
