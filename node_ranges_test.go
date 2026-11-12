@@ -11,6 +11,10 @@ import (
 // of contents is built from the headings, and its list, items and links point
 // at no bytes. Such a node has the zero Range (HasSourceRange is false).
 func rangeExempt(n *Node, ancestors []*Node) bool {
+	// A padding cell that a merged table adds to a short row claims no source.
+	if n.Type == NodeTableCell && n.Range == (Range{}) && len(n.Children) == 0 {
+		return true
+	}
 	for _, a := range ancestors {
 		if a.Type == NodeTableOfContents {
 			return true

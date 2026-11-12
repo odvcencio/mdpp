@@ -16,6 +16,11 @@ import (
 
 var dumpWithoutRanges bool
 
+// dumpSource, when set, is the source of the dumped tree. The dump then
+// compares the end of a FootnoteDef up to its final line feed (see
+// writeFullNode). It is set only while parseWithFastPath dumps.
+var dumpSource []byte
+
 func fullNodeDump(n *Node) string {
 	var sb strings.Builder
 	writeFullNode(&sb, n, 0)
@@ -33,13 +38,26 @@ func writeFullNode(sb *strings.Builder, n *Node, depth int) {
 		fmt.Fprintf(sb, " %s=%q", k, n.Attrs[k])
 	}
 	r := n.Range
-	if dumpWithoutRanges {
+	if n.Type == NodeFootnoteDef && dumpSource != nil && !dumpWithoutRanges {
+		// The only range comparison that is not exact. The grammar path ends a
+		// footnote definition either at the end of its last line or after that
+		// line's line feed, depending on what follows it ("[^1]: a\n" ends
+		// before the line feed, "[^1]: a\nb\n" after it). The fast path always
+		// ends it at the end of the line. Both ends are read as the same
+		// position here: a trailing line feed (with its carriage return) is
+		// not counted. Any other difference in the end still shows, and the
+		// start, the children and every other field are compared exactly.
+		end := r.EndByte
+		if end > 0 && end <= len(dumpSource) && dumpSource[end-1] == '\n' {
+			end--
+			if end > 0 && dumpSource[end-1] == '\r' {
+				end--
+			}
+		}
+		line, col := sourceLineCol(dumpSource, end)
+		fmt.Fprintf(sb, " %q [%d-%d %d:%d-%d:%d]\n", n.Literal, r.StartByte, end, r.StartLine, r.StartCol, line, col)
+	} else if dumpWithoutRanges {
 		fmt.Fprintf(sb, " %q\n", n.Literal)
-	} else if n.Type == NodeFootnoteDef {
-		// The grammar path ends a footnote definition at the line end or at the
-		// next line, depending on what follows; only the end fields are not
-		// compared. The start is.
-		fmt.Fprintf(sb, " %q [%d-* %d:%d-*]\n", n.Literal, r.StartByte, r.StartLine, r.StartCol)
 	} else {
 		fmt.Fprintf(sb, " %q [%d-%d %d:%d-%d:%d]\n", n.Literal, r.StartByte, r.EndByte, r.StartLine, r.StartCol, r.EndLine, r.EndCol)
 	}
@@ -65,6 +83,8 @@ func parseWithFastPath(src string, fast bool) (dump string) {
 	if err != nil || doc == nil {
 		return "error"
 	}
+	dumpSource = doc.Source
+	defer func() { dumpSource = nil }()
 	return fullNodeDump(doc.Root)
 }
 
