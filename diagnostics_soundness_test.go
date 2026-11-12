@@ -187,3 +187,53 @@ func TestManyInlineStopsKeepTheirCoverage(t *testing.T) {
 		t.Errorf("%d stops left in the context", len(ctx.inlineStops))
 	}
 }
+
+// A paragraph that the grammar cuts in the middle of a line is read again from
+// its first byte (joinSplitParagraphLine). The diagnostics that its first
+// reading recorded belong to a discarded reading: only those of the joined
+// reading stay, and none overlaps the link that the joined reading preserved.
+func TestJoinedParagraphKeepsOnlyTheDiagnosticsOfTheJoinedReading(t *testing.T) {
+	const link = `[link \[bar](/uri)` // 18 bytes, a complete link
+	cases := []struct {
+		name, src string
+		offset    int // where the paragraph starts
+	}{
+		{"alone", link + " [a](<b\n", 0},
+		{"after a break (fast path)", "***\n" + link + " [a](<b\n", 4},
+		{"two blocks", link + " [a](<b\n\n*x* <a http://a\n", 0},
+	}
+	for _, tc := range cases {
+		check := func(label string, doc *Document) {
+			t.Helper()
+			var inParagraph []Diagnostic
+			for _, d := range doc.Diagnostics() {
+				if d.Range.StartByte >= tc.offset && d.Range.EndByte <= tc.offset+len(link)+len(" [a](<b") {
+					inParagraph = append(inParagraph, d)
+				}
+			}
+			if len(inParagraph) != 1 {
+				t.Errorf("%s (%s): %d diagnostics in the paragraph, want 1: %s", tc.name, label, len(inParagraph), diagnosticSummary(doc))
+				return
+			}
+			if got := inParagraph[0].Range.StartByte; got < tc.offset+len(link) {
+				t.Errorf("%s (%s): the diagnostic starts at %d, inside the link [%d,%d)", tc.name, label, got, tc.offset, tc.offset+len(link))
+			}
+			if got := inParagraph[0].Range.EndByte; got != tc.offset+len(link)+len(" [a](<b") {
+				t.Errorf("%s (%s): the diagnostic ends at %d, want %d", tc.name, label, got, tc.offset+len(link)+len(" [a](<b"))
+			}
+		}
+		fastBlockChunkDisabled = true
+		check("full parser", MustParse([]byte(tc.src)))
+		fastBlockChunkDisabled = false
+		check("fast path allowed", MustParse([]byte(tc.src)))
+		p := NewParser()
+		for i := 0; i < 3; i++ {
+			doc, err := p.Parse([]byte(tc.src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(fmt.Sprintf("Parser, parse %d", i+1), doc)
+		}
+		p.Close()
+	}
+}

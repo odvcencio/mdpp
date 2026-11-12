@@ -586,6 +586,38 @@ func (c *parseCtx) rewind(m diagMark) {
 	}
 }
 
+// discardWithin drops the diagnostics recorded after m whose range lies inside
+// r. A parse that replaces one reading of a span by another discards what the
+// first reading recorded for that span, and only that: diagnostics of other
+// blocks recorded since m stay. An inline stop with an unknown position stays,
+// because it cannot be attributed to the span.
+func (c *parseCtx) discardWithin(m diagMark, r Range) {
+	if c == nil {
+		return
+	}
+	inside := func(x Range) bool {
+		return x != (Range{}) && x.StartByte >= r.StartByte && x.EndByte <= r.EndByte
+	}
+	if len(c.recoveryDiagnostics) > m.recovery {
+		kept := c.recoveryDiagnostics[:m.recovery]
+		for _, d := range c.recoveryDiagnostics[m.recovery:] {
+			if !inside(d.Range) {
+				kept = append(kept, d)
+			}
+		}
+		c.recoveryDiagnostics = kept
+	}
+	if len(c.inlineStops) > m.stops {
+		kept := c.inlineStops[:m.stops]
+		for _, x := range c.inlineStops[m.stops:] {
+			if !inside(x) {
+				kept = append(kept, x)
+			}
+		}
+		c.inlineStops = kept
+	}
+}
+
 // collect moves the diagnostics recorded after m onto doc. Their ranges refer
 // to source, which is the source of doc. When the budget is spent the whole
 // result is replaced by the source as text, with one diagnostic that covers it,

@@ -5354,8 +5354,9 @@ func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, s
 			appendLooseRaw(string(source[cursor:childStart]), cursor)
 		}
 
+		mark := ctx.mark()
 		if converted := convertBlockCtx(bt, child, source, ctx); converted != nil {
-			if loose.Len() > 0 && joinSplitParagraphLine(converted, loose.String(), looseStart, source, ctx) {
+			if loose.Len() > 0 && joinSplitParagraphLine(converted, loose.String(), looseStart, source, ctx, mark) {
 				loose.Reset()
 				looseStart = 0
 				looseAttach = false
@@ -5386,7 +5387,7 @@ func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, s
 // paragraph starting where it ends. A block cannot start in the middle of a
 // line, so both belong to one paragraph. The first paragraph of block is
 // replaced by a paragraph that starts at the loose text.
-func joinSplitParagraphLine(block *Node, loose string, looseStart int, source []byte, ctx *parseCtx) bool {
+func joinSplitParagraphLine(block *Node, loose string, looseStart int, source []byte, ctx *parseCtx, mark diagMark) bool {
 	first := block
 	if block.Type == NodeDocument {
 		if len(block.Children) == 0 {
@@ -5400,6 +5401,10 @@ func joinSplitParagraphLine(block *Node, loose string, looseStart int, source []
 		return false
 	}
 	text := strings.TrimRight(string(source[looseStart:first.Range.EndByte]), "\n")
+	// The paragraph is read again from its first byte. What its first reading
+	// recorded (made since mark, inside its range) belongs to a reading that is
+	// discarded; the new reading records its own.
+	ctx.discardWithin(mark, first.Range)
 	first.Range = sourceRange(source, looseStart, first.Range.EndByte)
 	first.Children = splitTextNewlines(parseInlineAt(text, source, looseStart, ctx))
 	return true
