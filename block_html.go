@@ -29,7 +29,7 @@ func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
 	inFence := false
 	for i := 0; i < len(lines); {
 		line := lines[i].text
-		if isMarkdownFenceLine(strings.TrimSpace(line)) {
+		if isMarkdownFenceLine(trimMarkdownSpace(line)) {
 			inFence = !inFence
 		}
 		kind := ""
@@ -37,7 +37,7 @@ func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
 			kind = htmlBlockStart(line, atBlockStart)
 		}
 		if kind == "" {
-			atBlockStart = strings.TrimSpace(line) == ""
+			atBlockStart = trimMarkdownSpace(line) == ""
 			i++
 			continue
 		}
@@ -57,7 +57,7 @@ func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
 				endLine++
 			}
 		} else {
-			for endLine < len(lines) && strings.TrimSpace(lines[endLine].text) != "" {
+			for endLine < len(lines) && trimMarkdownSpace(lines[endLine].text) != "" {
 				endLine++
 			}
 		}
@@ -73,7 +73,7 @@ func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
 		chunkStart = end
 		chunkLine = i + 1
 		atBlockStart = true
-		for i < len(lines) && strings.TrimSpace(lines[i].text) == "" {
+		for i < len(lines) && trimMarkdownSpace(lines[i].text) == "" {
 			chunkStart = lines[i].next
 			chunkLine = i + 2
 			i++
@@ -120,7 +120,7 @@ func htmlBlockStart(line string, atBlockStart bool) string {
 			}
 		}
 	}
-	trimmed := strings.TrimSpace(line)
+	trimmed := trimMarkdownSpace(line)
 	if strings.HasSuffix(trimmed, "/>") {
 		return "" // MDX style self-closing components stay inline.
 	}

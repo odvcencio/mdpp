@@ -13,6 +13,7 @@ func postProcess(doc *Document) {
 		return
 	}
 	flattenDocumentNodes(doc.Root)
+	mergeAdjacentTables(doc)
 	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
 		if n.Type == NodeBlockquote {
 			stripQuoteContinuationMarkers(n)
