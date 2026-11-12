@@ -286,7 +286,19 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 	original := source
 	var inserts []int
 	if ctx.gfm() {
-		// GFM has no alerts to lower and no front matter to skip.
+		// GFM has no alerts to lower and no front matter to skip. The grammar
+		// reads a leading "---" line, a block and a closing "---" line as front
+		// matter and hides everything in the block, including headings. GFM has
+		// no front matter: the line is a thematic break. Blank lines before it
+		// change nothing in the reading and stop the grammar from reading front
+		// matter, which it does only at the first byte. They are a two-byte
+		// insertion, which the ranges are mapped back across like the alert
+		// lowering. The change is made only when a closing "---" line exists,
+		// which is what makes the grammar read front matter.
+		if bytes.HasPrefix(source, []byte("---\n")) && (bytes.Contains(source[3:], []byte("\n---\n")) || bytes.HasSuffix(source, []byte("\n---"))) {
+			source = append([]byte("\n\n"), source...)
+			inserts = append(inserts, 0)
+		}
 	} else if _, frontmatterEnd, ok := parseFrontmatter(source, nil); ok {
 		body, bodyInserts := lowerMarkdownPlusSource(source[frontmatterEnd:])
 		if len(bodyInserts) > 0 {
@@ -481,9 +493,12 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 			Range:    sourceRange(source, 0, len(source)),
 		})
 	}
-	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode())
+	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode(), ctx.gfm())
 	doc.extractFrontmatterCtx(ctx)
 	postProcess(doc, ctx)
+	if ctx.gfm() {
+		doc.diagnostics = append(doc.diagnostics, gfmHTMLBlockHazards(source, doc.Root)...)
+	}
 	if topLevel && ctx != nil {
 		ctx.cache.pruneNotIn(ctx.seen)
 	}
@@ -491,6 +506,9 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 }
 
 func parseOnlyReferenceDefinitions(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseOnlyReferenceDefinitions") {
+		return nil
+	}
 	parseSource := append(append([]byte(nil), source...), '\n')
 	tree, err := parsePooled(blockLang(), mdEntry, parseSource)
 	if err != nil || tree == nil {
@@ -521,7 +539,7 @@ func parseOnlyReferenceDefinitions(source []byte, ctx *parseCtx) *Document {
 		def.Range = sourceRange(source, def.Range.StartByte, def.Range.EndByte)
 	}
 	root.Range = sourceRange(source, 0, len(source))
-	doc := &Document{Root: root, Source: source, linkRefDefs: collectLinkRefDefs(bt, bt.RootNode())}
+	doc := &Document{Root: root, Source: source, linkRefDefs: collectLinkRefDefs(bt, bt.RootNode(), ctx.gfm())}
 	doc.extractFrontmatterCtx(ctx)
 	postProcess(doc, ctx)
 	return doc
@@ -539,7 +557,7 @@ func allSourceWhitespace(source []byte) bool {
 // collectLinkRefDefs walks the tree-sitter AST gathering every
 // link_reference_definition that is not a footnote definition. Keys are
 // lowercased, whitespace-normalized labels per CommonMark.
-func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node) map[string]linkRefDef {
+func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node, gfm bool) map[string]linkRefDef {
 	out := make(map[string]linkRefDef)
 	var walk func(n *gotreesitter.Node)
 	walk = func(n *gotreesitter.Node) {
@@ -548,8 +566,9 @@ func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node) map
 		}
 		if bt.NodeType(n) == "link_reference_definition" {
 			raw := strings.TrimRight(bt.NodeText(n), "\n")
-			// Skip footnote defs.
-			if footnoteDefinitionRawRe.MatchString(raw) {
+			// Skip footnote defs (Markdown++). In GFM "[^a]: /u" is a link
+			// reference definition with the label "^a", like any other.
+			if !gfm && footnoteDefinitionRawRe.MatchString(raw) {
 				return
 			}
 			var label, dest, title string
@@ -564,7 +583,7 @@ func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node) map
 					title = stripQuotes(bt.NodeText(c))
 				}
 			}
-			if footnoteDefinitionLabelRe.MatchString(label) {
+			if !gfm && footnoteDefinitionLabelRe.MatchString(label) {
 				return
 			}
 			label = normalizeLinkLabel(label)
@@ -752,6 +771,9 @@ func lowerMarkdownPlusSource(source []byte) ([]byte, []int) {
 }
 
 func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseSimpleBlockquoteDocument") {
+		return nil
+	}
 	text := strings.TrimRight(strings.ReplaceAll(string(source), "\r\n", "\n"), "\n")
 	if text == "" || !strings.Contains(text, ">") {
 		return nil
@@ -1166,6 +1188,9 @@ type blockChunk struct {
 }
 
 func parseSegmentedDocumentCtx(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseSegmentedDocumentCtx") {
+		return nil
+	}
 	chunks := topLevelHeadingChunks(source)
 	if len(chunks) < 2 {
 		return nil
@@ -1499,7 +1524,7 @@ func fastStrayRuneIsText(source []byte, line *fastLineBounds, at, size int) bool
 var fastBlockChunkDisabled bool
 
 func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
-	if fastBlockChunkDisabled {
+	if !ctx.shortcut("parseFastBlockChunk") || fastBlockChunkDisabled {
 		return nil, false
 	}
 	if len(source) == 0 || bytes.HasPrefix(source, []byte("---\n")) || bytes.Contains(source, []byte(":::")) {
@@ -2107,7 +2132,7 @@ func parseContainerDocument(source []byte) *Document {
 }
 
 func parseContainerDocumentCtx(source []byte, ctx *parseCtx) *Document {
-	if ctx.gfm() {
+	if !ctx.shortcut("parseContainerDocumentCtx") {
 		return nil // ":::note" is text in GFM
 	}
 	if !bytes.Contains(source, []byte(":::")) {
@@ -2647,6 +2672,9 @@ func isMarkdownFenceLine(line string) bool {
 // for this shape; CommonMark spec does (§ 4.4 allows them at document
 // start).
 func parseAllIndentedDocument(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseAllIndentedDocument") {
+		return nil
+	}
 	text := strings.TrimRight(string(source), "\n")
 	if text == "" {
 		return nil
@@ -2707,6 +2735,9 @@ func stripIndentColumns(line string, columns int) (string, bool) {
 // every non-blank source line is a list item and at least one item is at
 // depth 5 or deeper, rebuild the list tree from indentation levels.
 func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseDeepNestedListDocument") {
+		return nil
+	}
 	text := strings.TrimRight(string(source), "\n")
 	if text == "" {
 		return nil
@@ -5397,7 +5428,6 @@ func appendRecoveredBlockText(nodes *[]*Node, text string, source []byte, offset
 	}
 	return true
 }
-
 
 func looksLikeStructuredBlockText(text string) bool {
 	if strings.TrimSpace(text) == "" {

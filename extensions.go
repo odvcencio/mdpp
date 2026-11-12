@@ -104,8 +104,10 @@ func processReferenceLinks(doc *Document) {
 		// those have already been consumed by admonition/footnote processors
 		// or remain as literal text. Only reference-style links we care about
 		// either have a `ref` attr or are collapsed/shortcut over plain text.
+		// In GFM these labels are ordinary: "[^a]" and "[!a]" are shortcut
+		// references to a definition with that label.
 		raw := n.Attrs["raw"]
-		if strings.HasPrefix(raw, "[!") || strings.HasPrefix(raw, "[^") {
+		if doc.profile != ProfileGFM && (strings.HasPrefix(raw, "[!") || strings.HasPrefix(raw, "[^")) {
 			return true
 		}
 		label := n.Attrs["ref"]

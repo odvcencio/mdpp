@@ -276,3 +276,24 @@ func checkFastPathMatchesFullParser(t *testing.T) {
 	}
 	t.Logf("%d entries, %d distinct inputs compared", len(inputs), len(distinct))
 }
+
+// The GFM profile takes no shortcut, so the switch that disables the fast path
+// changes no tree in it. The inputs are the first 4,000 of the corpus and the
+// reviewed boundary inputs.
+func TestGFMProfileIgnoresTheFastPathSwitch(t *testing.T) {
+	inputs := append(append([]string{}, reviewedBoundaryInputs...), differentialInputs()[:4000]...)
+	dump := func(src string, fast bool) string {
+		fastBlockChunkDisabled = !fast
+		defer func() { fastBlockChunkDisabled = false }()
+		doc, err := ParseWithOptions([]byte(src), ParseOptions{Profile: ProfileGFM})
+		if err != nil || doc == nil {
+			return "error"
+		}
+		return fullNodeDump(doc.Root)
+	}
+	for _, src := range inputs {
+		if a, b := dump(src, true), dump(src, false); a != b {
+			t.Fatalf("%q: the GFM tree changes with the fast path switch:\n%s\nversus\n%s", src, a, b)
+		}
+	}
+}
