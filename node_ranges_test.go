@@ -18,6 +18,10 @@ func rangeExempt(n *Node, ancestors []*Node) bool {
 	if n.Type == NodeDefinitionList {
 		return true
 	}
+	// A padding cell that a merged table adds to short rows claims no source.
+	if n.Type == NodeTableCell && n.Range == (Range{}) && len(n.Children) == 0 {
+		return true
+	}
 	for _, a := range ancestors {
 		switch a.Type {
 		case NodeTableOfContents, NodeAdmonition, NodeDefinitionList:
