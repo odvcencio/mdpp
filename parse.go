@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -777,7 +779,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
 			return nil
 		}
-		if strings.TrimSpace(line) == "" {
+		if trimMarkdownSpace(line) == "" {
 			if sawQuote {
 				return nil // An unmarked blank line ends this block quote.
 			}
@@ -789,7 +791,7 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 		if !ok {
 			return nil
 		}
-		if strings.HasPrefix(strings.TrimSpace(content), "[") {
+		if strings.HasPrefix(trimMarkdownSpace(content), "[") {
 			// Defer admonitions and bracketed blockquote headings to the
 			// slow path which has dedicated post-processors.
 			return nil
@@ -1077,7 +1079,7 @@ func parseLongLineFallback(source []byte, ctx *parseCtx) *Document {
 			masked[i] = 'x'
 		}
 	}
-	doc, _ := parseDocumentRetainTreeCtx(masked, nil, nil)
+	doc, _ := parseDocumentRetainTreeCtx(masked, nil, ctx)
 	if doc == nil {
 		doc = &Document{}
 	}
@@ -1218,7 +1220,7 @@ func topLevelHeadingChunks(source []byte) []blockChunk {
 	starts := make([]blockChunk, 0, 8)
 	inFence := false
 	for lineIndex, line := range lines {
-		trimmed := strings.TrimSpace(line.text)
+		trimmed := trimMarkdownSpace(line.text)
 		if isMarkdownFenceLine(trimmed) {
 			inFence = !inFence
 			continue
@@ -1244,7 +1246,7 @@ func topLevelHeadingChunks(source []byte) []blockChunk {
 		if i+1 < len(starts) {
 			end = starts[i+1].start
 		}
-		if strings.TrimSpace(string(source[start.start:end])) == "" {
+		if trimMarkdownSpace(string(source[start.start:end])) == "" {
 			continue
 		}
 		start.end = end
@@ -1264,9 +1266,40 @@ func isTopLevelATXHeadingLine(line string) bool {
 }
 
 func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRefs map[string]linkRefDef, source []byte, chunk blockChunk, ctx *parseCtx) []*Node {
+	// Front matter belongs to the start of a document only. A chunk that
+	// begins later is parsed as a fresh document, where a leading pair of
+	// "---" lines would read as front matter. Thematic breaks at the start of
+	// such a chunk are complete blocks: read them here (CommonMark 4.1).
+	if chunk.start > 0 {
+		for chunk.start < chunk.end {
+			lineEnd := bytes.IndexByte(source[chunk.start:chunk.end], '\n')
+			next := chunk.end
+			if lineEnd >= 0 {
+				next = chunk.start + lineEnd + 1
+			} else {
+				lineEnd = chunk.end - chunk.start
+			}
+			if !isThematicBreakLine(string(source[chunk.start : chunk.start+lineEnd])) {
+				break
+			}
+			children = append(children, &Node{Type: NodeThematicBreak, Range: sourceRange(source, chunk.start, next)})
+			chunk.start = next
+			chunk.startLine++
+			chunk.startCol = 1
+			// Blank lines after the break belong to no block.
+			for chunk.start < chunk.end {
+				blankEnd := bytes.IndexByte(source[chunk.start:chunk.end], '\n')
+				if blankEnd < 0 || trimMarkdownSpace(string(source[chunk.start:chunk.start+blankEnd])) != "" {
+					break
+				}
+				chunk.start += blankEnd + 1
+				chunk.startLine++
+			}
+		}
+	}
 	start, end := chunk.start, chunk.end
 	chunkSource := source[start:end]
-	if strings.TrimSpace(string(chunkSource)) == "" {
+	if trimMarkdownSpace(string(chunkSource)) == "" {
 		return children
 	}
 
@@ -1305,11 +1338,17 @@ func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRef
 		linkRefs[k] = v
 	}
 
+	// A chunk that is one paragraph can come back with the paragraph itself
+	// as the root. Keep that paragraph; its children alone are inline nodes.
+	blocks := doc.Root.Children
+	if doc.Root.Type != NodeDocument {
+		blocks = []*Node{doc.Root}
+	}
 	var cachedChildren []*Node
 	if cacheEnabled {
-		cachedChildren = make([]*Node, 0, len(doc.Root.Children))
+		cachedChildren = make([]*Node, 0, len(blocks))
 	}
-	for _, child := range doc.Root.Children {
+	for _, child := range blocks {
 		shiftNodeRangesFromAnchor(child, start, 1, 1, chunk.startLine, chunk.startCol)
 		children = append(children, child)
 		if cacheEnabled {
@@ -1328,6 +1367,108 @@ func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRef
 	return children
 }
 
+// trimMarkdownSpace trims the characters that Markdown treats as whitespace
+// around syntax: the space and the tab. strings.TrimSpace also removes
+// Unicode spaces such as U+00A0, which are text in Markdown.
+func trimMarkdownSpace(s string) string {
+	return strings.Trim(s, " \t")
+}
+
+// fastChunkBytesAccepted is the byte-level acceptance rule of the fast block
+// path. The fast path classifies lines by ASCII markers and trims fields by
+// space and tab only. A chunk is accepted when
+//
+//  1. it holds no control byte other than the tab and the line feed (a
+//     carriage return, form feed, vertical tab or NUL) and is valid UTF-8, and
+//  2. every Unicode whitespace rune other than the space and the tab (U+00A0,
+//     U+0085, U+2028, U+3000 and so on) sits in a position that carries no
+//     block syntax. The positions that do carry syntax are: the start or end
+//     of a line (after spaces and tabs), either side of a table pipe, and
+//     either side of the opening run of a fence, heading or quote marker
+//     ("```", "~~~", "#", ">" at the start of a line), and the label of a line
+//     that starts with "[". A Unicode-aware trim
+//     could read such a rune as indentation, padding or a closing space.
+//     Anywhere else (inside a word, next to inline punctuation) the rune is
+//     text, and the inline parser sees it either way.
+//
+// A chunk with a rune in one of those positions goes to the full parser.
+func fastChunkBytesAccepted(source []byte) bool {
+	lineStart := 0
+	for i := 0; i < len(source); i++ {
+		b := source[i]
+		switch {
+		case b == '\n':
+			lineStart = i + 1
+		case b == '\t':
+		case b < 0x20 || b == 0x7f:
+			return false
+		case b >= 0x80:
+			r, size := utf8.DecodeRune(source[i:])
+			if r == utf8.RuneError && size <= 1 {
+				return false // invalid UTF-8
+			}
+			if unicode.IsSpace(r) && !fastStrayRuneIsText(source, lineStart, i, size) {
+				return false
+			}
+			i += size - 1
+		}
+	}
+	return true
+}
+
+// fastStrayRuneIsText reports whether the whitespace rune at source[at:at+size]
+// lies in a position without block syntax (see fastChunkBytesAccepted).
+func fastStrayRuneIsText(source []byte, lineStart, at, size int) bool {
+	lineEnd := at + size
+	for lineEnd < len(source) && source[lineEnd] != '\n' {
+		lineEnd++
+	}
+	left := at - 1
+	for left >= lineStart && (source[left] == ' ' || source[left] == '\t') {
+		left--
+	}
+	right := at + size
+	for right < lineEnd && (source[right] == ' ' || source[right] == '\t') {
+		right++
+	}
+	if left < lineStart || right >= lineEnd {
+		return false // a line edge
+	}
+	if source[left] == '|' || source[right] == '|' {
+		return false // a table cell boundary
+	}
+	first := lineStart
+	for first < lineEnd && (source[first] == ' ' || source[first] == '\t') {
+		first++
+	}
+	if source[first] == '[' {
+		// The label of a footnote or link reference definition: the
+		// definition reader folds Unicode whitespace in a label.
+		closeAt := bytes.IndexByte(source[first:lineEnd], ']')
+		if closeAt < 0 || at < first+closeAt {
+			return false
+		}
+	}
+	if c := source[first]; c == '`' || c == '~' || c == '#' || c == '>' {
+		// The rune touches the opening run of a fence, heading or quote marker.
+		run := first
+		for run < lineEnd && source[run] == c {
+			run++
+		}
+		if n := run - first; (c == '`' || c == '~') && n < 3 || c == '#' && n > 6 {
+			return true // not a marker run
+		}
+		after := at
+		for after > run && (source[after-1] == ' ' || source[after-1] == '\t') {
+			after--
+		}
+		if after == run {
+			return false
+		}
+	}
+	return true
+}
+
 // fastBlockChunkDisabled turns the fast block path off. Tests set it to build
 // the reference reading that the fast path must match.
 var fastBlockChunkDisabled bool
@@ -1339,6 +1480,9 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 	if len(source) == 0 || bytes.HasPrefix(source, []byte("---\n")) || bytes.Contains(source, []byte(":::")) {
 		return nil, false
 	}
+	if !fastChunkBytesAccepted(source) {
+		return nil, false
+	}
 	lines := sourceLines(source)
 	children := make([]*Node, 0, len(lines)/2)
 	for i := 0; i < len(lines); {
@@ -1346,7 +1490,7 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			break
 		}
 		line := lines[i]
-		trimmed := strings.TrimSpace(line.text)
+		trimmed := trimMarkdownSpace(line.text)
 		if trimmed == "" {
 			i++
 			continue
@@ -1379,14 +1523,14 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 		}
 		if strings.HasPrefix(strings.TrimLeft(line.text, " \t"), ">") {
 			start := i
-			for i < len(lines) && (strings.TrimSpace(lines[i].text) == "" || strings.HasPrefix(strings.TrimLeft(lines[i].text, " \t"), ">")) {
+			for i < len(lines) && (trimMarkdownSpace(lines[i].text) == "" || strings.HasPrefix(strings.TrimLeft(lines[i].text, " \t"), ">")) {
 				i++
 			}
-			if i < len(lines) && strings.TrimSpace(lines[i-1].text) != "" {
+			if i < len(lines) && trimMarkdownSpace(lines[i-1].text) != "" {
 				// The next line may continue the quote lazily (CommonMark 5.1).
 				return nil, false
 			}
-			for i > start+1 && strings.TrimSpace(lines[i-1].text) == "" {
+			for i > start+1 && trimMarkdownSpace(lines[i-1].text) == "" {
 				i-- // trailing blank lines are not part of the quote
 			}
 			doc := parseSimpleBlockquoteDocument(source[lines[start].start:lines[i-1].next], ctx)
@@ -1399,14 +1543,14 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			}
 			continue
 		}
-		if i+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(strings.TrimSpace(lines[i+1].text)) {
+		if i+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(trimMarkdownSpace(lines[i+1].text)) {
 			if len(splitFastTableCells(lines[i].text)) != len(splitFastTableCells(lines[i+1].text)) {
 				return nil, false // the header and delimiter rows must have the same cell count
 			}
 			table, next := fastTableNode(source, lines, i, ctx)
-			if next < len(lines) && strings.TrimSpace(lines[next].text) != "" && !(strings.HasPrefix(lines[next].text, "#") && isATXHeadingLine([]byte(lines[next].text))) {
-				// The next line may be a row of the table. An unindented ATX heading
-				// is the exception: it ends a table for certain (GFM 4.10).
+			if next < len(lines) && trimMarkdownSpace(lines[next].text) != "" {
+				// The next line may be a row of the table (GFM 4.10). The
+				// full parser decides.
 				return nil, false
 			}
 			children = append(children, table)
@@ -1448,7 +1592,7 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			}
 		}
 		for j := i; j < next; j++ {
-			if fastUnsupportedListMarker(strings.TrimSpace(lines[j].text)) {
+			if fastUnsupportedListMarker(trimMarkdownSpace(lines[j].text)) {
 				return nil, false // a list marker form the fast path does not build
 			}
 		}
@@ -1497,16 +1641,16 @@ func fastHeadingLevel(line string) int {
 }
 
 func fastFenceNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int, bool) {
-	open := strings.TrimSpace(lines[start].text)
+	open := trimMarkdownSpace(lines[start].text)
 	fenceChar := open[0]
 	fenceLen := 0
 	for fenceLen < len(open) && open[fenceLen] == fenceChar {
 		fenceLen++
 	}
-	info := strings.TrimSpace(open[fenceLen:])
+	info := trimMarkdownSpace(open[fenceLen:])
 	end := start + 1
 	for end < len(lines) {
-		trimmed := strings.TrimSpace(lines[end].text)
+		trimmed := trimMarkdownSpace(lines[end].text)
 		indented := strings.HasPrefix(lines[end].text, "    ") || strings.HasPrefix(lines[end].text, "\t")
 		if !indented && fastClosesFence(trimmed, fenceChar, fenceLen) {
 			break
@@ -1554,7 +1698,7 @@ func fastClosesFence(trimmed string, fenceChar byte, fenceLen int) bool {
 
 func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int) {
 	end := start
-	for end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end].text), "|") {
+	for end < len(lines) && strings.HasPrefix(trimMarkdownSpace(lines[end].text), "|") {
 		end++
 	}
 	table := &Node{Type: NodeTable, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[end-1].next)}
@@ -1566,35 +1710,40 @@ func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) 
 		if i == start+1 {
 			continue
 		}
-		row := &Node{Type: NodeTableRow, Range: sourceRange(source, lines[i].start, lines[i].end)}
-		// Each cell carries its own byte span within the row. Sharing the
-		// row's range across cells corrupts consumers that read cell text
-		// through Range: the fmt table rewriter turned every cell into
-		// the whole row, multiplying tables by their column count on
-		// every pass.
-		for _, cell := range splitFastTableCellSpans(lines[i].text) {
-			// A cell starts at its first character that is not a space.
-			lead := len(cell.text) - len(strings.TrimLeft(cell.text, " \t"))
-			if lead == len(cell.text) {
-				lead = 0 // a cell of spaces keeps its raw span
-			}
-			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start+cell.start+lead, lines[i].start+cell.end)}
-			text := strings.TrimSpace(cell.text)
-			if text != "" {
-				c.Children = parseInlineAt(text, source, lines[i].start+cell.start+lead, ctx)
-			}
-			row.Children = append(row.Children, c)
-		}
+		row := tableRowFromLine(source, lines[i].start, lines[i].text, ctx)
 		table.Children = append(table.Children, row)
 	}
 	return table, end
+}
+
+// tableRowFromLine builds a table row from one source line that starts at
+// byte offset lineStart. Each cell carries its own byte span within the row.
+// Sharing the row's range across cells corrupts consumers that read cell text
+// through Range: the fmt table rewriter turned every cell into the whole row,
+// multiplying tables by their column count on every pass. Cells are trimmed
+// by space and tab only.
+func tableRowFromLine(source []byte, lineStart int, text string, ctx *parseCtx) *Node {
+	row := &Node{Type: NodeTableRow, Range: sourceRange(source, lineStart, lineStart+len(text))}
+	for _, cell := range splitFastTableCellSpans(text) {
+		// A cell starts at its first character that is not a space or tab.
+		lead := len(cell.text) - len(strings.TrimLeft(cell.text, " \t"))
+		if lead == len(cell.text) {
+			lead = 0 // a cell of spaces keeps its raw span
+		}
+		c := &Node{Type: NodeTableCell, Range: sourceRange(source, lineStart+cell.start+lead, lineStart+cell.end)}
+		if t := trimMarkdownSpace(cell.text); t != "" {
+			c.Children = parseInlineAt(t, source, lineStart+cell.start+lead, ctx)
+		}
+		row.Children = append(row.Children, c)
+	}
+	return row
 }
 
 func fastTableAligns(line string) []string {
 	cells := splitFastTableCells(line)
 	aligns := make([]string, 0, len(cells))
 	for _, cell := range cells {
-		cell = strings.TrimSpace(cell)
+		cell = trimMarkdownSpace(cell)
 		left := strings.HasPrefix(cell, ":")
 		right := strings.HasSuffix(cell, ":")
 		switch {
@@ -1612,7 +1761,7 @@ func fastTableAligns(line string) []string {
 }
 
 func splitFastTableCells(line string) []string {
-	line = strings.TrimSpace(line)
+	line = trimMarkdownSpace(line)
 	line = strings.TrimPrefix(line, "|")
 	line = strings.TrimSuffix(line, "|")
 	return strings.Split(line, "|")
@@ -1736,11 +1885,11 @@ func fastListItemSimple(item string) bool {
 // items of another marker, nested or continued items, lazy continuation lines
 // and blank lines inside the list.
 func fastListReadable(lines []sourceLine, start int) bool {
-	firstTrimmed := strings.TrimSpace(lines[start].text)
+	firstTrimmed := trimMarkdownSpace(lines[start].text)
 	_, ordered := fastOrderedListStart(firstTrimmed)
 	i := start
 	for i < len(lines) {
-		trimmed := strings.TrimSpace(lines[i].text)
+		trimmed := trimMarkdownSpace(lines[i].text)
 		if trimmed == "" {
 			break
 		}
@@ -1755,14 +1904,14 @@ func fastListReadable(lines []sourceLine, start int) bool {
 	}
 	// What follows the list decides whether it is complete.
 	j := i
-	for j < len(lines) && strings.TrimSpace(lines[j].text) == "" {
+	for j < len(lines) && trimMarkdownSpace(lines[j].text) == "" {
 		j++
 	}
 	if j == len(lines) {
 		return true
 	}
 	next := lines[j].text
-	nextTrimmed := strings.TrimSpace(next)
+	nextTrimmed := trimMarkdownSpace(next)
 	if j > i {
 		// A blank line inside the list, or an indented block after it.
 		return !isLooseListMarkerLine(nextTrimmed) && next == nextTrimmed
@@ -1773,7 +1922,7 @@ func fastListReadable(lines []sourceLine, start int) bool {
 }
 
 func fastListNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int) {
-	markerStart, ordered := fastOrderedListStart(strings.TrimSpace(lines[start].text))
+	markerStart, ordered := fastOrderedListStart(trimMarkdownSpace(lines[start].text))
 	list := &Node{Type: NodeList, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[start].next)}
 	if ordered {
 		list.Attrs["ordered"] = "true"
@@ -1786,7 +1935,7 @@ func fastListNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (
 		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
 			break
 		}
-		trimmed := strings.TrimSpace(lines[i].text)
+		trimmed := trimMarkdownSpace(lines[i].text)
 		if trimmed == "" {
 			break
 		}
@@ -1806,7 +1955,7 @@ func fastListNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (
 	// The list and its last item run over the blank lines that follow.
 	if len(list.Children) > 0 {
 		end := lines[i-1].next
-		for k := i; k < len(lines) && strings.TrimSpace(lines[k].text) == ""; k++ {
+		for k := i; k < len(lines) && trimMarkdownSpace(lines[k].text) == ""; k++ {
 			end = lines[k].next
 		}
 		last := list.Children[len(list.Children)-1]
@@ -1853,12 +2002,16 @@ func fastListItemText(line string, ordered bool) (string, bool) {
 	return "", false
 }
 
+// fastListLineHasTaskMarker reports an item that starts with a checkbox. Any
+// text after the checkbox counts: the full parser decides whether a space, a
+// tab or the end of the line makes it a task item, so the fast path never
+// builds an item that starts with one.
 func fastListLineHasTaskMarker(line string) bool {
 	item, ok := fastListItemText(line, fastOrderedListMarker(line))
 	if !ok {
 		return false
 	}
-	return strings.HasPrefix(item, "[x] ") || strings.HasPrefix(item, "[X] ") || strings.HasPrefix(item, "[ ] ")
+	return strings.HasPrefix(item, "[x]") || strings.HasPrefix(item, "[X]") || strings.HasPrefix(item, "[ ]")
 }
 
 func isLikelyReferenceDefinitionLine(line string) bool {
@@ -1878,7 +2031,7 @@ func fastFootnoteDefinitionNode(source []byte, line sourceLine, ctx *parseCtx) *
 		return nil
 	}
 	fn := &Node{Type: NodeFootnoteDef, Attrs: map[string]string{"id": line.text[match[2]:match[3]]}, Range: sourceRange(source, line.start, line.end)}
-	if body := line.text[match[4]:match[5]]; strings.TrimSpace(body) != "" {
+	if body := line.text[match[4]:match[5]]; trimMarkdownSpace(body) != "" {
 		fn.Children = parseFootnoteDefinitionInline(body, source, line.start+match[4], ctx)
 	}
 	return fn
@@ -1888,7 +2041,7 @@ func fastParagraphNode(source []byte, lines []sourceLine, start int, ctx *parseC
 	end := start
 	var text strings.Builder
 	for end < len(lines) {
-		trimmed := strings.TrimSpace(lines[end].text)
+		trimmed := trimMarkdownSpace(lines[end].text)
 		// A thematic break interrupts a paragraph (CommonMark 4.8). A "---"
 		// line is a setext underline instead and is handled by the caller.
 		if end > start && isThematicBreakLine(lines[end].text) && !isSetextUnderlineLine([]byte(lines[end].text)) {
@@ -1900,7 +2053,7 @@ func fastParagraphNode(source []byte, lines []sourceLine, start int, ctx *parseC
 		if trimmed == "" || isATXHeadingLine([]byte(lines[end].text)) || isMarkdownFenceLine(trimmed) ||
 			strings.HasPrefix(strings.TrimLeft(lines[end].text, " \t"), ">") ||
 			isLooseListMarkerLine(trimmed) || (end == start && fastFootnoteDefinitionNode(source, lines[end], ctx) != nil) ||
-			(end+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(strings.TrimSpace(lines[end+1].text))) {
+			(end+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(trimMarkdownSpace(lines[end+1].text))) {
 			break
 		}
 		if text.Len() > 0 {
@@ -4022,7 +4175,7 @@ func parseInline(text string, source []byte) []*Node {
 	return parseInlineAt(text, source, -1, nil)
 }
 
-func parseInlineAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
+func parseInlineUnmaskedAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
 	if nodes, ok := parseEmphasisDelimiterRunsAt(text, source, baseOffset); ok {
 		return splitTextNewlines(nodes)
 	}
@@ -5017,6 +5170,11 @@ func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, s
 		}
 
 		if converted := convertBlockCtx(bt, child, source, ctx); converted != nil {
+			if loose.Len() > 0 && joinSplitParagraphLine(converted, loose.String(), looseStart, source, ctx) {
+				loose.Reset()
+				looseStart = 0
+				looseAttach = false
+			}
 			flushLoose()
 			appendBlockNode(&nodes, converted)
 			separatedByBlankLine = false
@@ -5035,6 +5193,31 @@ func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, s
 	flushLoose()
 
 	return nodes
+}
+
+// joinSplitParagraphLine repairs a line that the grammar cut in two. Text
+// that the tree leaves unconverted (for example the tokens of a link label
+// that never closes with "]:") can end in the middle of a line, with a
+// paragraph starting where it ends. A block cannot start in the middle of a
+// line, so both belong to one paragraph. The first paragraph of block is
+// replaced by a paragraph that starts at the loose text.
+func joinSplitParagraphLine(block *Node, loose string, looseStart int, source []byte, ctx *parseCtx) bool {
+	first := block
+	if block.Type == NodeDocument {
+		if len(block.Children) == 0 {
+			return false
+		}
+		first = block.Children[0]
+	}
+	if first.Type != NodeParagraph || looseStart < 0 || looseStart+len(loose) != first.Range.StartByte ||
+		first.Range.StartByte == 0 || first.Range.StartByte > len(source) || source[first.Range.StartByte-1] == '\n' ||
+		first.Range.EndByte > len(source) || strings.ContainsRune(loose, '\n') {
+		return false
+	}
+	text := strings.TrimRight(string(source[looseStart:first.Range.EndByte]), "\n")
+	first.Range = sourceRange(source, looseStart, first.Range.EndByte)
+	first.Children = splitTextNewlines(parseInlineAt(text, source, looseStart, ctx))
+	return true
 }
 
 func skipRawBlockChild(bt *gotreesitter.BoundTree, n *gotreesitter.Node) bool {
@@ -5100,7 +5283,14 @@ func appendRecoveredBlockText(nodes *[]*Node, text string, source []byte, offset
 	if !looksLikeStructuredBlockText(text) {
 		return false
 	}
+	// The recovery parse reads the text in the profile of the document and
+	// spends the document's budget.
 	recoverCtx := &parseCtx{suppressLooseRecovery: true}
+	if ctx != nil {
+		recoverCtx.profile = ctx.profile
+		recoverCtx.budget = ctx.budget
+		recoverCtx.containerDepth = ctx.containerDepth
+	}
 	doc := parseDocumentCtx([]byte(text), recoverCtx)
 	if doc == nil || doc.Root == nil || !recoveredBlockUseful(doc.Root.Children) {
 		return false
@@ -5111,6 +5301,7 @@ func appendRecoveredBlockText(nodes *[]*Node, text string, source []byte, offset
 	}
 	return true
 }
+
 
 func looksLikeStructuredBlockText(text string) bool {
 	if strings.TrimSpace(text) == "" {

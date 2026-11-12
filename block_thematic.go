@@ -2,7 +2,6 @@ package mdpp
 
 import (
 	"bytes"
-	"strings"
 )
 
 func isThematicBreakLine(line string) bool {
@@ -48,7 +47,7 @@ func parseLeadingThematicBreaks(source []byte, ctx *parseCtx) *Document {
 		children = append(children, &Node{Type: NodeThematicBreak, Range: sourceRange(source, lines[i].start, lines[i].next)})
 		i++
 	}
-	for i < len(lines) && strings.TrimSpace(lines[i].text) == "" {
+	for i < len(lines) && trimMarkdownSpace(lines[i].text) == "" {
 		i++
 	}
 	var diagnostics []Diagnostic
