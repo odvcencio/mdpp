@@ -38,7 +38,7 @@ const (
 func (d Diagnostic) StructureUncertain() bool {
 	switch d.Code {
 	case DiagPanic, DiagContainerAutoClosed, DiagDepthExceeded, DiagComplexityLimit,
-		DiagBudgetExceeded, DiagSyntaxRecovery, DiagNoTree:
+		DiagBudgetExceeded, DiagSyntaxRecovery, DiagNoTree, DiagHTMLBlockUnread:
 		return true
 	}
 	// An unknown code is treated as uncertain: the safe reading for a caller

@@ -3,6 +3,7 @@ package mdpp
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The fast block path may treat only Markdown's own whitespace (space and tab)
@@ -143,6 +144,40 @@ func TestFastPathAcceptsStrayWhitespaceOnlyInsideWords(t *testing.T) {
 	for _, c := range cases {
 		if got := fastChunkBytesAccepted([]byte(c.src)); got != c.accept {
 			t.Errorf("fastChunkBytesAccepted(%q) = %v, want %v", c.src, got, c.accept)
+		}
+	}
+}
+
+// The acceptance check reads each line's bounds once. Four times the stray
+// runes must cost about four times the work, not sixteen times, for every
+// shape of line that the check inspects: a plain word line, a line behind long
+// indentation, behind a long run of quote markers, and behind an unclosed label.
+func TestFastChunkAcceptanceWorkIsLinear(t *testing.T) {
+	shapes := []struct {
+		name  string
+		build func(n int) string
+	}{
+		{"word line", func(n int) string { return "***\na" + strings.Repeat(" b", n) + "\n" }},
+		{"indented", func(n int) string { return strings.Repeat(" ", n) + "a" + strings.Repeat(" b", n) + "\n" }},
+		{"quote markers", func(n int) string { return strings.Repeat(">", n) + "a" + strings.Repeat(" b", n) + "\n" }},
+		{"unclosed label", func(n int) string { return "[a" + strings.Repeat(" b", n) + "\n" }},
+	}
+	best := func(src []byte) time.Duration {
+		min := time.Hour
+		for i := 0; i < 3; i++ {
+			start := time.Now()
+			fastChunkBytesAccepted(src)
+			if d := time.Since(start); d < min {
+				min = d
+			}
+		}
+		return min
+	}
+	for _, shape := range shapes {
+		small, large := best([]byte(shape.build(10000))), best([]byte(shape.build(40000)))
+		t.Logf("%s: n=10000 %v, n=40000 %v (directional)", shape.name, small, large)
+		if large > 10*small+2*time.Millisecond {
+			t.Errorf("%s: acceptance time grew from %v to %v for four times the runes", shape.name, small, large)
 		}
 	}
 }

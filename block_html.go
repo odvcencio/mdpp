@@ -9,6 +9,9 @@ import (
 // grammar can consume their contents as inline Markdown. Each line is visited
 // once; ordinary spans are handed back to the regular parser.
 func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseCommonMarkHTMLBlocks") {
+		return nil
+	}
 	i := 0
 	for i < len(source) && source[i] == ' ' {
 		i++

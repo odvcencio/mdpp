@@ -33,6 +33,9 @@ func isThematicBreakLine(line string) bool {
 // The grammar sometimes groups it with the following paragraph, so consume
 // consecutive leading breaks before handing the rest to the block parser.
 func parseLeadingThematicBreaks(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseLeadingThematicBreaks") {
+		return nil
+	}
 	end := bytes.IndexByte(source, '\n')
 	if end < 0 {
 		end = len(source)

@@ -61,6 +61,30 @@ func ParseProfileByName(name string) (ParseProfile, bool) {
 	return ProfileMarkdownPlus, false
 }
 
+// shortcutObserver is set only by tests. It sees every consultation of the
+// shortcut switch: the name of the entry and the answer.
+var shortcutObserver func(entry string, allowed bool)
+
+// shortcut is the one switch for the shortcut readers. A shortcut reader builds
+// block nodes without the grammar (the fast block path and the readers for
+// block quotes, deep lists, containers, indented documents, reference
+// definitions, HTML blocks, leading thematic breaks and the heading-split
+// chunking). Every such entry asks this method first, with its own name, and
+// returns without reading when the answer is false.
+//
+// The default profile keeps its shortcuts, for speed. The GFM profile reads
+// every block through the grammar only, so that a tool which reads headings,
+// task list items and comments from a document never meets a node that a
+// shortcut built. TestEveryShortcutEntryConsultsTheSwitch lists the entries and
+// fails when a new one does not call this method.
+func (c *parseCtx) shortcut(entry string) bool {
+	allowed := !c.gfm()
+	if shortcutObserver != nil {
+		shortcutObserver(entry, allowed)
+	}
+	return allowed
+}
+
 // gfm reports whether the parse reads the GFM profile. It is safe on a nil
 // context, which reads the default profile.
 func (c *parseCtx) gfm() bool {

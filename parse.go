@@ -287,7 +287,10 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 	original := source
 	var inserts []int
 	if ctx.gfm() {
-		// GFM has no alerts to lower and no front matter to skip.
+		// GFM has no alerts to lower and no front matter to skip. Blank lines
+		// are inserted where the grammar reads better with them (see
+		// gfmLowerSource); the ranges are mapped back like the alert lowering.
+		source, inserts = gfmLowerSource(source)
 	} else if _, frontmatterEnd, ok := parseFrontmatter(source, nil); ok {
 		body, bodyInserts := lowerMarkdownPlusSource(source[frontmatterEnd:])
 		if len(bodyInserts) > 0 {
@@ -469,9 +472,12 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 	}
 	repairProtectedHeadings(root, headingRepairs, source, ctx)
 	doc := &Document{Root: root, Source: source}
-	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode())
+	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode(), ctx.gfm())
 	doc.extractFrontmatterCtx(ctx)
 	postProcess(doc, ctx)
+	if ctx.gfm() {
+		doc.diagnostics = append(doc.diagnostics, gfmHTMLBlockHazards(source, doc.Root)...)
+	}
 	if topLevel && ctx != nil {
 		ctx.cache.pruneNotIn(ctx.seen)
 	}
@@ -489,6 +495,9 @@ func noTreeDocument(source []byte) *Document {
 }
 
 func parseOnlyReferenceDefinitions(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseOnlyReferenceDefinitions") {
+		return nil
+	}
 	parseSource := append(append([]byte(nil), source...), '\n')
 	tree, err := parsePooled(blockLang(), mdEntry, parseSource)
 	if err != nil || tree == nil {
@@ -519,7 +528,7 @@ func parseOnlyReferenceDefinitions(source []byte, ctx *parseCtx) *Document {
 		def.Range = sourceRange(source, def.Range.StartByte, def.Range.EndByte)
 	}
 	root.Range = sourceRange(source, 0, len(source))
-	doc := &Document{Root: root, Source: source, linkRefDefs: collectLinkRefDefs(bt, bt.RootNode())}
+	doc := &Document{Root: root, Source: source, linkRefDefs: collectLinkRefDefs(bt, bt.RootNode(), ctx.gfm())}
 	doc.extractFrontmatterCtx(ctx)
 	postProcess(doc, ctx)
 	return doc
@@ -537,7 +546,7 @@ func allSourceWhitespace(source []byte) bool {
 // collectLinkRefDefs walks the tree-sitter AST gathering every
 // link_reference_definition that is not a footnote definition. Keys are
 // lowercased, whitespace-normalized labels per CommonMark.
-func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node) map[string]linkRefDef {
+func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node, gfm bool) map[string]linkRefDef {
 	out := make(map[string]linkRefDef)
 	var walk func(n *gotreesitter.Node)
 	walk = func(n *gotreesitter.Node) {
@@ -546,8 +555,9 @@ func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node) map
 		}
 		if bt.NodeType(n) == "link_reference_definition" {
 			raw := strings.TrimRight(bt.NodeText(n), "\n")
-			// Skip footnote defs.
-			if footnoteDefinitionRawRe.MatchString(raw) {
+			// Skip footnote defs (Markdown++). In GFM "[^a]: /u" is a link
+			// reference definition with the label "^a", like any other.
+			if !gfm && footnoteDefinitionRawRe.MatchString(raw) {
 				return
 			}
 			var label, dest, title string
@@ -562,7 +572,7 @@ func collectLinkRefDefs(bt *gotreesitter.BoundTree, root *gotreesitter.Node) map
 					title = stripQuotes(bt.NodeText(c))
 				}
 			}
-			if footnoteDefinitionLabelRe.MatchString(label) {
+			if !gfm && footnoteDefinitionLabelRe.MatchString(label) {
 				return
 			}
 			label = normalizeLinkLabel(label)
@@ -750,6 +760,9 @@ func lowerMarkdownPlusSource(source []byte) ([]byte, []int) {
 }
 
 func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseSimpleBlockquoteDocument") {
+		return nil
+	}
 	text := strings.TrimRight(strings.ReplaceAll(string(source), "\r\n", "\n"), "\n")
 	if text == "" || !strings.Contains(text, ">") {
 		return nil
@@ -1164,6 +1177,9 @@ type blockChunk struct {
 }
 
 func parseSegmentedDocumentCtx(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseSegmentedDocumentCtx") {
+		return nil
+	}
 	chunks := topLevelHeadingChunks(source)
 	if len(chunks) < 2 {
 		return nil
@@ -1379,12 +1395,14 @@ func trimMarkdownSpace(s string) string {
 //
 // A chunk with a rune in one of those positions goes to the full parser.
 func fastChunkBytesAccepted(source []byte) bool {
+	var line fastLineBounds
 	lineStart := 0
 	for i := 0; i < len(source); i++ {
 		b := source[i]
 		switch {
 		case b == '\n':
 			lineStart = i + 1
+			line.valid = false
 		case b == '\t':
 		case b < 0x20 || b == 0x7f:
 			return false
@@ -1393,8 +1411,13 @@ func fastChunkBytesAccepted(source []byte) bool {
 			if r == utf8.RuneError && size <= 1 {
 				return false // invalid UTF-8
 			}
-			if unicode.IsSpace(r) && !fastStrayRuneIsText(source, lineStart, i, size) {
-				return false
+			if unicode.IsSpace(r) {
+				if !line.valid {
+					line = fastLineBoundsAt(source, lineStart)
+				}
+				if !fastStrayRuneIsText(source, &line, i, size) {
+					return false
+				}
 			}
 			i += size - 1
 		}
@@ -1402,13 +1425,52 @@ func fastChunkBytesAccepted(source []byte) bool {
 	return true
 }
 
+// fastLineBounds holds what fastStrayRuneIsText needs to know about one line.
+// It is computed once per line, when the line first holds a Unicode whitespace
+// rune, so that the check costs work in proportion to the chunk, however many
+// such runes a line holds.
+type fastLineBounds struct {
+	valid bool
+	start int // first byte of the line
+	end   int // the line feed, or len(source)
+	first int // first byte that is not a space or tab
+	// run is the end of the run of identical marker bytes ("`", "~", "#", ">")
+	// that starts at first; it equals first when the byte at first is another.
+	run int
+	// closeLabel is the offset of the first "]" at or after first when the line
+	// starts with "[", or -1.
+	closeLabel int
+}
+
+func fastLineBoundsAt(source []byte, start int) fastLineBounds {
+	end := start
+	for end < len(source) && source[end] != '\n' {
+		end++
+	}
+	first := start
+	for first < end && (source[first] == ' ' || source[first] == '\t') {
+		first++
+	}
+	line := fastLineBounds{valid: true, start: start, end: end, first: first, run: first, closeLabel: -1}
+	if first < end {
+		switch c := source[first]; c {
+		case '`', '~', '#', '>':
+			for line.run < end && source[line.run] == c {
+				line.run++
+			}
+		case '[':
+			if at := bytes.IndexByte(source[first:end], ']'); at >= 0 {
+				line.closeLabel = first + at
+			}
+		}
+	}
+	return line
+}
+
 // fastStrayRuneIsText reports whether the whitespace rune at source[at:at+size]
 // lies in a position without block syntax (see fastChunkBytesAccepted).
-func fastStrayRuneIsText(source []byte, lineStart, at, size int) bool {
-	lineEnd := at + size
-	for lineEnd < len(source) && source[lineEnd] != '\n' {
-		lineEnd++
-	}
+func fastStrayRuneIsText(source []byte, line *fastLineBounds, at, size int) bool {
+	lineStart, lineEnd := line.start, line.end
 	left := at - 1
 	for left >= lineStart && (source[left] == ' ' || source[left] == '\t') {
 		left--
@@ -1423,24 +1485,17 @@ func fastStrayRuneIsText(source []byte, lineStart, at, size int) bool {
 	if source[left] == '|' || source[right] == '|' {
 		return false // a table cell boundary
 	}
-	first := lineStart
-	for first < lineEnd && (source[first] == ' ' || source[first] == '\t') {
-		first++
-	}
+	first := line.first
 	if source[first] == '[' {
 		// The label of a footnote or link reference definition: the
 		// definition reader folds Unicode whitespace in a label.
-		closeAt := bytes.IndexByte(source[first:lineEnd], ']')
-		if closeAt < 0 || at < first+closeAt {
+		if line.closeLabel < 0 || at < line.closeLabel {
 			return false
 		}
 	}
 	if c := source[first]; c == '`' || c == '~' || c == '#' || c == '>' {
 		// The rune touches the opening run of a fence, heading or quote marker.
-		run := first
-		for run < lineEnd && source[run] == c {
-			run++
-		}
+		run := line.run
 		if n := run - first; (c == '`' || c == '~') && n < 3 || c == '#' && n > 6 {
 			return true // not a marker run
 		}
@@ -1463,6 +1518,9 @@ var fastBlockChunkDisabled bool
 // the full parser must. The document it returns carries the diagnostics that
 // its inline parsing recorded; an attempt that is given up leaves none behind.
 func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
+	if !ctx.shortcut("parseFastBlockChunk") {
+		return nil, false
+	}
 	mark := ctx.mark()
 	doc, ok := parseFastBlockChunkAttempt(source, ctx)
 	if !ok {
@@ -2082,7 +2140,7 @@ func parseContainerDocument(source []byte) *Document {
 }
 
 func parseContainerDocumentCtx(source []byte, ctx *parseCtx) *Document {
-	if ctx.gfm() {
+	if !ctx.shortcut("parseContainerDocumentCtx") {
 		return nil // ":::note" is text in GFM
 	}
 	if !bytes.Contains(source, []byte(":::")) {
@@ -2637,6 +2695,9 @@ func isMarkdownFenceLine(line string) bool {
 // for this shape; CommonMark spec does (§ 4.4 allows them at document
 // start).
 func parseAllIndentedDocument(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseAllIndentedDocument") {
+		return nil
+	}
 	text := strings.TrimRight(string(source), "\n")
 	if text == "" {
 		return nil
@@ -2697,6 +2758,9 @@ func stripIndentColumns(line string, columns int) (string, bool) {
 // every non-blank source line is a list item and at least one item is at
 // depth 5 or deeper, rebuild the list tree from indentation levels.
 func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseDeepNestedListDocument") {
+		return nil
+	}
 	text := strings.TrimRight(string(source), "\n")
 	if text == "" {
 		return nil
@@ -2711,6 +2775,7 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 	lines := strings.Split(text, "\n")
 	items := make([]listLine, 0, len(lines))
 	maxLevel := 0
+	hasBlockItem := false
 	lineStart := 0
 	for _, line := range lines {
 		thisStart := lineStart
@@ -2735,6 +2800,14 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 		if rest[1] != ' ' {
 			return nil
 		}
+		if !deepListTextIsInline(rest[2:]) {
+			// The item may hold a block (a task marker, heading, quote, HTML,
+			// fence, nested list, reference definition, ...). This builder
+			// reads item text as inline text only, and the grammar cannot read
+			// a list nested this deep, so the whole list is reported as
+			// unrecognized below.
+			hasBlockItem = true
+		}
 		items = append(items, listLine{level: level, marker: marker, text: rest[2:], start: thisStart + 2*level, next: min(thisStart+len(line)+1, len(source))})
 		if level > maxLevel {
 			maxLevel = level
@@ -2743,6 +2816,9 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 	if len(items) == 0 || maxLevel < 5 {
 		// Let tree-sitter handle everything else it's equipped to handle.
 		return nil
+	}
+	if hasBlockItem {
+		return deepListUncertainDocument(source)
 	}
 
 	// Build nested list tree using a stack keyed by indent level.
@@ -2789,6 +2865,66 @@ func parseDeepNestedListDocument(source []byte, ctx *parseCtx) *Document {
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{rootList}, Range: sourceRange(source, 0, len(source))}, Source: source}
 	postProcess(doc, ctx)
 	return doc
+}
+
+// deepListUncertainDocument is the reading of a deep list that the builder
+// cannot make: the source as one paragraph of text, with a diagnostic over
+// the whole list. A tool that reads the diagnostics knows that no heading,
+// task item or comment was read in that range.
+func deepListUncertainDocument(source []byte) *Document {
+	r := sourceRange(source, 0, len(source))
+	return &Document{
+		Root:   &Node{Type: NodeDocument, Range: r, Children: []*Node{{Type: NodeParagraph, Literal: string(source), Range: r}}},
+		Source: source,
+		diagnostics: []Diagnostic{{
+			Code:     "MDPP-PARSE-006",
+			Severity: SeverityWarning,
+			Message:  "list nested more than four levels holds block syntax that cannot be read; preserved source as text",
+			Range:    r,
+		}},
+	}
+}
+
+// deepListTextIsInline reports whether the text after a list marker can only
+// be a paragraph of inline text. It is false when the text could start a block
+// of any kind: a task marker or link label ("["), a heading ("#"), a quote
+// (">"), HTML ("<"), a fence (backticks or "~"), a table row ("|"), a math or
+// directive line ("$", ":"), a nested list marker or thematic break, indented
+// code, or an empty item.
+func deepListTextIsInline(text string) bool {
+	if text == "" {
+		return false
+	}
+	switch text[0] {
+	case '[', '#', '>', '<', '`', '~', '|', '$', ':', ' ', '\t':
+		return false
+	case '-', '*', '_', '+':
+		// A list marker, a thematic break ("***", "- - -") or text such as
+		// "*emphasis*": only a marker or break is a block.
+		if len(text) == 1 || text[1] == ' ' || text[1] == '\t' {
+			return false
+		}
+		run := 0
+		for i := 0; i < len(text); i++ {
+			if text[i] == text[0] {
+				run++
+			} else if text[i] != ' ' && text[i] != '\t' {
+				run = 0
+				break
+			}
+		}
+		return run < 3
+	}
+	if text[0] >= '0' && text[0] <= '9' {
+		i := 0
+		for i < len(text) && text[i] >= '0' && text[i] <= '9' {
+			i++
+		}
+		if i < len(text) && (text[i] == '.' || text[i] == ')') && (i+1 == len(text) || text[i+1] == ' ' || text[i+1] == '\t') {
+			return false
+		}
+	}
+	return true
 }
 
 // fitNestedListRanges gives each list the span of its items and grows each
@@ -4190,7 +4326,7 @@ func parseInline(text string, source []byte) []*Node {
 	return parseInlineAt(text, source, -1, nil)
 }
 
-func parseInlineUnmaskedAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
+func parseInlineSegmentAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
 	if nodes, ok := parseEmphasisDelimiterRunsAt(text, source, baseOffset); ok {
 		return splitTextNewlines(nodes)
 	}

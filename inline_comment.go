@@ -2,52 +2,71 @@ package mdpp
 
 import (
 	"regexp"
-	"strconv"
+	"sort"
 	"strings"
 )
 
-// Inline HTML comments (CommonMark 6.6, GFM 6.6, example 645).
+// Inline HTML comments (CommonMark 0.31.2 section 6.6; GFM example 645).
 //
-// A comment is "<!-->", "<!--->", or "<!--", any text that does not contain
-// "-->", and "-->". The inline grammar reads only some of these as one raw
-// HTML tag: "<!-->" and "<!--->" come back as plain text, and so does a
-// comment whose text holds "--". The check below runs before the grammar: it
-// finds the comments, swaps each for a raw HTML tag of the same length that
-// the grammar reads as one node, parses the text, and puts the comment back.
-// Because the length does not change, every offset in the result stays exact.
+// A comment is "<!-->", "<!--->", or "<!--", a string that does not contain
+// "-->", and "-->". The inline grammar reads only some of these as one raw HTML
+// tag, so mdpp finds comments itself, by source span, before the grammar runs:
+//
+//   - findInlineComments scans the inline text once, left to right, and returns
+//     the byte span of every comment.
+//   - parseInlineAt builds one HTMLInline node from each span and parses the
+//     text between the comments with the ordinary inline reader.
+//
+// Nothing in the text is rewritten, so there is nothing to put back, no limit
+// on the number of comments, and no chunk boundary can fall inside a comment.
+//
+// Precedence. The scanner takes constructs in the order in which they start,
+// and a construct that starts earlier hides everything inside it:
+//
+//  1. a backslash escape hides the next character, so "\<!-->" is text;
+//  2. a code span (a backtick string and the next backtick string of the same
+//     length) hides its content; a backslash does not escape inside it;
+//  3. an autolink, a raw HTML tag (with its attribute values), a processing
+//     instruction, a declaration or a CDATA section that starts first hides a
+//     comment opener inside it ("<a title='<!-- c -->'>" holds no comment);
+//  4. the destination and title of an inline link or image hide a comment
+//     opener inside them ("[a](<!-- c -->)" holds no comment); the link text is
+//     scanned as ordinary inline text, so a comment in it is a comment.
+//
+// A comment that starts first hides every construct inside it.
 
 var (
 	inlineOpenTagRe  = regexp.MustCompile("^<[A-Za-z][A-Za-z0-9-]*(?:[ \t\n]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t\n]*=[ \t\n]*(?:[^ \t\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*[ \t\n]*/?>")
 	inlineCloseTagRe = regexp.MustCompile("^</[A-Za-z][A-Za-z0-9-]*[ \t\n]*>")
-	inlineAutolinkRe = regexp.MustCompile("^<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^ \t\n<>]*>")
+	inlineAutolinkRe = regexp.MustCompile("^<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\\x00-\\x20<>]*>")
+	inlineEmailRe    = regexp.MustCompile("^<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*>")
 )
 
-// maxInlineComments is the number of distinct stand-in tags (base 36, two
-// digits). A text with more comments keeps the grammar's reading.
-const maxInlineComments = 36 * 36
-
-// inlineCommentEnd returns the end of the HTML comment that starts at text[i],
-// or -1 when none starts there.
-func inlineCommentEnd(text string, i int) int {
-	rest := text[i:]
-	switch {
-	case strings.HasPrefix(rest, "<!-->"):
-		return i + 5
-	case strings.HasPrefix(rest, "<!--->"):
-		return i + 6
-	case strings.HasPrefix(rest, "<!--"):
-		if end := strings.Index(rest[4:], "-->"); end >= 0 {
-			return i + 4 + end + 3
-		}
-	}
-	return -1
+// commentScan holds the state of one scan. Each "find the end" search that
+// fails once is remembered: a search that found no terminator from one
+// position finds none from a later position, so the scan stays linear.
+type commentScan struct {
+	text string
+	// backtick runs by length, as ascending start offsets
+	runs map[int][]int
+	// searches that reached the end of the text without a terminator
+	noCommentEnd, noPIEnd, noDeclEnd, noCDATAEnd bool
+	noTitleEnd                                   [3]bool // ", ', (
 }
 
-// findInlineComments returns the byte spans of the comments in text. Code
-// spans, backslash-escaped "<", raw HTML tags and autolinks hide a comment
-// that lies inside them.
-func findInlineComments(text string) [][2]int {
-	var spans [][2]int
+type commentBracket struct {
+	start  int
+	image  bool
+	active bool
+}
+
+// findInlineComments returns the byte spans of the comments in text, in
+// order, and the byte spans of the inline links and images in text (the part
+// from "[" or "![" to the closing parenthesis), in order of their end.
+func findInlineComments(text string) (comments, links [][2]int) {
+	s := &commentScan{text: text}
+	s.indexBackticks()
+	var stack []commentBracket
 	for i := 0; i < len(text); {
 		switch text[i] {
 		case '\\':
@@ -57,103 +76,311 @@ func findInlineComments(text string) [][2]int {
 			for runEnd < len(text) && text[runEnd] == '`' {
 				runEnd++
 			}
-			if close := matchingBacktickRun(text, runEnd, runEnd-i); close >= 0 {
-				i = close + (runEnd - i)
+			if closeAt := s.nextRun(runEnd-i, runEnd); closeAt >= 0 {
+				i = closeAt + (runEnd - i)
 			} else {
 				i = runEnd
 			}
 		case '<':
-			if end := inlineCommentEnd(text, i); end >= 0 {
-				spans = append(spans, [2]int{i, end})
+			if end := s.commentEnd(i); end >= 0 {
+				comments = append(comments, [2]int{i, end})
 				i = end
-				continue
-			}
-			rest := text[i:]
-			if m := inlineOpenTagRe.FindString(rest); m != "" {
-				i += len(m)
-			} else if m := inlineCloseTagRe.FindString(rest); m != "" {
-				i += len(m)
-			} else if m := inlineAutolinkRe.FindString(rest); m != "" {
-				i += len(m)
+			} else if end := s.otherHTMLEnd(i); end >= 0 {
+				i = end
 			} else {
 				i++
+			}
+		case '!':
+			if i+1 < len(text) && text[i+1] == '[' {
+				stack = append(stack, commentBracket{start: i, image: true, active: true})
+				i += 2
+			} else {
+				i++
+			}
+		case '[':
+			stack = append(stack, commentBracket{start: i, active: true})
+			i++
+		case ']':
+			i++
+			if len(stack) == 0 {
+				continue
+			}
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if !top.active || i >= len(text) || text[i] != '(' {
+				continue
+			}
+			if end := s.linkTailEnd(i + 1); end >= 0 {
+				links = append(links, [2]int{top.start, end})
+				i = end
+				if !top.image {
+					// Links do not nest: the openers before this one stop
+					// forming links.
+					for k := range stack {
+						if !stack[k].image {
+							stack[k].active = false
+						}
+					}
+				}
 			}
 		default:
 			i++
 		}
 	}
-	return spans
+	return comments, links
 }
 
-// inlineCommentMask returns the stand-in tag for comment number index that is
-// n bytes long: "<q" and two base-36 digits, then spaces (and line ends where
-// the comment has them), then ">". The stand-in is a valid raw HTML tag.
-func inlineCommentMask(text string, span [2]int, index int) string {
-	n := span[1] - span[0]
-	digits := strconv.FormatInt(int64(index), 36)
-	for len(digits) < 2 {
-		digits = "0" + digits
+func (s *commentScan) indexBackticks() {
+	text := s.text
+	for i := 0; i < len(text); {
+		if text[i] != '`' {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(text) && text[j] == '`' {
+			j++
+		}
+		if s.runs == nil {
+			s.runs = map[int][]int{}
+		}
+		s.runs[j-i] = append(s.runs[j-i], i)
+		i = j
 	}
-	var b strings.Builder
-	b.Grow(n)
-	b.WriteString("<q" + digits)
-	for k := 4; k < n-1; k++ {
-		if text[span[0]+k] == '\n' {
-			b.WriteByte('\n')
-		} else {
-			b.WriteByte(' ')
+}
+
+// nextRun returns the start of the first backtick string of the given length
+// that starts at or after from, or -1.
+func (s *commentScan) nextRun(length, from int) int {
+	starts := s.runs[length]
+	k := sort.SearchInts(starts, from)
+	if k < len(starts) {
+		return starts[k]
+	}
+	return -1
+}
+
+// commentEnd returns the end of the comment that starts at text[i], or -1.
+func (s *commentScan) commentEnd(i int) int {
+	rest := s.text[i:]
+	switch {
+	case strings.HasPrefix(rest, "<!-->"):
+		return i + 5
+	case strings.HasPrefix(rest, "<!--->"):
+		return i + 6
+	case strings.HasPrefix(rest, "<!--"):
+		if s.noCommentEnd {
+			return -1
+		}
+		if end := strings.Index(rest[4:], "-->"); end >= 0 {
+			return i + 4 + end + 3
+		}
+		s.noCommentEnd = true
+	}
+	return -1
+}
+
+// otherHTMLEnd returns the end of the autolink, raw HTML tag, processing
+// instruction, declaration or CDATA section that starts at text[i], or -1.
+func (s *commentScan) otherHTMLEnd(i int) int {
+	text := s.text
+	rest := text[i:]
+	switch {
+	case strings.HasPrefix(rest, "<?"):
+		if s.noPIEnd {
+			return -1
+		}
+		if end := strings.Index(rest[2:], "?>"); end >= 0 {
+			return i + 2 + end + 2
+		}
+		s.noPIEnd = true
+		return -1
+	case strings.HasPrefix(rest, "<![CDATA["):
+		if s.noCDATAEnd {
+			return -1
+		}
+		if end := strings.Index(rest[9:], "]]>"); end >= 0 {
+			return i + 9 + end + 3
+		}
+		s.noCDATAEnd = true
+		return -1
+	case strings.HasPrefix(rest, "<!") && len(rest) > 2 && (rest[2] >= 'A' && rest[2] <= 'Z' || rest[2] >= 'a' && rest[2] <= 'z'):
+		if s.noDeclEnd {
+			return -1
+		}
+		if end := strings.IndexByte(rest[2:], '>'); end >= 0 {
+			return i + 2 + end + 1
+		}
+		s.noDeclEnd = true
+		return -1
+	}
+	for _, re := range []*regexp.Regexp{inlineAutolinkRe, inlineEmailRe, inlineOpenTagRe, inlineCloseTagRe} {
+		if m := re.FindString(rest); m != "" {
+			return i + len(m)
 		}
 	}
-	b.WriteByte('>')
-	return b.String()
+	return -1
 }
 
-// parseInlineAt parses inline text. Comments that the inline grammar does not
-// read as one node are swapped for stand-in tags for the parse (see above).
+func isASCIIPunct(b byte) bool {
+	return b >= '!' && b <= '/' || b >= ':' && b <= '@' || b >= '[' && b <= '`' || b >= '{' && b <= '~'
+}
+
+// skipLinkSpace skips spaces, tabs and at most one line ending.
+func (s *commentScan) skipLinkSpace(i int) int {
+	text := s.text
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	if i < len(text) && text[i] == '\n' {
+		i++
+		for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+			i++
+		}
+	}
+	return i
+}
+
+// linkTailEnd parses the part of an inline link after "(" (destination,
+// optional title, ")" per CommonMark 6.3) and returns the offset after ")",
+// or -1.
+func (s *commentScan) linkTailEnd(i int) int {
+	text := s.text
+	i = s.skipLinkSpace(i)
+	if i >= len(text) {
+		return -1
+	}
+	if text[i] == '<' {
+		i++
+		for {
+			if i >= len(text) || text[i] == '\n' || text[i] == '<' {
+				return -1
+			}
+			if text[i] == '\\' && i+1 < len(text) && isASCIIPunct(text[i+1]) {
+				i += 2
+				continue
+			}
+			if text[i] == '>' {
+				i++
+				break
+			}
+			i++
+		}
+	} else {
+		start, depth := i, 0
+	dest:
+		for i < len(text) {
+			c := text[i]
+			switch {
+			case c == '\\' && i+1 < len(text) && isASCIIPunct(text[i+1]):
+				i += 2
+			case c <= ' ' || c == 0x7f:
+				break dest
+			case c == '(':
+				depth++
+				if depth > 32 {
+					return -1
+				}
+				i++
+			case c == ')':
+				if depth == 0 {
+					break dest
+				}
+				depth--
+				i++
+			default:
+				i++
+			}
+		}
+		if depth != 0 || i == start && (i >= len(text) || text[i] != ')') {
+			return -1
+		}
+	}
+	afterDest := i
+	i = s.skipLinkSpace(i)
+	if i != afterDest && i < len(text) {
+		if end := s.titleEnd(i); end >= 0 {
+			i = s.skipLinkSpace(end)
+		}
+	}
+	if i < len(text) && text[i] == ')' {
+		return i + 1
+	}
+	return -1
+}
+
+// titleEnd returns the offset after the link title that starts at text[i], or
+// -1 when none starts there.
+func (s *commentScan) titleEnd(i int) int {
+	text := s.text
+	var kind int
+	var closer byte
+	switch text[i] {
+	case '"':
+		kind, closer = 0, '"'
+	case '\'':
+		kind, closer = 1, '\''
+	case '(':
+		kind, closer = 2, ')'
+	default:
+		return -1
+	}
+	if s.noTitleEnd[kind] {
+		return -1
+	}
+	for j := i + 1; j < len(text); j++ {
+		switch c := text[j]; {
+		case c == '\\' && j+1 < len(text) && isASCIIPunct(text[j+1]):
+			j++
+		case c == closer:
+			return j + 1
+		case kind == 2 && c == '(':
+			return -1
+		}
+	}
+	if kind != 2 {
+		s.noTitleEnd[kind] = true
+	}
+	return -1
+}
+
+// parseInlineAt parses inline text. Each inline HTML comment becomes one
+// HTMLInline node built from its source span; the text between comments goes
+// to the inline reader. A comment inside the text of an inline link or image
+// stays with that link, so the link keeps its shape; the reader meets the
+// comment again when it parses the link text.
 func parseInlineAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
 	if !strings.Contains(text, "<!--") {
-		return parseInlineUnmaskedAt(text, source, baseOffset, ctx)
+		return parseInlineSegmentAt(text, source, baseOffset, ctx)
 	}
-	spans := findInlineComments(text)
-	if len(spans) == 0 || len(spans) > maxInlineComments {
-		return parseInlineUnmaskedAt(text, source, baseOffset, ctx)
+	comments, links := findInlineComments(text)
+	if len(comments) == 0 {
+		return parseInlineSegmentAt(text, source, baseOffset, ctx)
 	}
-	masked := []byte(text)
-	originals := make(map[string]string, len(spans))
-	for index, span := range spans {
-		mask := inlineCommentMask(text, span, index)
-		copy(masked[span[0]:span[1]], mask)
-		originals[mask] = text[span[0]:span[1]]
+	sort.Slice(links, func(a, b int) bool { return links[a][0] < links[b][0] })
+	var nodes []*Node
+	cursor, link := 0, 0
+	for _, span := range comments {
+		for link < len(links) && links[link][1] <= span[0] {
+			link++
+		}
+		if link < len(links) && links[link][0] < span[0] {
+			continue // inside a link or image: the link reader handles it
+		}
+		if span[0] > cursor {
+			nodes = append(nodes, parseInlineSegmentAt(text[cursor:span[0]], source, addBaseOffset(baseOffset, cursor), ctx)...)
+		}
+		html := newNode(NodeHTMLInline)
+		html.Range = inlineSpanRange(source, baseOffset, span[0], span[1])
+		html.Literal = text[span[0]:span[1]]
+		nodes = append(nodes, html)
+		cursor = span[1]
 	}
-	nodes := parseInlineUnmaskedAt(string(masked), source, baseOffset, ctx)
-	for _, n := range nodes {
-		restoreInlineComments(n, originals)
+	if cursor == 0 {
+		return parseInlineSegmentAt(text, source, baseOffset, ctx)
+	}
+	if cursor < len(text) {
+		nodes = append(nodes, parseInlineSegmentAt(text[cursor:], source, addBaseOffset(baseOffset, cursor), ctx)...)
 	}
 	return nodes
-}
-
-func restoreInlineComments(n *Node, originals map[string]string) {
-	if n == nil {
-		return
-	}
-	if strings.Contains(n.Literal, "<q") {
-		if original, ok := originals[n.Literal]; ok {
-			n.Literal = original
-		} else {
-			for mask, original := range originals {
-				n.Literal = strings.ReplaceAll(n.Literal, mask, original)
-			}
-		}
-	}
-	for key, value := range n.Attrs {
-		if strings.Contains(value, "<q") {
-			for mask, original := range originals {
-				value = strings.ReplaceAll(value, mask, original)
-			}
-			n.Attrs[key] = value
-		}
-	}
-	for _, child := range n.Children {
-		restoreInlineComments(child, originals)
-	}
 }

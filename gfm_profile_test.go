@@ -84,8 +84,11 @@ func TestGFMProfileReadsTheSpecification(t *testing.T) {
 	}
 }
 
-// Every HTML block start condition (4.6), in upper, lower and mixed case, is
-// an HTML block: no component, whatever the case of the tag.
+// Every HTML block start condition (4.6), in upper, lower and mixed case, is an
+// HTML block or is reported: no component, whatever the case of the tag. The
+// grammar is the only reader of blocks in this profile; where it does not read
+// an HTML block as one block, the document says so (DiagHTMLBlockUnread) over
+// the lines of the block, and the tree there is not trusted.
 func TestGFMProfileHTMLBlockStartsInAnyCase(t *testing.T) {
 	forms := []string{
 		"<%s>\ntext\n</%s>",                 // 1: pre, script, style, textarea
@@ -101,9 +104,7 @@ func TestGFMProfileHTMLBlockStartsInAnyCase(t *testing.T) {
 		for _, name := range names[i] {
 			src := strings.ReplaceAll(form, "%s", name)
 			doc := parseGFM(t, src)
-			if len(doc.Root.Children) == 0 || doc.Root.Children[0].Type != NodeHTMLBlock {
-				t.Errorf("%q: first block is not an HTML block:\n%s", src, fullNodeDump(doc.Root))
-			}
+			requireHTMLBlockOrReport(t, doc, src)
 			if n := doc.Root.Find(NodeComponent); len(n) > 0 {
 				t.Errorf("%q: found a component", src)
 			}
@@ -112,9 +113,7 @@ func TestGFMProfileHTMLBlockStartsInAnyCase(t *testing.T) {
 	others := []string{"<!-- comment -->\ntext", "<?php echo 1; ?>\ntext", "<!DOCTYPE html>\ntext", "<![CDATA[ x ]]>\ntext", "<!doctype html>\ntext"}
 	for _, src := range others {
 		doc := parseGFM(t, src)
-		if len(doc.Root.Children) == 0 || doc.Root.Children[0].Type != NodeHTMLBlock {
-			t.Errorf("%q: first block is not an HTML block:\n%s", src, fullNodeDump(doc.Root))
-		}
+		requireHTMLBlockOrReport(t, doc, src)
 	}
 	// An inline tag with a capital is raw HTML (6.6), not a component.
 	doc := parseGFM(t, "A <Card title=\"x\">inside</Card> b <Badge/> c\n")
@@ -204,5 +203,184 @@ func TestParseProfileByName(t *testing.T) {
 	}
 	if ProfileGFM.String() != "gfm" || ProfileMarkdownPlus.String() != "markdown++" {
 		t.Error("String")
+	}
+}
+
+// requireHTMLBlockOrReport fails unless the first block of doc is an HTML block
+// or a DiagHTMLBlockUnread diagnostic covers the first line of src.
+func requireHTMLBlockOrReport(t *testing.T, doc *Document, src string) {
+	t.Helper()
+	if len(doc.Root.Children) > 0 && doc.Root.Children[0].Type == NodeHTMLBlock {
+		return
+	}
+	for _, d := range doc.Diagnostics() {
+		if d.Code == DiagHTMLBlockUnread && d.Range.StartByte == 0 && d.Range.EndByte > 0 {
+			return
+		}
+	}
+	t.Errorf("%q: the first block is not an HTML block and nothing reports it:\n%s", src, fullNodeDump(doc.Root))
+}
+
+// A label that Markdown++ reserves is an ordinary link reference label in GFM:
+// "[^a]" (a footnote in Markdown++) and "[!a]" or "[!NOTE]" (an alert marker)
+// are references to the definition with that label. The test checks the target
+// that each reference resolves to, and not only the absence of a footnote or
+// admonition node.
+func TestGFMProfileReservedLabelsAreOrdinaryReferences(t *testing.T) {
+	for _, label := range []string{"^a", "^1", "^a-b", "!a", "!NOTE", "!WARNING", "!TIP", "!IMPORTANT", "!CAUTION", "!note"} {
+		forms := map[string]string{
+			"shortcut":  "[" + label + "]: /u\n\n[" + label + "]\n",
+			"collapsed": "[" + label + "]: /u\n\n[" + label + "][]\n",
+			"full":      "[" + label + "]: /u\n\n[text][" + label + "]\n",
+			"image":     "[" + label + "]: /u\n\n![text][" + label + "]\n",
+		}
+		for name, src := range forms {
+			doc := parseGFM(t, src)
+			var hrefs []string
+			walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
+				if n.Type == NodeLink && n.Attrs["href"] != "" {
+					hrefs = append(hrefs, n.Attrs["href"])
+				}
+				if n.Type == NodeImage && n.Attrs["src"] != "" {
+					hrefs = append(hrefs, n.Attrs["src"])
+				}
+				return true
+			})
+			if len(hrefs) != 1 || hrefs[0] != "/u" {
+				t.Errorf("label %q, %s form %q: resolved targets %q, want [/u]:\n%s", label, name, src, hrefs, fullNodeDump(doc.Root))
+			}
+			if len(doc.Root.Find(NodeFootnoteRef))+len(doc.Root.Find(NodeFootnoteDef))+len(doc.Root.Find(NodeAdmonition)) != 0 {
+				t.Errorf("label %q, %s form: a footnote or admonition node:\n%s", label, name, fullNodeDump(doc.Root))
+			}
+		}
+	}
+	// In the default profile the same labels stay reserved.
+	for _, src := range []string{"[^a]: x\n\n[^a]\n"} {
+		if len(MustParse([]byte(src)).Root.Find(NodeFootnoteRef)) != 1 {
+			t.Errorf("default profile: %q is not a footnote reference", src)
+		}
+	}
+}
+
+// The grammar is the only reader of blocks in the GFM profile. Where it does
+// not read an HTML block as one block, the document reports the lines of the
+// block (DiagHTMLBlockUnread), so a heading that the tree shows inside them is
+// not trusted. Blocks that the grammar reads as HTML blocks are not reported.
+func TestGFMProfileReportsHTMLBlocksTheGrammarDoesNotRead(t *testing.T) {
+	reported := []struct{ src, covered string }{
+		{"Before.\n<h2>\n# h\n", "# h"},
+		{"<pre>\n# h\n</pre>\n", "# h"},
+		{"<script>\n# h\n- [ ] t\n</script>\n", "- [ ] t"},
+		{"<span />\n# h\n", "# h"},
+	}
+	for _, tc := range reported {
+		doc := parseGFM(t, tc.src)
+		found := false
+		for _, d := range doc.Diagnostics() {
+			if d.Code == DiagHTMLBlockUnread && string(doc.Source[d.Range.StartByte:d.Range.EndByte]) != "" &&
+				strings.Contains(string(doc.Source[d.Range.StartByte:d.Range.EndByte]), tc.covered) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q: no %s diagnostic covers %q:\n%s", tc.src, DiagHTMLBlockUnread, tc.covered, fullNodeDump(doc.Root))
+		}
+	}
+	for _, src := range []string{
+		"<!-- c -->\n\n## S\n\n- [ ] t\n",
+		"<!--\nmulti\nline\n-->\n\ntext\n",
+		"<details>\n<summary>x</summary>\n\n- [ ] t\n\n</details>\n",
+		"# h\n\ntext <!-- c --> more\n",
+		"text\n\n<div>\n# h\n</div>\n",
+	} {
+		for _, d := range parseGFM(t, src).Diagnostics() {
+			if d.Code == DiagHTMLBlockUnread {
+				t.Errorf("%q: unexpected %s over %v", src, DiagHTMLBlockUnread, d.Range)
+			}
+		}
+	}
+}
+
+// A document that starts with a "---" line, a block and another "---" line has
+// no front matter in GFM: the lines are thematic breaks (or a setext
+// underline), and a heading in the block is a heading. The grammar reads front
+// matter there and hides the block, so mdpp puts blank lines before the
+// document for the grammar; the ranges are mapped back and are exact.
+func TestGFMProfileLeadingDashesAreNotFrontMatter(t *testing.T) {
+	src := "---\nt: x\n# h\n---\n\ntext\n"
+	doc := parseGFM(t, src)
+	headings := doc.Root.Find(NodeHeading)
+	if len(headings) != 1 || len(doc.Root.Find(NodeThematicBreak)) != 2 {
+		t.Fatalf("%d headings, %d breaks, want the heading `# h` between two breaks:\n%s", len(headings), len(doc.Root.Find(NodeThematicBreak)), fullNodeDump(doc.Root))
+	}
+	h := headings[0]
+	if got := string(doc.Source[h.Range.StartByte:h.Range.EndByte]); got != "# h\n" {
+		t.Errorf("heading range covers %q, want %q", got, "# h\n")
+	}
+	if len(doc.Root.Find(NodeFrontmatter)) != 0 {
+		t.Errorf("front matter read in GFM")
+	}
+	if first := doc.Root.Children[0]; first.Type != NodeThematicBreak || first.Range.StartByte != 0 || first.Range.EndByte != 4 || first.Range.StartLine != 1 {
+		t.Errorf("first block %v %+v, want the thematic break [0,4)", first.Type, first.Range)
+	}
+	if string(doc.Source) != src {
+		t.Errorf("document source changed: %q", doc.Source)
+	}
+	if problems := checkNodeRanges(doc); len(problems) != 0 {
+		t.Errorf("range problems: %v", problems)
+	}
+}
+
+// A block comment at the first column that is followed directly by another
+// line is an HTML block (4.6, start condition 2) and the next line starts a new
+// block. The grammar reads such a comment at the start of a document as inline
+// HTML when a heading follows, so mdpp puts blank lines after the comment for
+// the grammar (gfmLowerSource). The ranges are mapped back and are exact, and a
+// comment inside a fenced code block or an indented line is left alone.
+func TestGFMProfileBlockCommentFollowedByAHeading(t *testing.T) {
+	cases := []struct {
+		src      string
+		comment  string
+		heading  string
+		htmlNode NodeType
+	}{
+		{"<!-- c -->\n## S\n", "<!-- c -->\n", "## S\n", NodeHTMLBlock},
+		{"<!--\nmulti\nline\n-->\n## S\n", "<!--\nmulti\nline\n-->\n", "## S\n", NodeHTMLBlock},
+		{"<!-- c -->\r\n## S\r\n", "<!-- c -->\n", "## S\n", NodeHTMLBlock},
+		{"# T\n\ntext\n<!-- c -->\n## S\n\nmore\n", "<!-- c -->\n", "## S\n", NodeHTMLBlock},
+		{"<!-- a -->\n<!-- b -->\n## S\n", "<!-- a -->\n", "## S\n", NodeHTMLBlock},
+	}
+	for _, tc := range cases {
+		doc := parseGFM(t, tc.src)
+		if len(doc.Diagnostics()) != 0 {
+			t.Errorf("%q: diagnostics %v\n%s", tc.src, doc.Diagnostics(), fullNodeDump(doc.Root))
+		}
+		blocks, headings := doc.Root.Find(NodeHTMLBlock), doc.Root.Find(NodeHeading)
+		if len(blocks) == 0 || len(headings) == 0 {
+			t.Errorf("%q: %d HTML blocks, %d headings:\n%s", tc.src, len(blocks), len(headings), fullNodeDump(doc.Root))
+			continue
+		}
+		if got := string(doc.Source[blocks[0].Range.StartByte:blocks[0].Range.EndByte]); !strings.HasPrefix(got, tc.comment[:len(tc.comment)-1]) {
+			t.Errorf("%q: first HTML block covers %q", tc.src, got)
+		}
+		h := headings[len(headings)-1]
+		if got := string(doc.Source[h.Range.StartByte:h.Range.EndByte]); got != tc.heading {
+			t.Errorf("%q: heading covers %q, want %q", tc.src, got, tc.heading)
+		}
+		if problems := checkNodeRanges(doc); len(problems) != 0 {
+			t.Errorf("%q: range problems %v", tc.src, problems)
+		}
+	}
+	for _, src := range []string{"```\n<!-- c -->\n## S\n```\n", "- a\n  <!-- c -->\n  text\n", "    <!-- c -->\n    ## S\n"} {
+		doc := parseGFM(t, src)
+		if string(doc.Source) != src {
+			t.Errorf("%q: source changed", src)
+		}
+		if problems := checkNodeRanges(doc); len(problems) != 0 {
+			t.Errorf("%q: range problems %v", src, problems)
+		}
+		if n := len(doc.Root.Find(NodeHeading)); n != 0 {
+			t.Errorf("%q: %d headings, want none:\n%s", src, n, fullNodeDump(doc.Root))
+		}
 	}
 }
