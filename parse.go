@@ -1065,7 +1065,7 @@ func parseLongLineFallback(source []byte, ctx *parseCtx) *Document {
 			masked[i] = 'x'
 		}
 	}
-	doc, _ := parseDocumentRetainTreeCtx(masked, nil, nil)
+	doc, _ := parseDocumentRetainTreeCtx(masked, nil, ctx)
 	if doc == nil {
 		doc = &Document{}
 	}
@@ -5268,7 +5268,14 @@ func appendRecoveredBlockText(nodes *[]*Node, text string, source []byte, offset
 	if !looksLikeStructuredBlockText(text) {
 		return false
 	}
+	// The recovery parse reads the text in the profile of the document and
+	// spends the document's budget.
 	recoverCtx := &parseCtx{suppressLooseRecovery: true}
+	if ctx != nil {
+		recoverCtx.profile = ctx.profile
+		recoverCtx.budget = ctx.budget
+		recoverCtx.containerDepth = ctx.containerDepth
+	}
 	doc := parseDocumentCtx([]byte(text), recoverCtx)
 	if doc == nil || doc.Root == nil || !recoveredBlockUseful(doc.Root.Children) {
 		return false
