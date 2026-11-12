@@ -384,3 +384,50 @@ func TestGFMProfileBlockCommentFollowedByAHeading(t *testing.T) {
 		}
 	}
 }
+
+// Two more shapes that the grammar reads wrongly are reported in the GFM profile
+// (DiagBlockMisread) and not repaired: a fenced code block with an indented
+// closing fence, and a link reference definition followed by a setext
+// underline. In both, the grammar shows a heading that CommonMark does not have.
+func TestGFMProfileReportsBlocksTheGrammarMisreads(t *testing.T) {
+	reported := []struct {
+		src        string
+		start, end int
+	}{
+		{"```\naaa\n    ```\n# h\n", 0, 20},
+		{"```\naaa\n    ```\n# h\n```\n\n## real\n", 0, 24},
+		{"~~~\naaa\n    ~~~\n# h\n", 0, 20},
+		{"````\naaa\n    ````\n# h\n", 0, 22},
+		{"[foo]: /url\n===\n[foo]\n", 0, 16},
+		{"text\n\n[foo]: /url\n---\n", 6, 22},
+	}
+	for _, tc := range reported {
+		doc := parseGFM(t, tc.src)
+		found := false
+		for _, d := range doc.Diagnostics() {
+			if d.Code == DiagBlockMisread && d.Range.StartByte == tc.start && d.Range.EndByte == tc.end {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q: no %s diagnostic over [%d,%d): %v\n%s", tc.src, DiagBlockMisread, tc.start, tc.end, doc.Diagnostics(), fullNodeDump(doc.Root))
+		}
+	}
+	// The heading after the real closing fence is outside the reported range.
+	doc := parseGFM(t, reported[1].src)
+	for _, d := range doc.Diagnostics() {
+		if d.Code == DiagBlockMisread && d.Range.EndByte > 24 {
+			t.Errorf("the report runs past the real closing fence: %v", d.Range)
+		}
+	}
+	for _, src := range []string{
+		"```\naaa\n```\n# h\n", "```\naaa\n  ```\n# h\n", "~~~\n~~~\n# h\n", "```\n    text\n```\n",
+		"[foo]: /url\n\n===\n", "[foo]: /url\ntext\n===\n", "    ```\n    code\n    ```\n", "- ```\n      ```\n",
+	} {
+		for _, d := range parseGFM(t, src).Diagnostics() {
+			if d.Code == DiagBlockMisread {
+				t.Errorf("%q: unexpected %s over %v", src, DiagBlockMisread, d.Range)
+			}
+		}
+	}
+}
