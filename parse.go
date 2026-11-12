@@ -489,6 +489,7 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 	postProcess(doc, ctx)
 	if ctx.gfm() {
 		doc.diagnostics = append(doc.diagnostics, gfmHTMLBlockHazards(source, doc.Root)...)
+		doc.diagnostics = append(doc.diagnostics, gfmBlockMisreads(source, doc.Root)...)
 	}
 	if topLevel && ctx != nil {
 		ctx.cache.pruneNotIn(ctx.seen)
