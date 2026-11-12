@@ -3,6 +3,7 @@ package mdpp
 import (
 	"regexp"
 	"strings"
+	"sync/atomic"
 )
 
 // postProcess walks the AST after parsing and applies Markdown++ transformations.
@@ -1088,12 +1089,93 @@ func processInlinePattern(root *Node, re *regexp.Regexp, factory func(match []st
 	})
 }
 
+// textSplitWork counts the work that splitting text nodes does, so that a test
+// can show it grows with the text and not with the product of the text and the
+// number of matches. bytes is the number of source bytes that were scanned to
+// find line and column positions; builds is the number of times a raw-offset
+// table was built (once per split text node).
+var textSplitWork struct {
+	bytes  atomic.Int64
+	builds atomic.Int64
+}
+
+// textSpanMapper maps byte spans of a text node's literal to ranges in the
+// source. It does the work that depends on the whole node once: it checks that
+// the source text and the range agree, builds the table that maps decoded
+// offsets back to raw offsets, and then moves one position cursor forward as
+// the spans, which a caller asks for in increasing order, advance.
+type textSpanMapper struct {
+	base    Range
+	src     string
+	offsets []int // decoded offset -> raw offset; nil when literal == raw text
+	ok      bool
+
+	at, line, col int // the cursor: a source offset and its line and column
+}
+
+func newTextSpanMapper(n *Node) *textSpanMapper {
+	m := &textSpanMapper{base: n.Range, src: n.Literal}
+	if n.raw != "" {
+		m.src = n.raw
+	}
+	if n.Range.StartLine == 0 || n.Range.EndByte-n.Range.StartByte != len(m.src) {
+		return m
+	}
+	if n.raw != "" {
+		if decodeMarkdownText(n.raw) != n.Literal {
+			return m
+		}
+		m.offsets = literalRawOffsets(n.raw)
+		textSplitWork.builds.Add(1)
+	}
+	m.ok = true
+	m.at, m.line, m.col = 0, n.Range.StartLine, n.Range.StartCol
+	return m
+}
+
+// position returns the line and column of source offset off (relative to the
+// start of the node's source text), moving the cursor there.
+func (m *textSpanMapper) position(off int) (int, int) {
+	if off < m.at {
+		m.at, m.line, m.col = 0, m.base.StartLine, m.base.StartCol
+	}
+	textSplitWork.bytes.Add(int64(off - m.at))
+	m.line, m.col = advanceTextPosition(m.line, m.col, m.src[m.at:off])
+	m.at = off
+	return m.line, m.col
+}
+
+// span maps the literal's byte offsets a..b to a range in the source, and
+// returns the raw source text of that part of the literal.
+func (m *textSpanMapper) span(a, b int) (Range, string) {
+	if !m.ok {
+		return Range{}, ""
+	}
+	if m.offsets != nil {
+		a, b = m.offsets[a], m.offsets[b]
+	}
+	if a < 0 || b < a || b > len(m.src) {
+		return Range{}, ""
+	}
+	startLine, startCol := m.position(a)
+	endLine, endCol := m.position(b)
+	return Range{
+		StartByte: m.base.StartByte + a,
+		EndByte:   m.base.StartByte + b,
+		StartLine: startLine,
+		StartCol:  startCol,
+		EndLine:   endLine,
+		EndCol:    endCol,
+	}, m.src[a:b]
+}
+
 // splitTextByPattern splits a text node into alternating text and newly
 // created nodes based on a regex pattern. Each new node's range is the part of
 // the text node's source text that it came from. When the literal is not the
 // source text (escapes and entities were decoded, or line prefixes were
 // removed) the offsets are mapped through the source text, and a node whose
-// source text cannot be established has no range.
+// source text cannot be established has no range. A text fragment keeps the
+// raw source text of its part, so that a later pass can map it again.
 func splitTextByPattern(n *Node, re *regexp.Regexp, factory func(match []string) *Node) []*Node {
 	text, base := n.Literal, n.Range
 	locs := re.FindAllStringSubmatchIndex(text, -1)
@@ -1101,26 +1183,15 @@ func splitTextByPattern(n *Node, re *regexp.Regexp, factory func(match []string)
 		return []*Node{textNodeRange(text, base)}
 	}
 
-	// span maps the literal's byte offsets a..b to a range in the source.
-	span := func(a, b int) Range {
-		if base.StartLine == 0 {
-			return Range{}
+	mapper := newTextSpanMapper(n)
+	// fragment makes a text node for text[a:b] that keeps its raw source.
+	fragment := func(a, b int) *Node {
+		r, raw := mapper.span(a, b)
+		node := &Node{Type: NodeText, Literal: text[a:b], Range: r}
+		if r.StartLine != 0 && raw != node.Literal {
+			node.raw = raw
 		}
-		src := text
-		if n.raw != "" {
-			src = n.raw
-		}
-		if base.EndByte-base.StartByte != len(src) {
-			return Range{}
-		}
-		if n.raw != "" {
-			if decodeMarkdownText(n.raw) != text {
-				return Range{}
-			}
-			offsets := literalRawOffsets(n.raw)
-			a, b = offsets[a], offsets[b]
-		}
-		return textSliceRange(base, src, a, b)
+		return node
 	}
 
 	var nodes []*Node
@@ -1128,7 +1199,7 @@ func splitTextByPattern(n *Node, re *regexp.Regexp, factory func(match []string)
 
 	for _, loc := range locs {
 		if loc[0] > cursor {
-			nodes = append(nodes, textNodeRange(text[cursor:loc[0]], span(cursor, loc[0])))
+			nodes = append(nodes, fragment(cursor, loc[0]))
 		}
 
 		match := make([]string, len(loc)/2)
@@ -1140,14 +1211,14 @@ func splitTextByPattern(n *Node, re *regexp.Regexp, factory func(match []string)
 
 		node := factory(match)
 		if node != nil {
-			node.Range = span(loc[0], loc[1])
+			node.Range, _ = mapper.span(loc[0], loc[1])
 			nodes = append(nodes, node)
 		}
 		cursor = loc[1]
 	}
 
 	if cursor < len(text) {
-		nodes = append(nodes, textNodeRange(text[cursor:], span(cursor, len(text))))
+		nodes = append(nodes, fragment(cursor, len(text)))
 	}
 
 	return nodes
