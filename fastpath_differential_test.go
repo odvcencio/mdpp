@@ -233,5 +233,9 @@ func TestFastPathMatchesFullParser(t *testing.T) {
 	if reported > 20 {
 		t.Errorf("%d inputs differ in total", reported)
 	}
-	t.Logf("%d inputs compared", len(inputs))
+	distinct := map[string]bool{}
+	for _, src := range inputs {
+		distinct[src] = true
+	}
+	t.Logf("%d entries, %d distinct inputs compared", len(inputs), len(distinct))
 }
