@@ -829,11 +829,15 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 		quoteStart += len(line) + 1
 	}
 	quote := &Node{Type: NodeBlockquote, Range: sourceRange(source, min(quoteStart, quoteEnd), quoteEnd)}
+	var diagnostics []Diagnostic
 	if inner != nil && inner.Root != nil {
 		quote.Children = inner.Root.Children
-		remapQuoteRanges(quote, source, lines, contentLines, offsets)
+		// The inner document's diagnostics refer to the stripped text, like
+		// its nodes. They move through the same byte map; a range that has no
+		// source byte (inside a tab) becomes the range of the whole quote.
+		diagnostics = remapQuoteRanges(quote, source, lines, contentLines, offsets, inner.diagnostics)
 	}
-	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{quote}, Range: sourceRange(source, 0, len(source))}, Source: source}
+	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{quote}, Range: sourceRange(source, 0, len(source))}, Source: source, diagnostics: diagnostics}
 	doc.extractFrontmatterCtx(ctx)
 	return doc
 }
@@ -843,8 +847,10 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 // without a range keep none. offsets[k][c] is the byte offset in line k of the
 // source of content byte c. Where a tab was expanded to spaces, a position
 // inside the run of spaces has no source byte: a node that starts or ends
-// there gets no range rather than a wrong one.
-func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, offsets [][]int) {
+// there gets no range rather than a wrong one. It returns diagnostics with
+// their ranges moved the same way; a diagnostic whose range has no source byte
+// gets the range of the quote, which is certain to cover it.
+func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, offsets [][]int, diagnostics []Diagnostic) []Diagnostic {
 	origStart := make([]int, len(lines)+1)
 	innerStart := make([]int, len(lines)+1)
 	for k := range lines {
@@ -882,6 +888,20 @@ func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, 
 			return true
 		})
 	}
+	out := make([]Diagnostic, 0, len(diagnostics))
+	for _, d := range diagnostics {
+		if d.Range.StartLine != 0 {
+			start, startOK := mapPos(d.Range.StartByte, false)
+			end, endOK := mapPos(d.Range.EndByte, true)
+			if startOK && endOK {
+				d.Range = sourceRange(source, min(start, len(source)), min(end, len(source)))
+			} else {
+				d.Range = quote.Range
+			}
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // stripQuoteContinuationMarkers removes blockquote continuation markers
@@ -1598,6 +1618,12 @@ func parseFastBlockChunkAttempt(source []byte, ctx *parseCtx) (*Document, bool) 
 			for _, child := range doc.Root.Children {
 				shiftNodeRanges(child, source, lines[start].start)
 				children = append(children, child)
+			}
+			// The quote's diagnostics (its inner document's, moved to the
+			// quote's own bytes) go into the context, where the caller of the
+			// fast path collects them or drops them if the attempt is given up.
+			if ctx != nil {
+				ctx.recoveryDiagnostics = append(ctx.recoveryDiagnostics, bodyDocDiagnostics(doc, source, lines[start].start)...)
 			}
 			continue
 		}

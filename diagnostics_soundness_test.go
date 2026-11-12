@@ -73,6 +73,16 @@ func TestDiagnosticsSurviveEveryReturnPath(t *testing.T) {
 		{"chunk before a container", "*x* <a http://a\n\n:::note\nbody\n:::\n", 0, 15},
 		{"chunk after a container", ":::note\nbody\n:::\n\n*x* <a http://a\n", 18, 33},
 		{"container body", ":::note\n*x* <a http://a\n:::\n", 8, 23},
+		// The simple block quote reader builds the quote from the stripped text.
+		// The inner document's diagnostics move through the quote's byte map.
+		{"block quote", "> *x* <a http://a\n", 2, 17},
+		{"block quote after a break (fast path)", "***\n> *x* <a http://a\n", 6, 21},
+		{"block quote, second line", "> a\n> *x* <a http://a\n", 6, 21},
+		{"nested block quote", "> > *x* <a http://a\n", 4, 19},
+		{"three nested block quotes", "> > > *x* <a http://a\n", 6, 21},
+		{"block quote with a tab", ">\t*x* <a http://a\n", 2, 17},
+		{"block quote after a paragraph", "text\n\n> *x* <a http://a\n", 8, 23},
+		{"block quote before a paragraph", "> *x* <a http://a\n\ntext\n", 2, 17},
 	}
 	for _, tc := range cases {
 		fastBlockChunkDisabled = true
@@ -108,6 +118,27 @@ func TestDiagnosticsSurviveEveryReturnPath(t *testing.T) {
 			t.Errorf("%s: second parse: ranges %s do not cover %d..%d", tc.name, diagnosticSummary(second), tc.start, tc.end)
 		}
 		p.Close()
+	}
+}
+
+// In the GFM profile the quote reader is off and the grammar reads the quote;
+// the diagnostics of the same inputs cover the same text.
+func TestQuoteDiagnosticsInTheGFMProfile(t *testing.T) {
+	for _, tc := range []struct {
+		src        string
+		start, end int
+	}{
+		{"> *x* <a http://a\n", 2, 17},
+		{"***\n> *x* <a http://a\n", 6, 21},
+		{"> > *x* <a http://a\n", 4, 19},
+	} {
+		doc, err := ParseWithOptions([]byte(tc.src), ParseOptions{Profile: ProfileGFM})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if doc.StructureCertified() || !covers(doc.UncertifiedRanges(), tc.start, tc.end) {
+			t.Errorf("%q (GFM): uncertified ranges %s do not cover %d..%d:\n%s", tc.src, diagnosticSummary(doc), tc.start, tc.end, fullNodeDump(doc.Root))
+		}
 	}
 }
 
