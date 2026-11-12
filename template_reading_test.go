@@ -130,3 +130,76 @@ func TestPullRequestTemplateNodesHaveExactRanges(t *testing.T) {
 		}
 	}
 }
+
+// The inputs of the fifth review, read in the GFM profile (the grammar path) and
+// in the default profile, for the three kinds of node the tool needs. Each
+// input is either read exactly, with the counts below and no uncertain range, or
+// it carries a diagnostic that covers the text that was not read structurally.
+func TestReviewInputsForHeadingsTasksAndComments(t *testing.T) {
+	tail := "\n  - a\n    - a\n      - a\n        - a\n          - a\n"
+	comments := func(doc *Document) int {
+		n := 0
+		for _, node := range doc.Root.Find(NodeHTMLInline) {
+			if strings.HasPrefix(node.Literal, "<!--") {
+				n++
+			}
+		}
+		for _, node := range doc.Root.Find(NodeHTMLBlock) {
+			if strings.HasPrefix(node.Literal, "<!--") {
+				n++
+			}
+		}
+		return n
+	}
+	exact := []struct {
+		name, src                string
+		headings, tasks, comment int
+	}{
+		{"compact comments next to a tag", "x <!--><q00>\n", 0, 0, 1},
+		{"321-byte comment", "x <!--" + strings.Repeat("a", 312) + "-->\n", 0, 0, 1},
+		{"1,297 compact comments", "x " + strings.Repeat("<!--> ", 1297) + "\n", 0, 0, 1297},
+		{"tab after the checkbox", "- [x]\ta\n", 0, 1, 0},
+		{"comment, heading, task", "<!-- c -->\n## S\n- [ ] t\n", 1, 1, 1},
+		{"comment inside a code span", "`<!-- c -->` and # not a heading\n", 0, 0, 0},
+		{"definition then text", "[foo]: /url\n\n[foo] <!-- c -->\n", 0, 0, 1},
+	}
+	for _, profile := range []ParseProfile{ProfileMarkdownPlus, ProfileGFM} {
+		for _, tc := range exact {
+			doc, err := ParseWithOptions([]byte(tc.src), ParseOptions{Profile: profile})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !doc.StructureCertified() {
+				t.Errorf("%s (%v): not certified: %s", tc.name, profile, diagnosticSummary(doc))
+			}
+			if h, k, c := len(doc.Root.Find(NodeHeading)), len(doc.Root.Find(NodeTaskListItem)), comments(doc); h != tc.headings || k != tc.tasks || c != tc.comment {
+				t.Errorf("%s (%v): %d headings, %d task items, %d comments; want %d, %d, %d:\n%.2000s", tc.name, profile, h, k, c, tc.headings, tc.tasks, tc.comment, fullNodeDump(doc.Root))
+			}
+		}
+	}
+	uncertain := []struct {
+		name, src  string
+		start, end int
+		profiles   []ParseProfile
+	}{
+		{"deep list with a task item", "- [x] a" + tail, 0, 58, []ParseProfile{ProfileMarkdownPlus, ProfileGFM}},
+		{"deep list with a heading", "- # h" + tail, 0, 56, []ParseProfile{ProfileMarkdownPlus, ProfileGFM}},
+		{"deep list with a block comment", "- <!-- c -->" + tail, 0, 62, []ParseProfile{ProfileMarkdownPlus, ProfileGFM}},
+		{"quote with a discarded emphasis", "> *x* <a http://a\n", 2, 17, []ParseProfile{ProfileMarkdownPlus, ProfileGFM}},
+		{"heading line inside an HTML block", "Before.\n<h2>\n# h\n", 8, 17, []ParseProfile{ProfileGFM}},
+		{"heading line inside a pre block", "<pre>\n# h\n</pre>\n", 0, 17, []ParseProfile{ProfileGFM}},
+		{"heading after an indented closing fence", "```\naaa\n    ```\n# h\n", 0, 20, []ParseProfile{ProfileGFM}},
+		{"heading made of a definition and an underline", "[foo]: /url\n===\n[foo]\n", 0, 16, []ParseProfile{ProfileGFM}},
+	}
+	for _, tc := range uncertain {
+		for _, profile := range tc.profiles {
+			doc, err := ParseWithOptions([]byte(tc.src), ParseOptions{Profile: profile})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if doc.StructureCertified() || !covers(doc.UncertifiedRanges(), tc.start, tc.end) {
+				t.Errorf("%s (%v): uncertain ranges %s do not cover [%d,%d):\n%.1500s", tc.name, profile, diagnosticSummary(doc), tc.start, tc.end, fullNodeDump(doc.Root))
+			}
+		}
+	}
+}
