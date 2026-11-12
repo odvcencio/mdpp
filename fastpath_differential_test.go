@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -153,6 +152,9 @@ func differentialInputs() []string {
 			inputs = append(inputs, strings.ReplaceAll(inputs[i], "\n", "\r\n"))
 		}
 	}
+	// Unicode whitespace and control characters at every position of the
+	// block forms whose syntax depends on line edges, markers and pipes.
+	inputs = append(inputs, whitespaceVariantInputs()...)
 	// Each input also follows a leading HTML comment and a leading break, the
 	// two places where the rest of a document takes the fast path.
 	n := len(inputs)
@@ -202,63 +204,6 @@ func conformanceInputs(t testing.TB) []string {
 	return out
 }
 
-// knownFastPathDifferences lists classes of input where the two readings
-// differ and the fast path is the one that matches the specification (the full
-// parser is the reference everywhere else). A class never waives a whole
-// input: the top-level blocks that overlap the lines the pattern matches are
-// left out of both trees, and everything else (the other blocks, their
-// literals and ranges) must be equal. TestKnownFastPathCases holds the
-// explicit expected tree of each class.
-var knownFastPathDifferences = []struct {
-	why   string
-	match *regexp.Regexp
-}{
-	{"'---' lines that follow a thematic break are thematic breaks; the grammar path reads a pair of them in the middle of a document as front matter",
-		regexp.MustCompile(`(?m)^---\r?\n\r?\n---\r?\n`)},
-	{"a paragraph that holds only a link keeps its paragraph; the grammar path returns the bare link (conversion drops the paragraph)",
-		regexp.MustCompile(`(?m)^\[[^\n]*\]\([^\n]*\)\r?\n`)},
-	{"a second table header and delimiter right under a table are body rows in GFM 4.10; the grammar path starts a second table",
-		regexp.MustCompile(`(?m)^\|[^\n]*\|\r?\n\|[^\n]*\|\r?\n\|[-:| ]+\|\r?\n`)},
-}
-
-// outsideKnownDifference removes from a tree the top-level blocks that overlap
-// the matched lines and returns the dump of the rest.
-func outsideKnownDifference(src string, root *Node) string {
-	if root == nil {
-		return "error"
-	}
-	// Node ranges index the normalized source.
-	src = string(normalizeLineEndings([]byte(src)))
-	var spans [][2]int
-	for _, k := range knownFastPathDifferences {
-		for _, loc := range k.match.FindAllStringIndex(src, -1) {
-			spans = append(spans, [2]int{loc[0], loc[1]})
-		}
-	}
-	var kept []*Node
-	for _, c := range root.Children {
-		overlaps := false
-		for _, sp := range spans {
-			if c.Range.StartByte < sp[1] && sp[0] < c.Range.EndByte {
-				overlaps = true
-			}
-		}
-		if !overlaps {
-			kept = append(kept, c)
-		}
-	}
-	return fullNodeDump(&Node{Type: NodeDocument, Children: kept})
-}
-
-func isKnownFastPathDifference(src string) bool {
-	for _, k := range knownFastPathDifferences {
-		if k.match.MatchString(src) {
-			return true
-		}
-	}
-	return false
-}
-
 func TestFastPathMatchesFullParser(t *testing.T) {
 	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
 	dumpWithoutRanges = os.Getenv("MDPP_FASTPATH_NORANGES") != ""
@@ -280,10 +225,6 @@ func TestFastPathMatchesFullParser(t *testing.T) {
 	}
 	reported := 0
 	for _, src := range bad {
-		if isKnownFastPathDifference(src) &&
-			outsideKnownDifference(src, parseTreeWithFastPath(src, true)) == outsideKnownDifference(src, parseTreeWithFastPath(src, false)) {
-			continue
-		}
 		if reported < 20 {
 			t.Errorf("fast and full readings differ for %q\nfast:\n%s\nfull:\n%s", src, parseWithFastPath(src, true), parseWithFastPath(src, false))
 		}
