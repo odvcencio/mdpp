@@ -330,3 +330,57 @@ func TestGFMProfileLeadingDashesAreNotFrontMatter(t *testing.T) {
 		t.Errorf("range problems: %v", problems)
 	}
 }
+
+// A block comment at the first column that is followed directly by another
+// line is an HTML block (4.6, start condition 2) and the next line starts a new
+// block. The grammar reads such a comment at the start of a document as inline
+// HTML when a heading follows, so mdpp puts blank lines after the comment for
+// the grammar (gfmLowerSource). The ranges are mapped back and are exact, and a
+// comment inside a fenced code block or an indented line is left alone.
+func TestGFMProfileBlockCommentFollowedByAHeading(t *testing.T) {
+	cases := []struct {
+		src      string
+		comment  string
+		heading  string
+		htmlNode NodeType
+	}{
+		{"<!-- c -->\n## S\n", "<!-- c -->\n", "## S\n", NodeHTMLBlock},
+		{"<!--\nmulti\nline\n-->\n## S\n", "<!--\nmulti\nline\n-->\n", "## S\n", NodeHTMLBlock},
+		{"<!-- c -->\r\n## S\r\n", "<!-- c -->\n", "## S\n", NodeHTMLBlock},
+		{"# T\n\ntext\n<!-- c -->\n## S\n\nmore\n", "<!-- c -->\n", "## S\n", NodeHTMLBlock},
+		{"<!-- a -->\n<!-- b -->\n## S\n", "<!-- a -->\n", "## S\n", NodeHTMLBlock},
+	}
+	for _, tc := range cases {
+		doc := parseGFM(t, tc.src)
+		if len(doc.Diagnostics()) != 0 {
+			t.Errorf("%q: diagnostics %v\n%s", tc.src, doc.Diagnostics(), fullNodeDump(doc.Root))
+		}
+		blocks, headings := doc.Root.Find(NodeHTMLBlock), doc.Root.Find(NodeHeading)
+		if len(blocks) == 0 || len(headings) == 0 {
+			t.Errorf("%q: %d HTML blocks, %d headings:\n%s", tc.src, len(blocks), len(headings), fullNodeDump(doc.Root))
+			continue
+		}
+		if got := string(doc.Source[blocks[0].Range.StartByte:blocks[0].Range.EndByte]); !strings.HasPrefix(got, tc.comment[:len(tc.comment)-1]) {
+			t.Errorf("%q: first HTML block covers %q", tc.src, got)
+		}
+		h := headings[len(headings)-1]
+		if got := string(doc.Source[h.Range.StartByte:h.Range.EndByte]); got != tc.heading {
+			t.Errorf("%q: heading covers %q, want %q", tc.src, got, tc.heading)
+		}
+		if problems := checkNodeRanges(doc); len(problems) != 0 {
+			t.Errorf("%q: range problems %v", tc.src, problems)
+		}
+	}
+	for _, src := range []string{"```\n<!-- c -->\n## S\n```\n", "- a\n  <!-- c -->\n  text\n", "    <!-- c -->\n    ## S\n"} {
+		doc := parseGFM(t, src)
+		if string(doc.Source) != src {
+			t.Errorf("%q: source changed", src)
+		}
+		if problems := checkNodeRanges(doc); len(problems) != 0 {
+			t.Errorf("%q: range problems %v", src, problems)
+		}
+		if n := len(doc.Root.Find(NodeHeading)); n != 0 {
+			t.Errorf("%q: %d headings, want none:\n%s", src, n, fullNodeDump(doc.Root))
+		}
+	}
+}

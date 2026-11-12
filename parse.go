@@ -286,19 +286,10 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 	original := source
 	var inserts []int
 	if ctx.gfm() {
-		// GFM has no alerts to lower and no front matter to skip. The grammar
-		// reads a leading "---" line, a block and a closing "---" line as front
-		// matter and hides everything in the block, including headings. GFM has
-		// no front matter: the line is a thematic break. Blank lines before it
-		// change nothing in the reading and stop the grammar from reading front
-		// matter, which it does only at the first byte. They are a two-byte
-		// insertion, which the ranges are mapped back across like the alert
-		// lowering. The change is made only when a closing "---" line exists,
-		// which is what makes the grammar read front matter.
-		if bytes.HasPrefix(source, []byte("---\n")) && (bytes.Contains(source[3:], []byte("\n---\n")) || bytes.HasSuffix(source, []byte("\n---"))) {
-			source = append([]byte("\n\n"), source...)
-			inserts = append(inserts, 0)
-		}
+		// GFM has no alerts to lower and no front matter to skip. Blank lines
+		// are inserted where the grammar reads better with them (see
+		// gfmLowerSource); the ranges are mapped back like the alert lowering.
+		source, inserts = gfmLowerSource(source)
 	} else if _, frontmatterEnd, ok := parseFrontmatter(source, nil); ok {
 		body, bodyInserts := lowerMarkdownPlusSource(source[frontmatterEnd:])
 		if len(bodyInserts) > 0 {
