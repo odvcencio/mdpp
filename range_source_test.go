@@ -243,20 +243,52 @@ func rangeInputs(t testing.TB) []string {
 }
 
 func TestNodeRangesMatchOriginalSource(t *testing.T) {
+	// Corpus workers run in subprocesses; overlap independent suites after serial tests finish.
+	t.Parallel()
 	inputs := rangeInputs(t)
-	for _, p := range rangeTestProfiles {
+	profiles := rangeTestProfiles
+	parallel := parallelCorpusSuiteEnabled()
+	if parallel && len(profiles) == 2 && profiles[0].name == "default" && profiles[1].name == "gfm" {
+		profiles = []profileParser{profiles[1], profiles[0]}
+	}
+	for _, p := range profiles {
 		t.Run(p.name, func(t *testing.T) {
 			// All problems of an input are collected and grouped by kind (node type
 			// and message), and the shortest input of each kind is reported.
 			kinds := map[string]string{}
 			counts := map[string]int{}
 			bad := 0
-			for _, in := range inputs {
-				doc, err := p.parse(in)
-				if err != nil {
-					t.Fatal(err)
+			var results [][]string
+			cacheAllowed := !parallel
+			if p.name == "default" && parallel {
+				cacheAllowed = awaitStartedRangeProducer()
+			}
+			if p.name == "default" && cacheAllowed && cachedDefaultRanges != nil {
+				results = make([][]string, len(inputs))
+				for i, in := range inputs {
+					var ok bool
+					results[i], ok = cachedDefaultRanges[in]
+					if !ok {
+						t.Fatalf("source range input %d missing from cache", i)
+					}
 				}
-				problems := checkRangeConsistency(doc, in)
+				cachedDefaultRanges = nil
+				t.Logf("checked %d source range inputs using shared default-profile parses", len(inputs))
+			} else {
+				var child bool
+				results, child = corpusShardMap(t, inputs, func(_ int, in string) ([]string, error) {
+					doc, err := p.parse(in)
+					if err != nil {
+						return nil, err
+					}
+					return checkRangeConsistency(doc, in), nil
+				})
+				if child {
+					return
+				}
+			}
+			for i, problems := range results {
+				in := inputs[i]
 				if len(problems) > 0 {
 					bad++
 				}

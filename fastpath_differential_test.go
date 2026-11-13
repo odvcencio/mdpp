@@ -95,6 +95,102 @@ func parseWithFastPath(src string, fast bool) (dump string) {
 	return fullNodeDump(doc.Root)
 }
 
+// sameFastPathTrees compares the same public fields as fullNodeDump without
+// formatting, sorting attributes, or allocating a string for every node.
+// Dumps are still produced on failure for actionable diagnostics.
+func sameFastPathTrees(src string) bool {
+	parse := func(fast bool) *Document {
+		fastBlockChunkDisabled = !fast
+		defer func() { fastBlockChunkDisabled = false }()
+		doc, err := parseInProfile(src)
+		if err != nil || doc == nil {
+			return nil
+		}
+		return doc
+	}
+	a, b := parse(true), parse(false)
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return sameDifferentialDump(a.Root, b.Root, a.Source, b.Source, dumpWithoutRanges)
+}
+
+// On a structural mismatch, retain the original string comparison's exact
+// verdict, including any ambiguities in its unquoted attribute keys.
+func sameDifferentialDump(a, b *Node, asrc, bsrc []byte, noRanges bool) bool {
+	if sameDifferentialNode(a, b, asrc, bsrc, noRanges) {
+		return true
+	}
+	savedSource, savedMode := dumpSource, dumpWithoutRanges
+	defer func() { dumpSource, dumpWithoutRanges = savedSource, savedMode }()
+	dumpWithoutRanges = noRanges
+	dumpSource = asrc
+	first := fullNodeDump(a)
+	dumpSource = bsrc
+	return first == fullNodeDump(b)
+}
+
+func sameDifferentialNode(a, b *Node, asrc, bsrc []byte, noRanges bool) bool {
+	if a == nil || b == nil {
+		// The original dump dereferences nil nodes. Decline the shortcut so
+		// the dump fallback preserves that failure instead of hiding it.
+		return false
+	}
+	if a.Type != b.Type || a.Literal != b.Literal || len(a.Attrs) != len(b.Attrs) || len(a.Children) != len(b.Children) {
+		return false
+	}
+	for k, v := range a.Attrs {
+		if w, ok := b.Attrs[k]; !ok || v != w {
+			return false
+		}
+	}
+	if !noRanges {
+		ar, br := a.Range, b.Range
+		if a.Type == NodeFootnoteDef {
+			normalize := func(r Range, src []byte) Range {
+				if r.EndByte > 0 && r.EndByte <= len(src) && src[r.EndByte-1] == '\n' {
+					r.EndByte--
+					if r.EndByte > 0 && src[r.EndByte-1] == '\r' {
+						r.EndByte--
+					}
+				}
+				r.EndLine, r.EndCol = sourceLineCol(src, r.EndByte)
+				return r
+			}
+			if asrc != nil {
+				ar = normalize(ar, asrc)
+			}
+			if bsrc != nil {
+				br = normalize(br, bsrc)
+			}
+		}
+		if ar != br {
+			return false
+		}
+	}
+	for i := range a.Children {
+		if !sameDifferentialNode(a.Children[i], b.Children[i], asrc, bsrc, noRanges) {
+			return false
+		}
+	}
+	return true
+}
+
+// cachedFastPathComparisons contains results checked in the earlier default
+// range workers, keyed by the exact source bytes; only full-suite runs share.
+var cachedFastPathComparisons map[string]bool
+var cachedFastPathNoRanges bool
+
+func sameFullPathAsDocument(src string, fastDoc *Document, noRanges bool) bool {
+	fastBlockChunkDisabled = true
+	defer func() { fastBlockChunkDisabled = false }()
+	full, err := parseInProfile(src)
+	if err != nil || full == nil {
+		return false
+	}
+	return sameDifferentialDump(fastDoc.Root, full.Root, fastDoc.Source, full.Source, noRanges)
+}
+
 // fastPathDifferences returns the inputs, from a list, whose fast and full
 // readings differ.
 func fastPathDifferences(inputs []string) []string {
@@ -105,7 +201,7 @@ func fastPathDifferences(inputs []string) []string {
 			continue
 		}
 		seen[src] = true
-		if parseWithFastPath(src, true) != parseWithFastPath(src, false) {
+		if !sameFastPathTrees(src) {
 			bad = append(bad, src)
 		}
 	}
@@ -234,16 +330,51 @@ func conformanceInputs(t testing.TB) []string {
 // TestFastPathMatchesFullParser compares the shortcut reading and the grammar
 // reading in the default profile. It does not run in the GFM profile: that
 // profile has no shortcut to compare (see TestGFMProfileTakesNoShortcut).
-func TestFastPathMatchesFullParser(t *testing.T) {
-	differentialProfile = ProfileMarkdownPlus
-	checkFastPathMatchesFullParser(t)
-}
-
 func checkFastPathMatchesFullParser(t *testing.T) {
 	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
 	dumpWithoutRanges = os.Getenv("MDPP_FASTPATH_NORANGES") != ""
 	defer func() { dumpWithoutRanges = false }()
-	bad := fastPathDifferences(inputs)
+	seen := map[string]bool{}
+	unique := make([]string, 0, len(inputs))
+	for _, in := range inputs {
+		if !seen[in] {
+			seen[in] = true
+			unique = append(unique, in)
+		}
+	}
+	var results [][]string
+	cacheAllowed := !parallelCorpusSuiteEnabled() || awaitStartedRangeProducer()
+	if cacheAllowed && cachedFastPathComparisons != nil && cachedFastPathNoRanges == dumpWithoutRanges {
+		results = make([][]string, len(unique))
+		for i, in := range unique {
+			same, ok := cachedFastPathComparisons[in]
+			if !ok {
+				t.Fatalf("differential input %d missing from shared comparisons", i)
+			}
+			if !same {
+				results[i] = []string{"different"}
+			}
+		}
+		t.Logf("checked %d differential inputs using shared default-profile parses", len(unique))
+		cachedFastPathComparisons = nil
+	} else {
+		var child bool
+		results, child = corpusShardMap(t, unique, func(_ int, in string) ([]string, error) {
+			if !sameFastPathTrees(in) {
+				return []string{"different"}, nil
+			}
+			return nil, nil
+		})
+		if child {
+			return
+		}
+	}
+	var bad []string
+	for i, problems := range results {
+		if len(problems) > 0 {
+			bad = append(bad, unique[i])
+		}
+	}
 	if path := os.Getenv("MDPP_FASTPATH_REPORT"); path != "" {
 		sort.Slice(bad, func(i, j int) bool {
 			if len(bad[i]) != len(bad[j]) {

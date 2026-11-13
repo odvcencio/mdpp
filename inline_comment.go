@@ -1,9 +1,11 @@
 package mdpp
 
 import (
+	"io"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Inline HTML comments (CommonMark 0.31.2 section 6.6; GFM example 645).
@@ -46,7 +48,13 @@ var (
 // fails once is remembered: a search that found no terminator from one
 // position finds none from a later position, so the scan stays linear.
 type commentScan struct {
-	text string
+	text       string
+	source     []byte
+	baseOffset int
+	ctx        *parseCtx
+	checks     int
+	cancelled  bool
+	steps      int
 	// backtick runs by length, as ascending start offsets
 	runs map[int][]int
 	// searches that reached the end of the text without a terminator
@@ -55,25 +63,37 @@ type commentScan struct {
 }
 
 type commentBracket struct {
-	start  int
-	image  bool
-	active bool
+	start int
+	image bool
+	epoch uint64
 }
 
 // findInlineComments returns the byte spans of the comments in text, in
 // order, and the byte spans of the inline links and images in text (the part
 // from "[" or "![" to the closing parenthesis), in order of their end.
 func findInlineComments(text string) (comments, links [][2]int) {
-	s := &commentScan{text: text}
+	return findInlineCommentsScan(&commentScan{text: text})
+}
+
+func findInlineCommentsScan(s *commentScan) (comments, links [][2]int) {
+	text := s.text
 	s.indexBackticks()
 	var stack []commentBracket
+	var epoch uint64
 	for i := 0; i < len(text); {
+		if s.poll() {
+			return nil, nil
+		}
+		s.steps++
 		switch text[i] {
 		case '\\':
 			i += 2
 		case '`':
 			runEnd := i + 1
 			for runEnd < len(text) && text[runEnd] == '`' {
+				if s.poll() {
+					return nil, nil
+				}
 				runEnd++
 			}
 			if closeAt := s.nextRun(runEnd-i, runEnd); closeAt >= 0 {
@@ -92,13 +112,13 @@ func findInlineComments(text string) (comments, links [][2]int) {
 			}
 		case '!':
 			if i+1 < len(text) && text[i+1] == '[' {
-				stack = append(stack, commentBracket{start: i, image: true, active: true})
+				stack = append(stack, commentBracket{start: i, image: true, epoch: epoch})
 				i += 2
 			} else {
 				i++
 			}
 		case '[':
-			stack = append(stack, commentBracket{start: i, active: true})
+			stack = append(stack, commentBracket{start: i, epoch: epoch})
 			i++
 		case ']':
 			i++
@@ -107,20 +127,15 @@ func findInlineComments(text string) (comments, links [][2]int) {
 			}
 			top := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			if !top.active || i >= len(text) || text[i] != '(' {
+			if (!top.image && top.epoch != epoch) || i >= len(text) || text[i] != '(' {
 				continue
 			}
 			if end := s.linkTailEnd(i + 1); end >= 0 {
 				links = append(links, [2]int{top.start, end})
 				i = end
 				if !top.image {
-					// Links do not nest: the openers before this one stop
-					// forming links.
-					for k := range stack {
-						if !stack[k].image {
-							stack[k].active = false
-						}
-					}
+					// Invalidate earlier link openers in constant time; image openers stay active.
+					epoch++
 				}
 			}
 		default:
@@ -130,15 +145,54 @@ func findInlineComments(text string) (comments, links [][2]int) {
 	return comments, links
 }
 
+// poll bounds cancellation and deadline latency during scanner loops.
+func (s *commentScan) poll() bool {
+	if s.cancelled {
+		return true
+	}
+	s.checks++
+	if s.checks&4095 != 1 || s.ctx == nil || s.ctx.budget == nil {
+		return false
+	}
+	if s.ctx.budget.check() {
+		return false
+	}
+	s.ctx.noteInlineStop(s.source, s.baseOffset, s.text)
+	s.cancelled = true
+	return true
+}
+
+// index scans bounded chunks, preserving matches crossing a chunk boundary.
+func (s *commentScan) index(start int, needle string) int {
+	for start < len(s.text) {
+		s.checks = 0 // check each bounded substring scan
+		if s.poll() {
+			return -1
+		}
+		end := min(len(s.text), start+4096+len(needle)-1)
+		if at := strings.Index(s.text[start:end], needle); at >= 0 {
+			return start + at
+		}
+		start += 4096
+	}
+	return -1
+}
+
 func (s *commentScan) indexBackticks() {
 	text := s.text
 	for i := 0; i < len(text); {
+		if s.poll() {
+			return
+		}
 		if text[i] != '`' {
 			i++
 			continue
 		}
 		j := i + 1
 		for j < len(text) && text[j] == '`' {
+			if s.poll() {
+				return
+			}
 			j++
 		}
 		if s.runs == nil {
@@ -172,8 +226,8 @@ func (s *commentScan) commentEnd(i int) int {
 		if s.noCommentEnd {
 			return -1
 		}
-		if end := strings.Index(rest[4:], "-->"); end >= 0 {
-			return i + 4 + end + 3
+		if end := s.index(i+4, "-->"); end >= 0 {
+			return end + 3
 		}
 		s.noCommentEnd = true
 	}
@@ -190,8 +244,8 @@ func (s *commentScan) otherHTMLEnd(i int) int {
 		if s.noPIEnd {
 			return -1
 		}
-		if end := strings.Index(rest[2:], "?>"); end >= 0 {
-			return i + 2 + end + 2
+		if end := s.index(i+2, "?>"); end >= 0 {
+			return end + 2
 		}
 		s.noPIEnd = true
 		return -1
@@ -199,8 +253,8 @@ func (s *commentScan) otherHTMLEnd(i int) int {
 		if s.noCDATAEnd {
 			return -1
 		}
-		if end := strings.Index(rest[9:], "]]>"); end >= 0 {
-			return i + 9 + end + 3
+		if end := s.index(i+9, "]]>"); end >= 0 {
+			return end + 3
 		}
 		s.noCDATAEnd = true
 		return -1
@@ -208,18 +262,43 @@ func (s *commentScan) otherHTMLEnd(i int) int {
 		if s.noDeclEnd {
 			return -1
 		}
-		if end := strings.IndexByte(rest[2:], '>'); end >= 0 {
-			return i + 2 + end + 1
+		if end := s.index(i+2, ">"); end >= 0 {
+			return end + 1
 		}
 		s.noDeclEnd = true
 		return -1
 	}
 	for _, re := range []*regexp.Regexp{inlineAutolinkRe, inlineEmailRe, inlineOpenTagRe, inlineCloseTagRe} {
-		if m := re.FindString(rest); m != "" {
-			return i + len(m)
+		if len(rest) <= 4096 || s.ctx == nil || s.ctx.budget == nil {
+			if m := re.FindString(rest); m != "" {
+				return i + len(m)
+			}
+			continue
+		}
+		m := re.FindReaderIndex(&commentRuneReader{scan: s, text: rest})
+		if s.cancelled {
+			return -1
+		}
+		if len(m) > 0 {
+			return i + m[1]
 		}
 	}
 	return -1
+}
+
+type commentRuneReader struct {
+	scan   *commentScan
+	text   string
+	offset int
+}
+
+func (r *commentRuneReader) ReadRune() (rune, int, error) {
+	if r.offset >= len(r.text) || r.scan.poll() {
+		return 0, 0, io.EOF
+	}
+	ch, width := utf8.DecodeRuneInString(r.text[r.offset:])
+	r.offset += width
+	return ch, width, nil
 }
 
 func isASCIIPunct(b byte) bool {
@@ -230,11 +309,17 @@ func isASCIIPunct(b byte) bool {
 func (s *commentScan) skipLinkSpace(i int) int {
 	text := s.text
 	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+		if s.poll() {
+			return len(text)
+		}
 		i++
 	}
 	if i < len(text) && text[i] == '\n' {
 		i++
 		for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+			if s.poll() {
+				return len(text)
+			}
 			i++
 		}
 	}
@@ -253,6 +338,9 @@ func (s *commentScan) linkTailEnd(i int) int {
 	if text[i] == '<' {
 		i++
 		for {
+			if s.poll() {
+				return -1
+			}
 			if i >= len(text) || text[i] == '\n' || text[i] == '<' {
 				return -1
 			}
@@ -270,6 +358,9 @@ func (s *commentScan) linkTailEnd(i int) int {
 		start, depth := i, 0
 	dest:
 		for i < len(text) {
+			if s.poll() {
+				return -1
+			}
 			c := text[i]
 			switch {
 			case c == '\\' && i+1 < len(text) && isASCIIPunct(text[i+1]):
@@ -329,6 +420,9 @@ func (s *commentScan) titleEnd(i int) int {
 		return -1
 	}
 	for j := i + 1; j < len(text); j++ {
+		if s.poll() {
+			return -1
+		}
 		switch c := text[j]; {
 		case c == '\\' && j+1 < len(text) && isASCIIPunct(text[j+1]):
 			j++
@@ -350,12 +444,28 @@ func (s *commentScan) titleEnd(i int) int {
 // stays with that link, so the link keeps its shape; the reader meets the
 // comment again when it parses the link text.
 func parseInlineAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
-	if !strings.Contains(text, "<!--") {
+	scanner := &commentScan{text: text, source: source, baseOffset: baseOffset, ctx: ctx}
+	found := false
+	if ctx == nil || ctx.budget == nil {
+		found = strings.Contains(text, "<!--")
+	} else {
+		found = scanner.index(0, "<!--") >= 0
+	}
+	if scanner.cancelled {
+		return []*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))}
+	}
+	if !found {
 		return parseInlineSegmentAt(text, source, baseOffset, ctx)
 	}
-	comments, links := findInlineComments(text)
+	comments, links := findInlineCommentsScan(scanner)
+	if scanner.cancelled {
+		return []*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))}
+	}
 	if len(comments) == 0 {
 		return parseInlineSegmentAt(text, source, baseOffset, ctx)
+	}
+	if nodes, ok := parseCommentDelimitersAt(text, source, baseOffset, comments, links, ctx); ok {
+		return splitTextNewlines(nodes)
 	}
 	sort.Slice(links, func(a, b int) bool { return links[a][0] < links[b][0] })
 	var nodes []*Node
