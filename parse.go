@@ -1666,7 +1666,7 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 				}
 				i++
 			}
-			if i < len(lines) && fastTrimSpace(ctx, lines[i].text) != "" {
+			if i < len(lines) && fastTrimSpace(ctx, lines[i].text) != "" && !(strings.HasPrefix(fastTrimSpace(ctx, lines[i].text), "=") && isSetextUnderlineLine([]byte(lines[i].text))) {
 				return nil, false
 			}
 		case isLooseListMarkerLine(trimmed):
