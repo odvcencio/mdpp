@@ -99,6 +99,7 @@ func TestRepairedHeadingChildrenHaveExactRanges(t *testing.T) {
 		{"nested markup", "## **bold** and `code`?\n", []child{{NodeStrong, "**bold**"}, {NodeText, " and "}, {NodeCodeSpan, "`code`"}, {NodeText, "?"}}},
 		{"entity", "# Fish &amp; chips?\n", []child{{NodeText, "Fish &amp; chips?"}}},
 		{"entity line feed", "# &#10; ?\n", []child{{NodeText, "&#10; ?"}}},
+		{"entity line feed before merged punctuation", "# &#10; !\n", []child{{NodeText, "&#10; !"}}},
 		{"raw text html", "# <script>x</script> y\n", []child{{NodeHTMLInline, "<script>"}, {NodeText, "x"}, {NodeHTMLInline, "</script>"}, {NodeText, " y"}}},
 		{"after a paragraph", "intro\n\n## What is it?\n", []child{{NodeText, "What is it?"}}},
 	}
@@ -140,7 +141,7 @@ func TestEntityLineFeedInHeadingStaysInText(t *testing.T) {
 
 // A decoded entity must not move the positions of the lines after it.
 func TestEntityBeforeLineBreakKeepsLaterRanges(t *testing.T) {
-	for _, src := range []string{"&amp;\nx\n===\n", "***\n\n&amp;\nx\n===\n"} {
+	for _, src := range []string{"&amp;\nx\n===\n", "***\n\n&amp;\nx\n===\n", "&amp;!\nx\n===\n", "***\n\n&amp;!\nx\n===\n"} {
 		doc := MustParse([]byte(src))
 		found := false
 		doc.Root.Walk(func(n *Node) bool {

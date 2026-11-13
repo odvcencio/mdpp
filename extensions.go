@@ -1,6 +1,7 @@
 package mdpp
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 )
@@ -13,6 +14,7 @@ func postProcess(doc *Document) {
 		return
 	}
 	flattenDocumentNodes(doc.Root)
+	mergeAdjacentTables(doc)
 	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
 		if n.Type == NodeBlockquote {
 			stripQuoteContinuationMarkers(n)
@@ -76,49 +78,79 @@ func postProcess(doc *Document) {
 // shortcut links fall back to using the link text as the lookup key
 // when no explicit label is present.
 func processReferenceLinks(doc *Document) {
-	if doc == nil || doc.Root == nil || len(doc.linkRefDefs) == 0 {
+	if doc == nil || doc.Root == nil {
 		return
 	}
-	walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
-		if (n.Type != NodeLink && n.Type != NodeImage) || n.Attrs == nil {
-			return true
-		}
-		if _, inline := n.Attrs["href"]; inline {
-			return true
-		}
-		if _, inline := n.Attrs["src"]; inline {
-			return true
-		}
-		// Ignore shortcut links that carry the [!TYPE] / [^id] raw marker —
-		// those have already been consumed by admonition/footnote processors
-		// or remain as literal text. Only reference-style links we care about
-		// either have a `ref` attr or are collapsed/shortcut over plain text.
-		raw := n.Attrs["raw"]
-		if strings.HasPrefix(raw, "[!") || strings.HasPrefix(raw, "[^") {
-			return true
-		}
-		label := n.Attrs["ref"]
-		if label == "" {
-			// Collapsed / shortcut form: the link text IS the label.
-			label = n.Attrs["label"]
+	hasComments := bytes.Contains(doc.Source, []byte("<!--"))
+	if len(doc.linkRefDefs) == 0 && !hasComments {
+		return
+	}
+	if len(doc.linkRefDefs) > 0 {
+		walkNodes(doc.Root, func(n *Node, parent *Node, index int) bool {
+			if (n.Type != NodeLink && n.Type != NodeImage) || n.Attrs == nil {
+				return true
+			}
+			if _, inline := n.Attrs["href"]; inline {
+				return true
+			}
+			if _, inline := n.Attrs["src"]; inline {
+				return true
+			}
+			// Ignore shortcut links that carry the [!TYPE] / [^id] raw marker —
+			// those have already been consumed by admonition/footnote processors
+			// or remain as literal text. Only reference-style links we care about
+			// either have a `ref` attr or are collapsed/shortcut over plain text.
+			raw := n.Attrs["raw"]
+			if strings.HasPrefix(raw, "[!") || strings.HasPrefix(raw, "[^") {
+				return true
+			}
+			label := n.Attrs["ref"]
 			if label == "" {
-				label = collectNodeText(n)
+				// Collapsed / shortcut form: the link text IS the label.
+				label = n.Attrs["label"]
+				if label == "" {
+					label = collectNodeText(n)
+				}
 			}
+			label = normalizeLinkLabel(label)
+			if def, ok := doc.linkRefDefs[label]; ok {
+				n.Attrs["resolved-ref"] = label
+				if n.Type == NodeImage {
+					n.Attrs["src"] = def.href
+				} else {
+					n.Attrs["href"] = def.href
+				}
+				if def.title != "" {
+					n.Attrs["title"] = def.title
+				}
+				delete(n.Attrs, "ref")
+				delete(n.Attrs, "raw")
+			}
+			return true
+		})
+	}
+	if !hasComments {
+		return
+	}
+	// Materialize unresolved marked reference links as source-backed child
+	// nodes so ordinary AST copies and JSON round trips retain their output.
+	walkNodes(doc.Root, func(n *Node, _ *Node, _ int) bool {
+		if n.Type != NodeLink || n.referenceSuffix == nil {
+			return true
 		}
-		label = normalizeLinkLabel(label)
-		if def, ok := doc.linkRefDefs[label]; ok {
-			n.Attrs["resolved-ref"] = label
-			if n.Type == NodeImage {
-				n.Attrs["src"] = def.href
-			} else {
-				n.Attrs["href"] = def.href
-			}
-			if def.title != "" {
-				n.Attrs["title"] = def.title
-			}
-			delete(n.Attrs, "ref")
-			delete(n.Attrs, "raw")
+		suffix := *n.referenceSuffix
+		n.referenceSuffix = nil
+		if _, resolved := n.Attrs["href"]; resolved {
+			return true
 		}
+		start, end := n.Range.StartByte, n.Range.EndByte
+		children := make([]*Node, 0, len(n.Children)+2)
+		children = append(children, textNodeRange("[", sourceRange(doc.Source, start, start+1)))
+		children = append(children, n.Children...)
+		suffixStart := end - len(suffix) - 1
+		children = append(children, textNodeRange("]"+suffix, sourceRange(doc.Source, suffixStart, end)))
+		n.Children = children
+		delete(n.Attrs, "raw")
 		return true
 	})
 }
@@ -640,6 +672,10 @@ func mergeInterruptedLists(root *Node) {
 		for k := i + 1; k < j; k++ {
 			lastItem.Children = append(lastItem.Children, root.Children[k])
 		}
+		// The folded paragraphs now belong to the item, and the second
+		// list's items to the first list: their ranges must cover them.
+		lastItem.Range = extendRangeTo(lastItem.Range, root.Children[j-1].Range)
+		list.Range = extendRangeTo(list.Range, next.Range)
 		// Append `next`'s items to `list`.
 		list.Children = append(list.Children, next.Children...)
 		// Drop the paragraphs and the second list from root.
@@ -647,6 +683,16 @@ func mergeInterruptedLists(root *Node) {
 		// Re-check at same index in case another list follows (chain merging).
 		i--
 	}
+}
+
+// extendRangeTo returns r grown to end where end ends. A range without a
+// position stays without one.
+func extendRangeTo(r, end Range) Range {
+	if r.StartLine == 0 || end.StartLine == 0 || end.EndByte <= r.EndByte {
+		return r
+	}
+	r.EndByte, r.EndLine, r.EndCol = end.EndByte, end.EndLine, end.EndCol
+	return r
 }
 
 // sameListKind returns true when both lists are both ordered (or both

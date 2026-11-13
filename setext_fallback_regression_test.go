@@ -159,7 +159,7 @@ func TestReviewQuoteBoundaries(t *testing.T) {
 	cases := []struct {
 		source   string
 		accepted bool
-	}{{"> q\n\n", true}, {"> q\n\n\n", true}, {"> q\n\ntext\n", true}, {"> q\n\n# h\n", true}, {"> q\n\n> r\n", false}, {"> q\n \n", false}, {"> q\n\n- item\n", true}, {"> q\r\n\r\n", true}}
+	}{{"> q\n\n", true}, {"> q\n\n\n", true}, {"> q\n\ntext\n", true}, {"> q\n\n# h\n", true}, {"> q\n\n> r\n", false}, {"> q\n \n", false}, {"> q\n\n- item\n", true}, {"> q\r\n\r\n", false}}
 	for _, tc := range cases {
 		_, ok := parseFastBlockChunk([]byte(tc.source), &parseCtx{})
 		if ok != tc.accepted {

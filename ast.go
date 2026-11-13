@@ -68,6 +68,10 @@ type Node struct {
 	// (escapes and entities), so that splitting at line ends uses source
 	// positions. It is empty when Literal is the source text.
 	raw string
+
+	// referenceSuffix retains the source suffix when an unresolved reference
+	// link has parsed inline children; nil preserves the legacy raw fallback.
+	referenceSuffix *string
 }
 
 // Range identifies a node's byte span in Document.Source.
