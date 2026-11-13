@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -1115,25 +1117,127 @@ func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRef
 	return children
 }
 
-func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
-	if len(source) == 0 || bytes.HasPrefix(source, []byte("---\n")) || bytes.Contains(source, []byte(":::")) {
-		return nil, false
-	}
-	lines := sourceLines(source)
-	children := make([]*Node, 0, len(lines)/2)
-	last := -1
-	for i := 0; i < len(lines); {
-		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
-			break
-		}
-		// Every pass must consume a line. A builder that returns without
-		// advancing falls back to the full parser instead of looping forever.
-		if i <= last {
+type fastBlockPlan struct {
+	kind  byte
+	start int
+	end   int
+}
+
+// fastSourceLines checks cancellation during chunk eligibility and line splitting.
+func fastSourceLines(source []byte, ctx *parseCtx) ([]sourceLine, bool) {
+	const checkInterval = 4096
+	check := func() bool { return ctx == nil || ctx.budget == nil || ctx.budget.check() }
+	count, start := 0, 0
+	for i := 0; i < len(source); i++ {
+		if i%checkInterval == 0 && !check() {
 			return nil, false
 		}
-		last = i
-		line := lines[i]
-		trimmed := strings.TrimSpace(line.text)
+		if i+2 < len(source) && source[i] == ':' && source[i+1] == ':' && source[i+2] == ':' {
+			return nil, false
+		}
+		if source[i] == '\n' {
+			count++
+			start = i + 1
+		}
+	}
+	lines := make([]sourceLine, 0, count+1)
+	start = 0
+	for i := 0; i < len(source); i++ {
+		if i%checkInterval == 0 && !check() {
+			return nil, false
+		}
+		if source[i] == '\n' {
+			lines = append(lines, sourceLine{start: start, end: i, next: i + 1, text: string(source[start:i])})
+			start = i + 1
+		}
+	}
+	if start < len(source) {
+		lines = append(lines, sourceLine{start: start, end: len(source), next: len(source), text: string(source[start:])})
+	}
+	return lines, true
+}
+
+// fastTrimSpace preserves strings.TrimSpace semantics while checking long
+// whitespace runs during fast-path classification.
+func fastTrimSpace(ctx *parseCtx, s string) string {
+	if len(s) <= 4096 {
+		return strings.TrimSpace(s)
+	}
+	check := func() bool { return ctx == nil || ctx.budget == nil || ctx.budget.check() }
+	left, right, scanned := 0, len(s), 0
+	for left < right {
+		r, size := utf8.DecodeRuneInString(s[left:right])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		left += size
+		scanned += size
+		if scanned >= 4096 {
+			if !check() {
+				return ""
+			}
+			scanned = 0
+		}
+	}
+	for left < right {
+		r, size := utf8.DecodeLastRuneInString(s[left:right])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		right -= size
+		scanned += size
+		if scanned >= 4096 {
+			if !check() {
+				return ""
+			}
+			scanned = 0
+		}
+	}
+	return s[left:right]
+}
+
+func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
+	if len(source) == 0 || bytes.HasPrefix(source, []byte("---\n")) {
+		return nil, false
+	}
+	if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
+		return nil, false
+	}
+	lines, ok := fastSourceLines(source, ctx)
+	if !ok {
+		return nil, false
+	}
+	// Plan all block boundaries before building nodes. Construction invokes inline
+	// parsers and changes shared diagnostics, cache state and parser-work budget.
+	plan := make([]fastBlockPlan, 0, len(lines)/2)
+	checks, scanned, previous := 64, 0, 0
+	checkAt := func(offset int) bool {
+		if ctx == nil || ctx.budget == nil {
+			return true
+		}
+		if ctx.budget.hit != "" {
+			return false
+		}
+		delta := offset - previous
+		if delta < 0 {
+			delta = -delta
+		}
+		previous = offset
+		scanned += delta
+		checks++
+		if checks < 64 && scanned < 4096 {
+			return true
+		}
+		checks, scanned = 0, 0
+		return ctx.budget.check()
+	}
+	for i := 0; i < len(lines); {
+		if !checkAt(lines[i].start) {
+			return nil, false
+		}
+		start := i
+		line := lines[i].text
+		trimmed := fastTrimSpace(ctx, line)
 		if trimmed == "" {
 			i++
 			continue
@@ -1141,71 +1245,173 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 		if i+1 < len(lines) && isSetextUnderlineLine([]byte(lines[i+1].text)) {
 			return nil, false
 		}
-		if isATXHeadingLine([]byte(line.text)) {
-			heading := fastHeadingNode(source, line, ctx)
-			children = append(children, heading)
+		kind := byte(0)
+		switch {
+		case isATXHeadingLine([]byte(line)):
+			kind = 'h'
 			i++
-			continue
+		case isThematicBreakLine(line):
+			kind = 't'
+			i++
+		case isMarkdownFenceLine(trimmed):
+			kind = 'f'
+			marker := trimmed[0]
+			n := 0
+			for n < len(trimmed) && trimmed[n] == marker {
+				n++
+			}
+			i++
+			for i < len(lines) {
+				if !checkAt(lines[i].start) {
+					return nil, false
+				}
+				v := fastTrimSpace(ctx, lines[i].text)
+				if len(v) >= n && strings.Count(v[:n], string(marker)) == n {
+					break
+				}
+				i++
+			}
+			if i == len(lines) {
+				return nil, false
+			}
+			i++
+		case strings.HasPrefix(strings.TrimLeft(line, " \t"), ">"):
+			kind = 'q'
+			trailingBlank := false
+			for i < len(lines) && (fastTrimSpace(ctx, lines[i].text) == "" || strings.HasPrefix(strings.TrimLeft(lines[i].text, " \t"), ">")) {
+				if !checkAt(lines[i].start) {
+					return nil, false
+				}
+				text := lines[i].text
+				if fastTrimSpace(ctx, text) == "" {
+					if text != "" && !(text == "\r" && lines[i].next > lines[i].end) {
+						return nil, false
+					}
+					trailingBlank = true
+					i++
+					continue
+				}
+				if trailingBlank {
+					return nil, false
+				}
+				content, ok := stripBlockquoteMarker(text)
+				if !ok || strings.HasPrefix(fastTrimSpace(ctx, content), "[") {
+					return nil, false
+				}
+				i++
+			}
+		case i+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(fastTrimSpace(ctx, lines[i+1].text)):
+			kind = 'T'
+			for i < len(lines) && strings.HasPrefix(fastTrimSpace(ctx, lines[i].text), "|") {
+				if !checkAt(lines[i].start) {
+					return nil, false
+				}
+				i++
+			}
+		case isLooseListMarkerLine(trimmed):
+			if line != trimmed || fastListLineHasTaskMarker(trimmed) {
+				return nil, false
+			}
+			kind = 'l'
+			_, ordered := fastOrderedListStart(trimmed)
+			for i < len(lines) {
+				if !checkAt(lines[i].start) {
+					return nil, false
+				}
+				v := fastTrimSpace(ctx, lines[i].text)
+				if v == "" {
+					break
+				}
+				if _, ok := fastListItemText(v, ordered); !ok {
+					break
+				}
+				i++
+			}
+		case footnoteDefinitionRawRe.MatchString(line):
+			kind = 'n'
+			i++
+		case isLikelyReferenceDefinitionLine(trimmed) || strings.HasPrefix(trimmed, "<"):
+			return nil, false
+		default:
+			kind = 'p'
+			for i < len(lines) {
+				if !checkAt(lines[i].start) {
+					return nil, false
+				}
+				v := fastTrimSpace(ctx, lines[i].text)
+				if i > start && isThematicBreakLine(lines[i].text) && !isSetextUnderlineLine([]byte(lines[i].text)) {
+					break
+				}
+				if v == "" || isATXHeadingLine([]byte(lines[i].text)) || isMarkdownFenceLine(v) ||
+					strings.HasPrefix(strings.TrimLeft(lines[i].text, " \t"), ">") || isLooseListMarkerLine(v) ||
+					footnoteDefinitionRawRe.MatchString(lines[i].text) ||
+					(i+1 < len(lines) && strings.HasPrefix(v, "|") && isPipeTableDelimiterLine(fastTrimSpace(ctx, lines[i+1].text))) {
+					break
+				}
+				if i > start && isSetextUnderlineLine([]byte(lines[i].text)) {
+					return nil, false
+				}
+				i++
+			}
 		}
-		if isThematicBreakLine(line.text) {
+		if i <= start {
+			return nil, false
+		}
+		plan = append(plan, fastBlockPlan{kind: kind, start: start, end: i})
+	}
+	children := make([]*Node, 0, len(plan))
+	for _, block := range plan {
+		if !checkAt(lines[block.start].start) {
+			return nil, false
+		}
+		line := lines[block.start]
+		switch block.kind {
+		case 'h':
+			children = append(children, fastHeadingNode(source, line, ctx))
+		case 't':
 			children = append(children, &Node{Type: NodeThematicBreak, Range: sourceRange(source, line.start, line.next)})
-			i++
-			continue
-		}
-		if isMarkdownFenceLine(trimmed) {
-			node, next, ok := fastFenceNode(source, lines, i)
+		case 'f':
+			node, _, ok := fastFenceNode(source, lines, block.start, ctx)
 			if !ok {
 				return nil, false
 			}
 			children = append(children, node)
-			i = next
-			continue
-		}
-		if strings.HasPrefix(strings.TrimLeft(line.text, " \t"), ">") {
-			start := i
-			for i < len(lines) && (strings.TrimSpace(lines[i].text) == "" || strings.HasPrefix(strings.TrimLeft(lines[i].text, " \t"), ">")) {
-				i++
-			}
-			doc := parseSimpleBlockquoteDocument(source[lines[start].start:lines[i-1].next], ctx)
+		case 'q':
+			doc := parseSimpleBlockquoteDocument(source[lines[block.start].start:lines[block.end-1].next], ctx)
 			if doc == nil || doc.Root == nil {
 				return nil, false
 			}
 			for _, child := range doc.Root.Children {
-				shiftNodeRanges(child, source, lines[start].start)
+				shiftNodeRanges(child, source, lines[block.start].start)
 				children = append(children, child)
 			}
-			continue
-		}
-		if i+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(strings.TrimSpace(lines[i+1].text)) {
-			table, next := fastTableNode(source, lines, i, ctx)
-			children = append(children, table)
-			i = next
-			continue
-		}
-		if isLooseListMarkerLine(trimmed) {
-			if line.text != trimmed {
+		case 'T':
+			node, _ := fastTableNode(source, lines, block.start, ctx)
+			if node == nil {
 				return nil, false
 			}
-			if fastListLineHasTaskMarker(trimmed) {
-				return nil, false
+			children = append(children, node)
+		case 'l':
+			node, _ := fastListNode(source, lines, block.start, ctx)
+			children = append(children, node)
+		case 'n':
+			children = append(children, fastFootnoteDefinitionNode(source, line, ctx))
+		case 'p':
+			// Use the planned line span directly, avoiding another boundary scan.
+			var text strings.Builder
+			for i := block.start; i < block.end; i++ {
+				if !checkAt(lines[i].start) {
+					return nil, false
+				}
+				if i > block.start {
+					text.WriteByte('\n')
+				}
+				text.WriteString(lines[i].text)
 			}
-			list, next := fastListNode(source, lines, i, ctx)
-			children = append(children, list)
-			i = next
-			continue
+			para := &Node{Type: NodeParagraph, Range: sourceRange(source, line.start, lines[block.end-1].end)}
+			para.Children = parseInlineAt(text.String(), source, line.start, ctx)
+			children = append(children, para)
 		}
-		if fn := fastFootnoteDefinitionNode(source, line, ctx); fn != nil {
-			children = append(children, fn)
-			i++
-			continue
-		}
-		if isLikelyReferenceDefinitionLine(trimmed) || strings.HasPrefix(trimmed, "<") {
-			return nil, false
-		}
-
-		para, next := fastParagraphNode(source, lines, i, ctx)
-		children = append(children, para)
-		i = next
 	}
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: children, Range: sourceRange(source, 0, len(source))}, Source: source}
 	doc.extractFrontmatter()
@@ -1235,7 +1441,7 @@ func fastHeadingLevel(line string) int {
 	return level
 }
 
-func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bool) {
+func fastFenceNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int, bool) {
 	open := strings.TrimSpace(lines[start].text)
 	fenceChar := open[0]
 	fenceLen := 0
@@ -1245,6 +1451,9 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 	info := strings.TrimSpace(open[fenceLen:])
 	end := start + 1
 	for end < len(lines) {
+		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
+			return nil, start, false
+		}
 		trimmed := strings.TrimSpace(lines[end].text)
 		if len(trimmed) >= fenceLen && strings.Count(trimmed[:fenceLen], string(fenceChar)) == fenceLen {
 			break
@@ -1256,6 +1465,9 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 	}
 	var literal strings.Builder
 	for i := start + 1; i < end; i++ {
+		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
+			return nil, start, false
+		}
 		literal.WriteString(lines[i].text)
 		literal.WriteByte('\n')
 	}
@@ -1276,6 +1488,9 @@ func fastFenceNode(source []byte, lines []sourceLine, start int) (*Node, int, bo
 func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int) {
 	end := start
 	for end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end].text), "|") {
+		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
+			return nil, start
+		}
 		end++
 	}
 	table := &Node{Type: NodeTable, Attrs: map[string]string{}, Range: sourceRange(source, lines[start].start, lines[end-1].end)}
@@ -1284,6 +1499,9 @@ func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) 
 		table.Attrs["align"] = strings.Join(aligns, ",")
 	}
 	for i := start; i < end; i++ {
+		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
+			return nil, start
+		}
 		if i == start+1 {
 			continue
 		}
@@ -1294,6 +1512,9 @@ func fastTableNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) 
 		// the whole row, multiplying tables by their column count on
 		// every pass.
 		for _, cell := range splitFastTableCellSpans(lines[i].text) {
+			if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
+				return nil, start
+			}
 			c := &Node{Type: NodeTableCell, Range: sourceRange(source, lines[i].start+cell.start, lines[i].start+cell.end)}
 			text := strings.TrimSpace(cell.text)
 			if text != "" {
@@ -1460,36 +1681,6 @@ func fastFootnoteDefinitionNode(source []byte, line sourceLine, ctx *parseCtx) *
 		fn.Children = parseFootnoteDefinitionInline(match[2], source, ctx)
 	}
 	return fn
-}
-
-func fastParagraphNode(source []byte, lines []sourceLine, start int, ctx *parseCtx) (*Node, int) {
-	end := start
-	var text strings.Builder
-	for end < len(lines) {
-		trimmed := strings.TrimSpace(lines[end].text)
-		// A thematic break interrupts a paragraph (CommonMark 4.8). A "---"
-		// line is a setext underline instead and is handled by the caller.
-		if end > start && isThematicBreakLine(lines[end].text) && !isSetextUnderlineLine([]byte(lines[end].text)) {
-			break
-		}
-		if trimmed == "" || isATXHeadingLine([]byte(lines[end].text)) || isMarkdownFenceLine(trimmed) ||
-			strings.HasPrefix(strings.TrimLeft(lines[end].text, " \t"), ">") ||
-			isLooseListMarkerLine(trimmed) || fastFootnoteDefinitionNode(source, lines[end], ctx) != nil ||
-			(end+1 < len(lines) && strings.HasPrefix(trimmed, "|") && isPipeTableDelimiterLine(strings.TrimSpace(lines[end+1].text))) {
-			break
-		}
-		if text.Len() > 0 {
-			text.WriteByte('\n')
-		}
-		text.WriteString(lines[end].text)
-		end++
-	}
-	if end == start {
-		end++
-	}
-	para := &Node{Type: NodeParagraph, Range: sourceRange(source, lines[start].start, lines[end-1].end)}
-	para.Children = parseInlineAt(text.String(), source, lines[start].start, ctx)
-	return para, end
 }
 
 type sourceLine struct {
