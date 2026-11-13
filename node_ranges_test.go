@@ -1,7 +1,9 @@
 package mdpp
 
 import (
+	"flag"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -66,17 +68,79 @@ func pointMatches(source []byte, offset, line, col int) bool {
 	return line == wantLine && col == wantCol
 }
 
+// cachedDefaultRanges contains only assertion results, not parser trees. It is
+// populated in the ordinary single-count full suite when the earlier range
+// test parses the same sources, and is checked in source corpus order below.
+var cachedDefaultRanges map[string][]string
+
+const sourceRangeChecked = "\x00source-range-checked"
+
+func sharedDefaultRangeEnabled() bool {
+	return (flag.Lookup("test.run").Value.String() == "" && flag.Lookup("test.count").Value.String() == "1") || os.Getenv("MDPP_INTERNAL_COMBINED_RANGES") == "1"
+}
+
 func TestNodeRangesPointIntoSource(t *testing.T) {
 	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
-	failures := map[string]string{}
-	for _, src := range inputs {
+	originalCount := len(inputs)
+	combine := sharedDefaultRangeEnabled()
+	var first map[string]int
+	if combine {
+		t.Setenv("MDPP_INTERNAL_COMBINED_RANGES", "1")
+		first = make(map[string]int, len(inputs))
+		for i, s := range inputs {
+			if _, ok := first[s]; !ok {
+				first[s] = i
+			}
+		}
+		for _, s := range rangeInputs(t) {
+			if _, ok := first[s]; !ok {
+				first[s] = len(inputs)
+				inputs = append(inputs, s)
+			}
+		}
+	}
+	results, child := corpusShardMap(t, inputs, func(i int, src string) ([]string, error) {
 		doc, err := Parse([]byte(src))
 		if err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
-		if problems := checkNodeRanges(doc); len(problems) > 0 {
-			failures[src] = problems[0]
+		var point string
+		if i < originalCount {
+			if problems := checkNodeRanges(doc); len(problems) > 0 {
+				point = problems[0]
+			}
 		}
+		out := []string{point}
+		if combine && first[src] == i {
+			problems := checkRangeConsistency(doc, src)
+			out = append(out, sourceRangeChecked)
+			out = append(out, problems...)
+		}
+		return out, nil
+	})
+	if child {
+		return
+	}
+	failures := map[string]string{}
+	if combine {
+		cachedDefaultRanges = make(map[string][]string, len(first))
+	}
+	for i, problems := range results {
+		if len(problems) == 0 {
+			t.Fatalf("missing range result for input %d", i)
+		}
+		if i < originalCount && problems[0] != "" {
+			failures[inputs[i]] = problems[0]
+		}
+		if combine && first[inputs[i]] == i {
+			if len(problems) < 2 || problems[1] != sourceRangeChecked {
+				t.Fatalf("source range assertion missing for input %d", i)
+			}
+			cachedDefaultRanges[inputs[i]] = problems[2:]
+		}
+	}
+	if combine {
+		t.Logf("verified %d shared source range assertion markers", len(cachedDefaultRanges))
 	}
 	if len(failures) == 0 {
 		return
@@ -93,7 +157,7 @@ func TestNodeRangesPointIntoSource(t *testing.T) {
 		}
 		fmt.Fprintf(&sb, "\n  %q: %s", k, failures[k])
 	}
-	t.Errorf("%d of %d inputs have a node with a bad range, for example:%s", len(failures), len(inputs), sb.String())
+	t.Errorf("%d of %d inputs have a node with a bad range, for example:%s", len(failures), originalCount, sb.String())
 }
 
 // Text nodes whose literal is plain source text must cover exactly that
