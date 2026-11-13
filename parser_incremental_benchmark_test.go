@@ -185,7 +185,7 @@ func BenchmarkMarkdownCachedASTPostProcess256KiB(b *testing.B) {
 		root := convertBlockCtx(bound, bound.RootNode(), source, ctx)
 		doc := &Document{Root: root, Source: source}
 		doc.extractFrontmatter()
-		postProcess(doc)
+		postProcess(doc, nil)
 	}
 }
 
@@ -202,7 +202,7 @@ func BenchmarkMarkdownLinkRefCollection256KiB(b *testing.B) {
 	b.SetBytes(int64(len(source)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = collectLinkRefDefs(bound, bound.RootNode())
+		_ = collectLinkRefDefs(bound, bound.RootNode(), false)
 	}
 }
 

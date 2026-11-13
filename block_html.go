@@ -9,6 +9,9 @@ import (
 // grammar can consume their contents as inline Markdown. Each line is visited
 // once; ordinary spans are handed back to the regular parser.
 func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
+	if !ctx.shortcut("parseCommonMarkHTMLBlocks") {
+		return nil
+	}
 	i := 0
 	for i < len(source) && source[i] == ' ' {
 		i++
@@ -17,7 +20,7 @@ func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
 		return nil
 	}
 	lines := sourceLines(source)
-	if len(lines) == 0 || htmlBlockStart(lines[0].text, true) == "" {
+	if len(lines) == 0 || htmlBlockStart(lines[0].text, true, ctx.gfm()) == "" {
 		return nil
 	}
 	var children []*Node
@@ -34,7 +37,7 @@ func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
 		}
 		kind := ""
 		if !inFence {
-			kind = htmlBlockStart(line, atBlockStart)
+			kind = htmlBlockStart(line, atBlockStart, ctx.gfm())
 		}
 		if kind == "" {
 			atBlockStart = trimMarkdownSpace(line) == ""
@@ -84,12 +87,12 @@ func parseCommonMarkHTMLBlocks(source []byte, ctx *parseCtx) *Document {
 			blockChunk{start: chunkStart, end: len(source), startLine: chunkLine, startCol: 1}, ctx)
 	}
 	doc := &Document{Root: &Node{Type: NodeDocument, Children: children, Range: sourceRange(source, 0, len(source))}, Source: source, diagnostics: diagnostics, linkRefDefs: refs}
-	doc.extractFrontmatter()
-	postProcess(doc)
+	doc.extractFrontmatterCtx(ctx)
+	postProcess(doc, ctx)
 	return doc
 }
 
-func htmlBlockStart(line string, atBlockStart bool) string {
+func htmlBlockStart(line string, atBlockStart bool, gfm bool) string {
 	i := 0
 	for i < len(line) && line[i] == ' ' {
 		i++
@@ -121,6 +124,14 @@ func htmlBlockStart(line string, atBlockStart bool) string {
 		}
 	}
 	trimmed := trimMarkdownSpace(line)
+	if gfm {
+		// CommonMark 4.6 type 7: a complete open tag (self-closing or not) or a
+		// closing tag alone on its line, whatever the case of its name.
+		if atBlockStart && (standaloneAnyOpenHTMLTagRe.MatchString(trimmed) || standaloneCloseHTMLTagRe.MatchString(trimmed)) {
+			return "blank"
+		}
+		return ""
+	}
 	if strings.HasSuffix(trimmed, "/>") {
 		return "" // MDX style self-closing components stay inline.
 	}
@@ -133,6 +144,10 @@ func htmlBlockStart(line string, atBlockStart bool) string {
 func htmlTagBoundary(line string, i int) bool {
 	return i == len(line) || line[i] == ' ' || line[i] == '\t' || line[i] == '>' || line[i] == '/' || line[i] == '\r'
 }
+
+// standaloneAnyOpenHTMLTagRe is standaloneOpenHTMLTagRe with an optional
+// self-closing slash.
+var standaloneAnyOpenHTMLTagRe = regexp.MustCompile(strings.TrimSuffix(standaloneOpenHTMLTagRe.String(), `[ \t]*>$`) + `[ \t]*/?>$`)
 
 var standaloneCloseHTMLTagRe = regexp.MustCompile(`^</[A-Za-z][A-Za-z0-9-]*[ \t]*>$`)
 

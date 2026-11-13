@@ -174,7 +174,10 @@ type parseCtx struct {
 	// budget is shared by every chunk and inline reparse in one document so
 	// recursive paths cannot reset the work or deadline limits.
 	budget *parseBudget
-	cache  *parseCache
+	// profile is the dialect this parse reads; it is the same for every
+	// nested parse that shares the context.
+	profile ParseProfile
+	cache   *parseCache
 	// suppressLooseRecovery prevents recursive loose-block reparsing when
 	// a recovery parse itself produces loose fallback text.
 	suppressLooseRecovery bool

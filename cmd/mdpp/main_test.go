@@ -423,3 +423,33 @@ func readCLIFormatFixture(t *testing.T, name string) []byte {
 	}
 	return data
 }
+
+func TestProfileFlag(t *testing.T) {
+	src := ":::note\n## Extra\n:::\n"
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"render", "--profile", "gfm"}, strings.NewReader(src), &stdout, &stderr); code != exitOK {
+		t.Fatalf("render gfm: exit %d, stderr = %s", code, stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "<p>:::note</p>") || !strings.Contains(got, "Extra</h2>") || strings.Contains(got, "mdpp-container") {
+		t.Errorf("gfm render = %q", got)
+	}
+	stdout.Reset()
+	if code := run([]string{"render"}, strings.NewReader(src), &stdout, &stderr); code != exitOK {
+		t.Fatalf("render default: exit %d", code)
+	}
+	if strings.Contains(stdout.String(), "<p>:::note</p>") {
+		t.Errorf("the default profile must still read the container: %q", stdout.String())
+	}
+	stdout.Reset()
+	if code := run([]string{"parse", "--json", "--compact", "--profile", "gfm"}, strings.NewReader(src), &stdout, &stderr); code != exitOK {
+		t.Fatalf("parse gfm: exit %d, stderr = %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "ContainerDirective") {
+		t.Errorf("gfm parse json holds a container: %s", stdout.String())
+	}
+	stderr.Reset()
+	if code := run([]string{"parse", "--profile", "commonmark"}, strings.NewReader(src), &stdout, &stderr); code == exitOK || !strings.Contains(stderr.String(), "unknown profile") {
+		t.Errorf("unknown profile: exit %d, stderr = %q", code, stderr.String())
+	}
+}

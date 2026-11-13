@@ -36,6 +36,9 @@ type profileParser struct {
 
 var rangeTestProfiles = []profileParser{
 	{"default", func(src string) (*Document, error) { return Parse([]byte(src)) }},
+	{"gfm", func(src string) (*Document, error) {
+		return ParseWithOptions([]byte(src), ParseOptions{Profile: ProfileGFM})
+	}},
 }
 
 func firstLine(s string) string {
@@ -240,8 +243,15 @@ func rangeInputs(t testing.TB) []string {
 }
 
 func TestNodeRangesMatchOriginalSource(t *testing.T) {
+	// Corpus workers run in subprocesses; overlap independent suites after serial tests finish.
+	t.Parallel()
 	inputs := rangeInputs(t)
-	for _, p := range rangeTestProfiles {
+	profiles := rangeTestProfiles
+	parallel := parallelCorpusSuiteEnabled()
+	if parallel && len(profiles) == 2 && profiles[0].name == "default" && profiles[1].name == "gfm" {
+		profiles = []profileParser{profiles[1], profiles[0]}
+	}
+	for _, p := range profiles {
 		t.Run(p.name, func(t *testing.T) {
 			// All problems of an input are collected and grouped by kind (node type
 			// and message), and the shortest input of each kind is reported.
@@ -249,7 +259,11 @@ func TestNodeRangesMatchOriginalSource(t *testing.T) {
 			counts := map[string]int{}
 			bad := 0
 			var results [][]string
-			if p.name == "default" && cachedDefaultRanges != nil {
+			cacheAllowed := !parallel
+			if p.name == "default" && parallel {
+				cacheAllowed = awaitStartedRangeProducer()
+			}
+			if p.name == "default" && cacheAllowed && cachedDefaultRanges != nil {
 				results = make([][]string, len(inputs))
 				for i, in := range inputs {
 					var ok bool

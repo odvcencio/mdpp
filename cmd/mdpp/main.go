@@ -68,6 +68,7 @@ func runRender(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 	hardWraps := fs.Bool("hard-wraps", false, "render soft line breaks as <br>")
 	wrapEmoji := fs.Bool("emoji", false, "wrap emoji in accessible spans")
 	mathMode := fs.String("math", "server", "math rendering mode: server, raw, omit")
+	profile := fs.String("profile", "markdown++", `dialect to read: "markdown++" or "gfm"`)
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return exitOK
@@ -99,7 +100,12 @@ func runRender(args []string, stdin io.Reader, stdout io.Writer, stderr io.Write
 		stdfmt.Fprintf(stderr, "mdpp render: %v\n", err)
 		return exitError
 	}
-	doc, err := mdpp.Parse(src)
+	parseProfile, ok := mdpp.ParseProfileByName(*profile)
+	if !ok {
+		stdfmt.Fprintf(stderr, "mdpp render: unknown profile %q (want markdown++ or gfm)\n", *profile)
+		return exitError
+	}
+	doc, err := mdpp.ParseWithOptions(src, mdpp.ParseOptions{Profile: parseProfile})
 	if err != nil {
 		stdfmt.Fprintf(stderr, "mdpp render: parse: %v\n", err)
 		return exitError
@@ -128,6 +134,7 @@ func runParse(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 	compact := fs.Bool("compact", false, "write compact JSON")
 	pretty := fs.Bool("pretty", true, "pretty-print JSON")
 	diagnosticsOnly := fs.Bool("diagnostics-only", false, "emit only diagnostics, suppressing the AST")
+	profile := fs.String("profile", "markdown++", `dialect to read: "markdown++" or "gfm"`)
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return exitOK
@@ -149,7 +156,12 @@ func runParse(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 		stdfmt.Fprintf(stderr, "mdpp parse: %v\n", err)
 		return exitError
 	}
-	doc, err := mdpp.Parse(src)
+	parseProfile, ok := mdpp.ParseProfileByName(*profile)
+	if !ok {
+		stdfmt.Fprintf(stderr, "mdpp parse: unknown profile %q (want markdown++ or gfm)\n", *profile)
+		return exitError
+	}
+	doc, err := mdpp.ParseWithOptions(src, mdpp.ParseOptions{Profile: parseProfile})
 	if err != nil {
 		stdfmt.Fprintf(stderr, "mdpp parse: %v\n", err)
 		return exitError

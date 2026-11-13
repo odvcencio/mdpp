@@ -31,7 +31,7 @@ type corpusResult struct {
 	Digest string
 }
 
-func corpusShardMap(t *testing.T, inputs []string, check func(int, string) ([]string, error)) ([][]string, bool) {
+func corpusShardMap(t *testing.T, inputs []string, check func(int, string) ([]string, error), extraEnv ...string) ([][]string, bool) {
 	t.Helper()
 	if shard := os.Getenv(corpusShardEnv); shard != "" {
 		id, err := strconv.Atoi(shard)
@@ -82,6 +82,7 @@ func corpusShardMap(t *testing.T, inputs []string, check func(int, string) ([]st
 			defer wg.Done()
 			c := exec.CommandContext(ctx, os.Args[0], "-test.run="+run, "-test.timeout=0")
 			c.Env = append(os.Environ(), fmt.Sprintf("%s=%d", corpusShardEnv, id), corpusDirEnv+"="+dir)
+			c.Env = append(c.Env, extraEnv...)
 			if out, err := c.CombinedOutput(); err != nil {
 				failures[id] = fmt.Errorf("shard %d: %w\n%s", id, err, out)
 			}

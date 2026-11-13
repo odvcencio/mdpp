@@ -74,18 +74,58 @@ func pointMatches(source []byte, offset, line, col int) bool {
 var cachedDefaultRanges map[string][]string
 
 const sourceRangeChecked = "\x00source-range-checked"
+const fastComparisonChecked = "\x00fast-comparison-checked"
+const sharedFastEnv = "MDPP_INTERNAL_SHARED_FAST"
 
 func sharedDefaultRangeEnabled() bool {
 	return (flag.Lookup("test.run").Value.String() == "" && flag.Lookup("test.count").Value.String() == "1") || os.Getenv("MDPP_INTERNAL_COMBINED_RANGES") == "1"
 }
 
+// Full-suite corpus jobs can run together: both readers consume the published
+// caches only after the range producer completes. Selective runs use their
+// independent paths unless explicitly exercising this scheduling in a test.
+var sharedRangeStarted = make(chan struct{})
+var sharedRangeDone = make(chan struct{})
+
+func parallelCorpusSuiteEnabled() bool {
+	if flag.Lookup("test.count").Value.String() != "1" {
+		return false
+	}
+	if os.Getenv("MDPP_INTERNAL_PARALLEL_SHARE") == "1" {
+		return true
+	}
+	skip := flag.Lookup("test.skip")
+	return flag.Lookup("test.run").Value.String() == "" && (skip == nil || skip.Value.String() == "")
+}
+
+// Only wait if the producer is already scheduled: this cannot consume the
+// last parallel test slot while the producer is still waiting for one.
+func awaitStartedRangeProducer() bool {
+	select {
+	case <-sharedRangeStarted:
+		<-sharedRangeDone
+		return true
+	default:
+		return false
+	}
+}
+
 func TestNodeRangesPointIntoSource(t *testing.T) {
+	parallel := parallelCorpusSuiteEnabled()
+	if parallel {
+		t.Parallel()
+		close(sharedRangeStarted)
+		defer close(sharedRangeDone)
+	}
 	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
 	originalCount := len(inputs)
-	combine := sharedDefaultRangeEnabled()
+	combine := sharedDefaultRangeEnabled() || parallel
+	shareFast := os.Getenv(sharedFastEnv) == "1" || (flag.Lookup("test.run").Value.String() == "" && flag.Lookup("test.count").Value.String() == "1")
+	if parallel {
+		shareFast = true
+	}
 	var first map[string]int
 	if combine {
-		t.Setenv("MDPP_INTERNAL_COMBINED_RANGES", "1")
 		first = make(map[string]int, len(inputs))
 		for i, s := range inputs {
 			if _, ok := first[s]; !ok {
@@ -98,6 +138,13 @@ func TestNodeRangesPointIntoSource(t *testing.T) {
 				inputs = append(inputs, s)
 			}
 		}
+	}
+	var shardEnv []string
+	if combine {
+		shardEnv = append(shardEnv, "MDPP_INTERNAL_COMBINED_RANGES=1")
+	}
+	if shareFast {
+		shardEnv = append(shardEnv, sharedFastEnv+"=1")
 	}
 	results, child := corpusShardMap(t, inputs, func(i int, src string) ([]string, error) {
 		doc, err := Parse([]byte(src))
@@ -112,18 +159,30 @@ func TestNodeRangesPointIntoSource(t *testing.T) {
 		}
 		out := []string{point}
 		if combine && first[src] == i {
+			if shareFast && i < originalCount {
+				same := sameFullPathAsDocument(src, doc, os.Getenv("MDPP_FASTPATH_NORANGES") != "")
+				verdict := "different"
+				if same {
+					verdict = "same"
+				}
+				out = append(out, fastComparisonChecked, verdict)
+			}
 			problems := checkRangeConsistency(doc, src)
 			out = append(out, sourceRangeChecked)
 			out = append(out, problems...)
 		}
 		return out, nil
-	})
+	}, shardEnv...)
 	if child {
 		return
 	}
 	failures := map[string]string{}
 	if combine {
 		cachedDefaultRanges = make(map[string][]string, len(first))
+		if shareFast {
+			cachedFastPathComparisons = make(map[string]bool, len(first))
+			cachedFastPathNoRanges = os.Getenv("MDPP_FASTPATH_NORANGES") != ""
+		}
 	}
 	for i, problems := range results {
 		if len(problems) == 0 {
@@ -133,14 +192,25 @@ func TestNodeRangesPointIntoSource(t *testing.T) {
 			failures[inputs[i]] = problems[0]
 		}
 		if combine && first[inputs[i]] == i {
-			if len(problems) < 2 || problems[1] != sourceRangeChecked {
+			pos := 1
+			if shareFast && i < originalCount {
+				if len(problems) < pos+2 || problems[pos] != fastComparisonChecked || (problems[pos+1] != "same" && problems[pos+1] != "different") {
+					t.Fatalf("fast comparison assertion missing for input %d", i)
+				}
+				cachedFastPathComparisons[inputs[i]] = problems[pos+1] == "same"
+				pos += 2
+			}
+			if len(problems) <= pos || problems[pos] != sourceRangeChecked {
 				t.Fatalf("source range assertion missing for input %d", i)
 			}
-			cachedDefaultRanges[inputs[i]] = problems[2:]
+			cachedDefaultRanges[inputs[i]] = problems[pos+1:]
 		}
 	}
 	if combine {
 		t.Logf("verified %d shared source range assertion markers", len(cachedDefaultRanges))
+		if shareFast {
+			t.Logf("verified %d shared differential assertion markers", len(cachedFastPathComparisons))
+		}
 	}
 	if len(failures) == 0 {
 		return

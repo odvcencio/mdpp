@@ -7,8 +7,13 @@ import "testing"
 var deepListParsers = []struct {
 	name string
 	fn   func([]byte) (*Document, error)
+	// buildsPlain: the profile has the deep-list builder (a shortcut), so a list
+	// of plain items is built. The GFM profile has no shortcut: the grammar
+	// cannot read the list, and the whole list is reported.
+	buildsPlain bool
 }{
-	{"default profile", Parse},
+	{"default profile", Parse, true},
+	{"gfm profile", func(src []byte) (*Document, error) { return ParseWithOptions(src, ParseOptions{Profile: ProfileGFM}) }, false},
 }
 
 const deepListTail = "\n  - a\n    - a\n      - a\n        - a\n          - a\n"
@@ -20,9 +25,12 @@ const deepListTail = "\n  - a\n    - a\n      - a\n        - a\n          - a\n"
 // a task item, a heading and a block comment.
 func TestDeepListWithBlocksIsReportedNotMisread(t *testing.T) {
 	for _, parse := range deepListParsers {
-		for _, first := range []string{
-			"- [x] a", "- [ ] a", "- # h", "- <!-- c -->", "- > q", "- ```", "- ---", "- - a", "- 1. a", "- [a]: /u", "- | a |", "- :::", "- $$",
-		} {
+		firsts := []string{"- [x] a", "- [ ] a", "- # h", "- <!-- c -->"}
+		if parse.buildsPlain {
+			// The shortcut's own guard: every first item that could be a block.
+			firsts = append(firsts, "- > q", "- ```", "- ---", "- - a", "- 1. a", "- [a]: /u", "- | a |", "- :::", "- $$")
+		}
+		for _, first := range firsts {
 			src := first + deepListTail
 			doc, err := parse.fn([]byte(src))
 			if err != nil {
@@ -53,6 +61,18 @@ func TestDeepListOfPlainItemsIsStillBuilt(t *testing.T) {
 			doc, err := parse.fn([]byte(src))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if !parse.buildsPlain {
+				covered := false
+				for _, d := range doc.Diagnostics() {
+					if d.Range.StartByte == 0 && d.Range.EndByte >= len(src)-1 {
+						covered = true
+					}
+				}
+				if !covered {
+					t.Errorf("%s: %q: no diagnostic covers the list:\n%s", parse.name, src, fullNodeDump(doc.Root))
+				}
+				continue
 			}
 			if len(doc.Diagnostics()) != 0 || len(doc.Root.Find(NodeListItem)) != 6 {
 				t.Errorf("%s: %q: %d items, diagnostics %v:\n%s", parse.name, src, len(doc.Root.Find(NodeListItem)), doc.Diagnostics(), fullNodeDump(doc.Root))

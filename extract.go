@@ -116,7 +116,13 @@ func (d *Document) TableOfContents() []TOCEntry {
 // Frontmatter must be delimited by --- on its own line at the start
 // of the document.
 func (d *Document) extractFrontmatter() {
-	if d.Source == nil {
+	d.extractFrontmatterCtx(nil)
+}
+
+// extractFrontmatterCtx is extractFrontmatter for a parse that reads the
+// profile of ctx. The GFM profile has no front matter.
+func (d *Document) extractFrontmatterCtx(ctx *parseCtx) {
+	if d.Source == nil || ctx.gfm() {
 		return
 	}
 	var data map[string]any
