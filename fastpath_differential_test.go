@@ -343,7 +343,7 @@ func checkFastPathMatchesFullParser(t *testing.T) {
 		}
 	}
 	var results [][]string
-	cacheAllowed := !parallelCorpusSuiteEnabled() || awaitStartedRangeProducer()
+	cacheAllowed := !parallelCorpusSuiteEnabled()
 	if cacheAllowed && cachedFastPathComparisons != nil && cachedFastPathNoRanges == dumpWithoutRanges {
 		results = make([][]string, len(unique))
 		for i, in := range unique {
@@ -369,6 +369,13 @@ func checkFastPathMatchesFullParser(t *testing.T) {
 			return
 		}
 	}
+	reportFastPathComparisons(t, inputs, unique, results)
+}
+
+// reportFastPathComparisons applies the same verdict and reporting checks to
+// independently computed results and results produced by the range test.
+func reportFastPathComparisons(t *testing.T, inputs, unique []string, results [][]string) {
+	t.Helper()
 	var bad []string
 	for i, problems := range results {
 		if len(problems) > 0 {
