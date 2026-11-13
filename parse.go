@@ -1121,10 +1121,17 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 	}
 	lines := sourceLines(source)
 	children := make([]*Node, 0, len(lines)/2)
+	last := -1
 	for i := 0; i < len(lines); {
 		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
 			break
 		}
+		// Every pass must consume a line. A builder that returns without
+		// advancing falls back to the full parser instead of looping forever.
+		if i <= last {
+			return nil, false
+		}
+		last = i
 		line := lines[i]
 		trimmed := strings.TrimSpace(line.text)
 		if trimmed == "" {
