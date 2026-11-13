@@ -53,15 +53,14 @@ type gfmHTMLBlock struct {
 // no nodes.
 func gfmHTMLBlocks(lines []sourceLine) []gfmHTMLBlock {
 	var out []gfmHTMLBlock
-	inFence := false
+	var fenceMarker byte
+	var fenceLength int
 	atBlockStart := true
 	for i := 0; i < len(lines); {
 		line := lines[i].text
-		if isMarkdownFenceLine(trimMarkdownSpace(line)) {
-			inFence = !inFence
-		}
+		updateHazardFence(line, &fenceMarker, &fenceLength)
 		kind := ""
-		if !inFence {
+		if fenceMarker == 0 {
 			kind = htmlBlockStart(line, atBlockStart, true)
 		}
 		if kind == "" {
@@ -183,13 +182,12 @@ func gfmBlockMisreads(source []byte, root *Node) []Diagnostic {
 			return true
 		})
 	}
-	inFence := false
+	var fenceMarker byte
+	var fenceLength int
 	for i := 0; i+1 < len(lines); i++ {
 		indent, rest := leadingColumns(lines[i].text)
-		if indent <= 3 && isMarkdownFenceLine(rest) {
-			inFence = !inFence
-		}
-		if inFence || indent > 3 || !linkReferenceDefinitionLine(rest) || !isSetextUnderlineLine([]byte(lines[i+1].text)) {
+		updateHazardFence(lines[i].text, &fenceMarker, &fenceLength)
+		if fenceMarker != 0 || indent > 3 || !linkReferenceDefinitionLine(rest) || !isSetextUnderlineLine([]byte(lines[i+1].text)) {
 			continue
 		}
 		for _, h := range headings {
@@ -200,6 +198,30 @@ func gfmBlockMisreads(source []byte, root *Node) []Diagnostic {
 		}
 	}
 	return out
+}
+
+// updateHazardFence tracks actual top-level fenced-code delimiters while
+// scanning for GFM hazards. Interior runs cannot close a different or longer
+// opener, and a closer permits only spaces or tabs after its run.
+func updateHazardFence(line string, marker *byte, length *int) {
+	indent, rest := leadingColumns(line)
+	if indent > 3 {
+		return
+	}
+	c, n := fenceRun(rest)
+	if n < 3 {
+		return
+	}
+	if *marker == 0 {
+		if c == '`' && strings.ContainsRune(rest[n:], '`') {
+			return
+		}
+		*marker, *length = c, n
+		return
+	}
+	if c == *marker && n >= *length && strings.TrimLeft(rest[n:], " \t") == "" {
+		*marker, *length = 0, 0
+	}
 }
 
 // leadingColumns returns the columns of indentation of a line (a tab counts to
