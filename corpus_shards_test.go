@@ -18,7 +18,7 @@ import (
 
 // The tests using this helper access process-global parser controls. Each
 // worker therefore runs the same race-instrumented test binary in isolation.
-const corpusShards = 2
+const corpusShards = 4
 const corpusShardEnv = "MDPP_INTERNAL_CORPUS_SHARD"
 const corpusDirEnv = "MDPP_INTERNAL_CORPUS_DIR"
 

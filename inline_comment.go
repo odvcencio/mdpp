@@ -48,11 +48,13 @@ var (
 // fails once is remembered: a search that found no terminator from one
 // position finds none from a later position, so the scan stays linear.
 type commentScan struct {
-	text      string
-	ctx       *parseCtx
-	checks    int
-	cancelled bool
-	steps     int
+	text       string
+	source     []byte
+	baseOffset int
+	ctx        *parseCtx
+	checks     int
+	cancelled  bool
+	steps      int
 	// backtick runs by length, as ascending start offsets
 	runs map[int][]int
 	// searches that reached the end of the text without a terminator
@@ -155,7 +157,7 @@ func (s *commentScan) poll() bool {
 	if s.ctx.budget.check() {
 		return false
 	}
-	s.ctx.inlineTimeoutOccurred = true
+	s.ctx.noteInlineStop(s.source, s.baseOffset, s.text)
 	s.cancelled = true
 	return true
 }
@@ -442,7 +444,7 @@ func (s *commentScan) titleEnd(i int) int {
 // stays with that link, so the link keeps its shape; the reader meets the
 // comment again when it parses the link text.
 func parseInlineAt(text string, source []byte, baseOffset int, ctx *parseCtx) []*Node {
-	scanner := &commentScan{text: text, ctx: ctx}
+	scanner := &commentScan{text: text, source: source, baseOffset: baseOffset, ctx: ctx}
 	found := false
 	if ctx == nil || ctx.budget == nil {
 		found = strings.Contains(text, "<!--")

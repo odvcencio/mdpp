@@ -33,7 +33,7 @@ func TestCommentLongAndDepth(t *testing.T) {
 	}
 	ctx := &parseCtx{budget: newParseBudget(context.Background(), len(text), ParseOptions{WorkBudget: 1})}
 	nodes, ok = parseCommentDelimitersAt(text, []byte(text), 0, c, l, ctx)
-	if !ok || ctx.inlineTimeoutOccurred || ctx.budget.hit != "" || len(newNode(NodeDocument, nodes...).Find(NodeStrong)) != maxInlineParseChunk/2+1 {
+	if !ok || len(ctx.inlineStops) != 0 || ctx.budget.hit != "" || len(newNode(NodeDocument, nodes...).Find(NodeStrong)) != maxInlineParseChunk/2+1 {
 		t.Errorf("delimiter depth spent parser budget: %#v", ctx)
 	}
 }

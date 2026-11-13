@@ -195,10 +195,8 @@ type parseCtx struct {
 	// cannot blow the stack via unbounded re-entry through
 	// parseContainerChildrenCtx → parseBodyChunkCtx → parseDocumentCtx.
 	containerDepth int
-	// inlineTimeoutOccurred is set when inline parsing stops on its work or
-	// deadline budget. The block-level parse reads it after convertBlockCtx
-	// returns and attaches an MDPP-PARSE-005 diagnostic.
-	inlineTimeoutOccurred bool
+	// inlineStops holds the source spans whose inline parse stopped on a limit.
+	inlineStops []Range
 	// recoveryDiagnostics collects tree-sitter ERROR and MISSING recovery
 	// findings while a document is converted. The owning parse attaches and
 	// clears the slice before returning its Document.
@@ -508,4 +506,144 @@ func shiftRange(r Range, delta int, source []byte) Range {
 		EndLine:   r.EndLine,
 		EndCol:    r.EndCol,
 	}
+}
+
+// noteInlineStop records that the inline span text, which starts at baseOffset
+// in source, stopped on a limit and was kept as text. A span with no known
+// position is recorded as a zero Range, which stands for the whole source.
+func (c *parseCtx) noteInlineStop(source []byte, baseOffset int, text string) {
+	if baseOffset < 0 || baseOffset+len(text) > len(source) {
+		c.inlineStops = append(c.inlineStops, Range{})
+		return
+	}
+	c.inlineStops = append(c.inlineStops, sourceRange(source, baseOffset, baseOffset+len(text)))
+}
+
+// maxStopDiagnostics is the most diagnostics that the inline stops of one
+// document produce.
+const maxStopDiagnostics = 64
+
+// inlineStopRanges returns the ranges to report for stops: each distinct span,
+// or the whole source for a stop whose position is unknown. When there are
+// more than maxStopDiagnostics distinct spans, the first maxStopDiagnostics-1
+// are reported one by one and the rest are folded into one range that covers
+// all of them, so that no discarded span lies outside every reported range.
+func inlineStopRanges(stops []Range, source []byte) []Range {
+	seen := map[Range]bool{}
+	var spans []Range
+	for _, r := range stops {
+		if r == (Range{}) {
+			r = sourceRange(source, 0, len(source))
+		}
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		spans = append(spans, r)
+	}
+	if len(spans) == 0 {
+		return []Range{sourceRange(source, 0, len(source))}
+	}
+	if len(spans) <= maxStopDiagnostics {
+		return spans
+	}
+	out := spans[: maxStopDiagnostics-1 : maxStopDiagnostics-1]
+	rest := spans[maxStopDiagnostics-1:]
+	start, end := rest[0].StartByte, rest[0].EndByte
+	for _, r := range rest[1:] {
+		if r.StartByte < start {
+			start = r.StartByte
+		}
+		if r.EndByte > end {
+			end = r.EndByte
+		}
+	}
+	return append(out, sourceRange(source, start, end))
+}
+
+// diagMark is a position in the diagnostics that a parse context has
+// collected. A parse takes a mark before it converts anything, so that it can
+// claim exactly the diagnostics its own conversion recorded.
+type diagMark struct{ recovery, stops int }
+
+func (c *parseCtx) mark() diagMark {
+	if c == nil {
+		return diagMark{}
+	}
+	return diagMark{recovery: len(c.recoveryDiagnostics), stops: len(c.inlineStops)}
+}
+
+// rewind drops the diagnostics recorded after m. A parse that gives up an
+// attempt (the fast block path hands a chunk to the full parser) rewinds, so
+// that the attempt's findings are not reported twice or at the wrong place.
+func (c *parseCtx) rewind(m diagMark) {
+	if c == nil {
+		return
+	}
+	if len(c.recoveryDiagnostics) > m.recovery {
+		c.recoveryDiagnostics = c.recoveryDiagnostics[:m.recovery]
+	}
+	if len(c.inlineStops) > m.stops {
+		c.inlineStops = c.inlineStops[:m.stops]
+	}
+}
+
+// discardWithin drops the diagnostics recorded after m whose range lies inside
+// r. A parse that replaces one reading of a span by another discards what the
+// first reading recorded for that span, and only that: diagnostics of other
+// blocks recorded since m stay. An inline stop with an unknown position stays,
+// because it cannot be attributed to the span.
+func (c *parseCtx) discardWithin(m diagMark, r Range) {
+	if c == nil {
+		return
+	}
+	inside := func(x Range) bool {
+		return x != (Range{}) && x.StartByte >= r.StartByte && x.EndByte <= r.EndByte
+	}
+	if len(c.recoveryDiagnostics) > m.recovery {
+		kept := c.recoveryDiagnostics[:m.recovery]
+		for _, d := range c.recoveryDiagnostics[m.recovery:] {
+			if !inside(d.Range) {
+				kept = append(kept, d)
+			}
+		}
+		c.recoveryDiagnostics = kept
+	}
+	if len(c.inlineStops) > m.stops {
+		kept := c.inlineStops[:m.stops]
+		for _, x := range c.inlineStops[m.stops:] {
+			if !inside(x) {
+				kept = append(kept, x)
+			}
+		}
+		c.inlineStops = kept
+	}
+}
+
+// collect moves the diagnostics recorded after m onto doc. Their ranges refer
+// to source, which is the source of doc. When the budget is spent the whole
+// result is replaced by the source as text, with one diagnostic that covers it,
+// so the findings are dropped.
+func (c *parseCtx) collect(doc *Document, source []byte, m diagMark) {
+	if c == nil || doc == nil {
+		return
+	}
+	if c.budget != nil && c.budget.hit != "" {
+		c.rewind(m)
+		return
+	}
+	if len(c.recoveryDiagnostics) > m.recovery {
+		doc.diagnostics = append(doc.diagnostics, c.recoveryDiagnostics[m.recovery:]...)
+	}
+	if len(c.inlineStops) > m.stops {
+		for _, r := range inlineStopRanges(c.inlineStops[m.stops:], source) {
+			doc.diagnostics = append(doc.diagnostics, Diagnostic{
+				Code:     DiagBudgetExceeded,
+				Severity: SeverityWarning,
+				Message:  "inline parse aborted: the span reached a parser work or deadline limit; treated as raw text",
+				Range:    r,
+			})
+		}
+	}
+	c.rewind(m)
 }

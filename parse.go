@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"html"
 	"regexp"
 	"sort"
@@ -309,7 +310,12 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 	if len(inserts) > 0 && len(original) > 0 && original[len(original)-1] != '\n' {
 		original = append(original[:len(original):len(original)], '\n')
 	}
+	// Every parse claims the diagnostics that its own conversion recorded in
+	// the context, whichever path built the document: the grammar, the fast
+	// block path, the quote, list, HTML and container readers.
+	mark := ctx.mark()
 	doc, tree := parseLoweredDocumentCtx(source, prevTree, ctx)
+	ctx.collect(doc, source, mark)
 	if len(inserts) > 0 {
 		remapLoweredRanges(doc, inserts, original)
 	}
@@ -419,7 +425,7 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 	lang := blockLang()
 	if lang == nil {
 		releasePrev()
-		return &Document{Root: &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}, Source: source}, nil
+		return noTreeDocument(source), nil
 	}
 
 	var tree *gotreesitter.Tree
@@ -456,34 +462,16 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 		return budgetFallback(source, ctx.budget), nil
 	}
 	if err != nil || tree == nil {
-		return &Document{Root: &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}, Source: source}, nil
+		return noTreeDocument(source), nil
 	}
 
 	bt := gotreesitter.Bind(tree)
-	recoveryStart := 0
-	if ctx != nil {
-		recoveryStart = len(ctx.recoveryDiagnostics)
-	}
 	root := convertBlockCtx(bt, bt.RootNode(), source, ctx)
 	if root == nil {
 		root = &Node{Type: NodeDocument, Range: sourceRange(source, 0, len(source))}
 	}
 	repairProtectedHeadings(root, headingRepairs, source, ctx)
 	doc := &Document{Root: root, Source: source}
-	if ctx != nil && recoveryStart < len(ctx.recoveryDiagnostics) {
-		doc.diagnostics = append(doc.diagnostics, ctx.recoveryDiagnostics[recoveryStart:]...)
-		ctx.recoveryDiagnostics = ctx.recoveryDiagnostics[:recoveryStart]
-	}
-	// If any inline span hit its work or deadline budget during conversion,
-	// attach a diagnostic so callers know the inline parse stopped early.
-	if ctx != nil && ctx.inlineTimeoutOccurred {
-		doc.diagnostics = append(doc.diagnostics, Diagnostic{
-			Code:     "MDPP-PARSE-005",
-			Severity: SeverityWarning,
-			Message:  "inline parse aborted: one or more spans reached a parser work or deadline limit; affected spans treated as raw text",
-			Range:    sourceRange(source, 0, len(source)),
-		})
-	}
 	doc.linkRefDefs = collectLinkRefDefs(bt, bt.RootNode(), ctx.gfm())
 	doc.extractFrontmatterCtx(ctx)
 	postProcess(doc, ctx)
@@ -495,6 +483,16 @@ func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *pa
 		ctx.cache.pruneNotIn(ctx.seen)
 	}
 	return doc, tree
+}
+
+// noTreeDocument is the document for a source that the block grammar returned
+// no tree for: the source as text, with a diagnostic that covers all of it.
+func noTreeDocument(source []byte) *Document {
+	return textFallbackDocument(source, Diagnostic{
+		Code:     DiagNoTree,
+		Severity: SeverityWarning,
+		Message:  "the block grammar produced no tree; source returned as text",
+	})
 }
 
 func parseOnlyReferenceDefinitions(source []byte, ctx *parseCtx) *Document {
@@ -832,11 +830,15 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 		quoteStart += len(line) + 1
 	}
 	quote := &Node{Type: NodeBlockquote, Range: sourceRange(source, min(quoteStart, quoteEnd), quoteEnd)}
+	var diagnostics []Diagnostic
 	if inner != nil && inner.Root != nil {
 		quote.Children = inner.Root.Children
-		remapQuoteRanges(quote, source, lines, contentLines, offsets)
+		// The inner document's diagnostics refer to the stripped text, like
+		// its nodes. They move through the same byte map; a range that has no
+		// source byte (inside a tab) becomes the range of the whole quote.
+		diagnostics = remapQuoteRanges(quote, source, lines, contentLines, offsets, inner.diagnostics)
 	}
-	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{quote}, Range: sourceRange(source, 0, len(source))}, Source: source}
+	doc := &Document{Root: &Node{Type: NodeDocument, Children: []*Node{quote}, Range: sourceRange(source, 0, len(source))}, Source: source, diagnostics: diagnostics}
 	doc.extractFrontmatterCtx(ctx)
 	return doc
 }
@@ -846,8 +848,10 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 // without a range keep none. offsets[k][c] is the byte offset in line k of the
 // source of content byte c. Where a tab was expanded to spaces, a position
 // inside the run of spaces has no source byte: a node that starts or ends
-// there gets no range rather than a wrong one.
-func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, offsets [][]int) {
+// there gets no range rather than a wrong one. It returns diagnostics with
+// their ranges moved the same way; a diagnostic whose range has no source byte
+// gets the range of the quote, which is certain to cover it.
+func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, offsets [][]int, diagnostics []Diagnostic) []Diagnostic {
 	origStart := make([]int, len(lines)+1)
 	innerStart := make([]int, len(lines)+1)
 	for k := range lines {
@@ -885,6 +889,20 @@ func remapQuoteRanges(quote *Node, source []byte, lines, contentLines []string, 
 			return true
 		})
 	}
+	out := make([]Diagnostic, 0, len(diagnostics))
+	for _, d := range diagnostics {
+		if d.Range.StartLine != 0 {
+			start, startOK := mapPos(d.Range.StartByte, false)
+			end, endOK := mapPos(d.Range.EndByte, true)
+			if startOK && endOK {
+				d.Range = sourceRange(source, min(start, len(source)), min(end, len(source)))
+			} else {
+				d.Range = quote.Range
+			}
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // stripQuoteContinuationMarkers removes blockquote continuation markers
@@ -1358,7 +1376,9 @@ func appendParsedSegmentCtx(children []*Node, diagnostics *[]Diagnostic, linkRef
 			cachedChildren = append(cachedChildren, cloneAndShift(child, -start, nil))
 		}
 	}
-	if cacheEnabled {
+	// A chunk that has diagnostics is not cached: a cache hit would give back
+	// its nodes without the diagnostics that say what was discarded.
+	if cacheEnabled && len(doc.diagnostics) == 0 {
 		key := hashContent(roleChunk, chunkSource)
 		ctx.cache.put(key, &cacheEntry{
 			children:  cachedChildren,
@@ -1644,8 +1664,23 @@ func fastTrimSpace(ctx *parseCtx, s string) string {
 	return s[left:right]
 }
 
+// parseFastBlockChunk collects diagnostics only when the planned attempt succeeds.
 func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
-	if !ctx.shortcut("parseFastBlockChunk") || fastBlockChunkDisabled || len(source) == 0 || bytes.HasPrefix(source, []byte("---\n")) || !fastChunkBytesAcceptedContext(source, ctx) {
+	if !ctx.shortcut("parseFastBlockChunk") {
+		return nil, false
+	}
+	mark := ctx.mark()
+	doc, ok := parseFastBlockChunkAttempt(source, ctx)
+	if !ok {
+		ctx.rewind(mark)
+		return nil, false
+	}
+	ctx.collect(doc, source, mark)
+	return doc, true
+}
+
+func parseFastBlockChunkAttempt(source []byte, ctx *parseCtx) (*Document, bool) {
+	if fastBlockChunkDisabled || len(source) == 0 || bytes.HasPrefix(source, []byte("---\n")) || !fastChunkBytesAcceptedContext(source, ctx) {
 		return nil, false
 	}
 	if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
@@ -1849,6 +1884,9 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 			for _, child := range doc.Root.Children {
 				shiftNodeRanges(child, source, lines[block.start].start)
 				children = append(children, child)
+			}
+			if ctx != nil {
+				ctx.recoveryDiagnostics = append(ctx.recoveryDiagnostics, bodyDocDiagnostics(doc, source, lines[block.start].start)...)
 			}
 		case 'T':
 			node, _ := fastTableNode(source, lines, block.start, ctx)
@@ -2401,7 +2439,7 @@ func parseContainerChildrenCtx(source []byte, lines []sourceLine, from int, to i
 			continue
 		}
 		found = true
-		children = appendParsedChunkCtx(children, source[cursor:line.start], source, cursor, ctx)
+		children = appendParsedChunkCtx(children, &diagnostics, source[cursor:line.start], source, cursor, ctx)
 
 		closeIndex := -1
 		depth := 1
@@ -2444,8 +2482,8 @@ func parseContainerChildrenCtx(source []byte, lines []sourceLine, from int, to i
 			diagnostics = append(diagnostics, Diagnostic{
 				Code:     "MDPP-PARSE-002",
 				Severity: SeverityWarning,
-				Message:  "container directive auto-closed at end of document",
-				Range:    sourceRange(source, line.start, line.end),
+				Message:  "container directive auto-closed at end of document; its extent is a guess",
+				Range:    sourceRange(source, line.start, chunkEnd),
 			})
 		}
 
@@ -2475,28 +2513,37 @@ func parseContainerChildrenCtx(source []byte, lines []sourceLine, from int, to i
 	if !found {
 		return nil, nil, false
 	}
-	children = appendParsedChunkCtx(children, source[cursor:chunkEnd], source, cursor, ctx)
+	children = appendParsedChunkCtx(children, &diagnostics, source[cursor:chunkEnd], source, cursor, ctx)
 	return children, diagnostics, found
 }
 
 func appendParsedChunk(children []*Node, chunk []byte, source []byte, offset int) []*Node {
-	return appendParsedChunkCtx(children, chunk, source, offset, nil)
+	return appendParsedChunkCtx(children, nil, chunk, source, offset, nil)
 }
 
 // appendParsedChunkCtx parses a container-path source chunk, shifts its node
 // ranges to be relative to the outer source, and appends the resulting block
-// nodes. When ctx is non-nil, the chunk's parsed children are cached (by
-// chunk content hash) so identical chunks on a subsequent incremental parse
-// reuse the cached subtrees instead of re-parsing.
-func appendParsedChunkCtx(children []*Node, chunk []byte, source []byte, offset int, ctx *parseCtx) []*Node {
+// nodes. The diagnostics of the chunk, shifted the same way, are appended to
+// diagnostics when it is not nil. When ctx is non-nil, the chunk's parsed
+// children are cached (by chunk content hash) so identical chunks on a
+// subsequent incremental parse reuse the cached subtrees instead of
+// re-parsing; a chunk with diagnostics is not cached, because a cache hit would
+// lose them.
+func appendParsedChunkCtx(children []*Node, diagnostics *[]Diagnostic, chunk []byte, source []byte, offset int, ctx *parseCtx) []*Node {
 	if strings.TrimSpace(string(chunk)) == "" {
 		return children
+	}
+	addDiagnostics := func(doc *Document) {
+		if diagnostics != nil {
+			*diagnostics = append(*diagnostics, bodyDocDiagnostics(doc, source, offset)...)
+		}
 	}
 	if ctx != nil && ctx.cache == nil {
 		doc := parseDocumentCtx(chunk, ctx)
 		if doc == nil || doc.Root == nil {
 			return children
 		}
+		addDiagnostics(doc)
 		for _, child := range doc.Root.Children {
 			shiftNodeRanges(child, source, offset)
 			children = append(children, child)
@@ -2519,19 +2566,23 @@ func appendParsedChunkCtx(children []*Node, chunk []byte, source []byte, offset 
 		if doc == nil || doc.Root == nil {
 			return children
 		}
+		addDiagnostics(doc)
 		cachedChildren := make([]*Node, 0, len(doc.Root.Children))
 		for _, child := range doc.Root.Children {
 			shiftNodeRanges(child, source, offset)
 			children = append(children, child)
 			cachedChildren = append(cachedChildren, cloneAndShift(child, -offset, nil))
 		}
-		ctx.cache.put(key, &cacheEntry{children: cachedChildren, baseStart: 0})
+		if len(doc.diagnostics) == 0 {
+			ctx.cache.put(key, &cacheEntry{children: cachedChildren, baseStart: 0})
+		}
 		return children
 	}
 	doc := parseDocument(chunk)
 	if doc == nil || doc.Root == nil {
 		return children
 	}
+	addDiagnostics(doc)
 	for _, child := range doc.Root.Children {
 		shiftNodeRanges(child, source, offset)
 		children = append(children, child)
@@ -2603,7 +2654,9 @@ func parseBodyChunkCtx(source []byte, bodyStart, bodyEnd int, ctx *parseCtx) (*D
 		cachedChildren = append(cachedChildren, cloneAndShift(child, 0, nil))
 		shiftNodeRanges(child, source, bodyStart)
 	}
-	ctx.cache.put(key, &cacheEntry{children: cachedChildren, baseStart: 0})
+	if len(doc.diagnostics) == 0 {
+		ctx.cache.put(key, &cacheEntry{children: cachedChildren, baseStart: 0})
+	}
 	return doc, true
 }
 
@@ -3964,7 +4017,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 		// Cache heading subtrees by their full text content so an unchanged
 		// heading on an incremental reparse reuses the prior inline parse.
 		if ctx != nil && ctx.cache != nil {
-			recoveryStart := len(ctx.recoveryDiagnostics)
+			recoveryStart, stopStart := len(ctx.recoveryDiagnostics), len(ctx.inlineStops)
 			rawText := bt.NodeText(n)
 			key := hashString(roleHeading, rawText)
 			ctx.recordSeen(key)
@@ -3983,7 +4036,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 			if text, start, ok := extractHeadingTextSpan(bt, n); ok && text != "" {
 				heading.Children = append(heading.Children, parseInlineAt(text, source, start, ctx)...)
 			}
-			if len(ctx.recoveryDiagnostics) == recoveryStart {
+			if len(ctx.recoveryDiagnostics) == recoveryStart && len(ctx.inlineStops) == stopStart {
 				ctx.cache.put(key, &cacheEntry{root: cloneForCache(heading, int(n.StartByte())), baseStart: int(n.StartByte())})
 			}
 			return heading
@@ -4009,9 +4062,9 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 		// Cache paragraph subtrees by their full text content. The expensive
 		// work here is parseInlineAt — a cached hit replaces a second
 		// tree-sitter inline parse with a pointer copy + range shift.
-		recoveryStart := 0
+		recoveryStart, stopStart := 0, 0
 		if ctx != nil && ctx.cache != nil {
-			recoveryStart = len(ctx.recoveryDiagnostics)
+			recoveryStart, stopStart = len(ctx.recoveryDiagnostics), len(ctx.inlineStops)
 			key := hashString(roleParagraph, nodeText)
 			ctx.recordSeen(key)
 			if e, ok := ctx.cache.get(key); ok {
@@ -4071,7 +4124,7 @@ func convertBlockCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, source []
 		}
 		// Split text nodes on newlines → insert NodeSoftBreak
 		para.Children = splitTextNewlines(para.Children)
-		if ctx != nil && ctx.cache != nil && len(ctx.recoveryDiagnostics) == recoveryStart {
+		if ctx != nil && ctx.cache != nil && len(ctx.recoveryDiagnostics) == recoveryStart && len(ctx.inlineStops) == stopStart {
 			key := hashString(roleParagraph, nodeText)
 			ctx.cache.put(key, &cacheEntry{root: cloneForCache(para, int(nodeStart)), baseStart: int(nodeStart)})
 		}
@@ -4982,15 +5035,19 @@ func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recov
 		return splitTextNewlines(nodes)
 	}
 	if inlineLang() == nil {
+		appendInlineSpanDiscarded(ctx, source, text, baseOffset, "the inline grammar is not available; preserved source as text")
 		return []*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))}
 	}
 	src := []byte(text)
 	tree, stopped, err := parsePooledInline(src, ctx)
 	if err != nil || tree == nil || stopped {
-		// Record a budget stop so the surrounding parse can return the full
-		// source as text with MDPP-PARSE-005.
+		// The span is kept as text. Say so: a budget stop is reported with the
+		// span (and the surrounding parse may return the whole source as text
+		// with MDPP-PARSE-005); any other failure is a syntax recovery.
 		if stopped && ctx != nil {
-			ctx.inlineTimeoutOccurred = true
+			ctx.noteInlineStop(source, baseOffset, text)
+		} else {
+			appendInlineSpanDiscarded(ctx, source, text, baseOffset, "the inline grammar returned no tree; preserved source as text")
 		}
 		if tree != nil {
 			tree.Release()
@@ -5002,9 +5059,11 @@ func parseInlineWithRecoveryAt(text string, source []byte, baseOffset int, recov
 	bt := gotreesitter.Bind(tree)
 	root := bt.RootNode()
 	if errors := inlineErrorNodes(root); len(errors) > 0 {
-		for _, node := range errors {
-			appendInlineParseErrorDiagnostic(ctx, source, text, baseOffset, int(node.StartByte()), int(node.EndByte()))
-		}
+		// The whole span is returned as text, so the whole span is uncertain,
+		// not only the nodes where the grammar reported the error.
+		first := errors[0]
+		appendInlineSpanDiscarded(ctx, source, text, baseOffset,
+			fmt.Sprintf("unrecognized inline syntax at bytes %d-%d of the span; preserved the whole span as text", first.StartByte(), first.EndByte()))
 		return []*Node{textNodeRange(text, inlineSpanRange(source, baseOffset, 0, len(text)))}
 	}
 	nodes := convertInlineChildren(bt, root, source, baseOffset, ctx)
@@ -5407,15 +5466,18 @@ func missingTreeNodes(root *gotreesitter.Node) []*gotreesitter.Node {
 	return missing
 }
 
-func appendInlineParseErrorDiagnostic(ctx *parseCtx, source []byte, text string, baseOffset, start, end int) {
+// appendInlineSpanDiscarded records that the inline span text was kept as plain
+// text and lost whatever structure it holds. The diagnostic covers the whole
+// span.
+func appendInlineSpanDiscarded(ctx *parseCtx, source []byte, text string, baseOffset int, message string) {
 	if ctx == nil || len(source) == 0 {
 		return
 	}
 	ctx.recoveryDiagnostics = append(ctx.recoveryDiagnostics, Diagnostic{
-		Code:     "MDPP-PARSE-006",
+		Code:     DiagSyntaxRecovery,
 		Severity: SeverityWarning,
-		Message:  "unrecognized inline syntax; preserved source as text",
-		Range:    inlineDiagnosticRange(source, text, baseOffset, start, end),
+		Message:  message,
+		Range:    inlineDiagnosticRange(source, text, baseOffset, 0, len(text)),
 	})
 }
 
@@ -5496,8 +5558,9 @@ func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, s
 			appendLooseRaw(string(source[cursor:childStart]), cursor)
 		}
 
+		mark := ctx.mark()
 		if converted := convertBlockCtx(bt, child, source, ctx); converted != nil {
-			if loose.Len() > 0 && joinSplitParagraphLine(converted, loose.String(), looseStart, source, ctx) {
+			if loose.Len() > 0 && joinSplitParagraphLine(converted, loose.String(), looseStart, source, ctx, mark) {
 				loose.Reset()
 				looseStart = 0
 				looseAttach = false
@@ -5528,7 +5591,7 @@ func convertBlockChildrenCtx(bt *gotreesitter.BoundTree, n *gotreesitter.Node, s
 // paragraph starting where it ends. A block cannot start in the middle of a
 // line, so both belong to one paragraph. The first paragraph of block is
 // replaced by a paragraph that starts at the loose text.
-func joinSplitParagraphLine(block *Node, loose string, looseStart int, source []byte, ctx *parseCtx) bool {
+func joinSplitParagraphLine(block *Node, loose string, looseStart int, source []byte, ctx *parseCtx, mark diagMark) bool {
 	first := block
 	if block.Type == NodeDocument {
 		if len(block.Children) == 0 {
@@ -5542,6 +5605,10 @@ func joinSplitParagraphLine(block *Node, loose string, looseStart int, source []
 		return false
 	}
 	text := strings.TrimRight(string(source[looseStart:first.Range.EndByte]), "\n")
+	// The paragraph is read again from its first byte. What its first reading
+	// recorded (made since mark, inside its range) belongs to a reading that is
+	// discarded; the new reading records its own.
+	ctx.discardWithin(mark, first.Range)
 	first.Range = sourceRange(source, looseStart, first.Range.EndByte)
 	first.Children = splitTextNewlines(parseInlineAt(text, source, looseStart, ctx))
 	return true
@@ -5621,6 +5688,10 @@ func appendRecoveredBlockText(nodes *[]*Node, text string, source []byte, offset
 	doc := parseDocumentCtx([]byte(text), recoverCtx)
 	if doc == nil || doc.Root == nil || !recoveredBlockUseful(doc.Root.Children) {
 		return false
+	}
+	// What the recovery parse discarded is discarded from the document too.
+	if ctx != nil {
+		ctx.recoveryDiagnostics = append(ctx.recoveryDiagnostics, bodyDocDiagnostics(doc, source, offset)...)
 	}
 	for _, child := range doc.Root.Children {
 		shiftNodeRanges(child, source, offset)

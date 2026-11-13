@@ -54,7 +54,7 @@ func TestReviewCommentPrecheckCancellation(t *testing.T) {
 	c := &scanCancelContext{}
 	ctx := &parseCtx{budget: newParseBudget(c, len(text), ParseOptions{})}
 	nodes := parseInlineAt(text, []byte(text), 0, ctx)
-	if !ctx.inlineTimeoutOccurred || ctx.budget.hit != "context cancellation" || len(nodes) != 1 || nodes[0].Literal != text {
-		t.Fatalf("timeout=%v hit=%q nodes=%d checks=%d", ctx.inlineTimeoutOccurred, ctx.budget.hit, len(nodes), c.calls)
+	if len(ctx.inlineStops) == 0 || ctx.budget.hit != "context cancellation" || len(nodes) != 1 || nodes[0].Literal != text {
+		t.Fatalf("timeout=%v hit=%q nodes=%d checks=%d", len(ctx.inlineStops) != 0, ctx.budget.hit, len(nodes), c.calls)
 	}
 }

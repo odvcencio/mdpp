@@ -24,7 +24,7 @@ func parseCommentDelimitersAt(text string, source []byte, baseOffset int, commen
 		if ctx.budget.check() {
 			return false
 		}
-		ctx.inlineTimeoutOccurred = true
+		ctx.noteInlineStop(source, baseOffset, text)
 		return true
 	}
 	abort := func() ([]*Node, bool) {
@@ -44,7 +44,7 @@ func parseCommentDelimitersAt(text string, source []byte, baseOffset int, commen
 			atomEnd[span[0]] = span[1]
 		}
 	}
-	scanner := &commentScan{text: text, ctx: ctx}
+	scanner := &commentScan{text: text, source: source, baseOffset: baseOffset, ctx: ctx}
 	scanner.indexBackticks()
 	if scanner.cancelled {
 		return abort()

@@ -212,6 +212,18 @@ func TestNodeRangesPointIntoSource(t *testing.T) {
 			t.Logf("verified %d shared differential assertion markers", len(cachedFastPathComparisons))
 		}
 	}
+	if combine && shareFast {
+		unique, verdicts, err := sharedFastResults(inputs[:originalCount], cachedFastPathComparisons)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fastReportingMu.Lock()
+		differentialProfile = ProfileMarkdownPlus
+		dumpWithoutRanges = os.Getenv("MDPP_FASTPATH_NORANGES") != ""
+		reportFastPathComparisons(t, inputs[:originalCount], unique, verdicts)
+		dumpWithoutRanges = false
+		fastReportingMu.Unlock()
+	}
 	if len(failures) == 0 {
 		return
 	}
@@ -228,6 +240,30 @@ func TestNodeRangesPointIntoSource(t *testing.T) {
 		fmt.Fprintf(&sb, "\n  %q: %s", k, failures[k])
 	}
 	t.Errorf("%d of %d inputs have a node with a bad range, for example:%s", len(failures), originalCount, sb.String())
+}
+
+// sharedFastResults requires a verdict for every distinct differential input.
+func sharedFastResults(inputs []string, comparisons map[string]bool) ([]string, [][]string, error) {
+	unique := make([]string, 0, len(comparisons))
+	seen := make(map[string]bool, len(comparisons))
+	var verdicts [][]string
+	for _, src := range inputs {
+		if seen[src] {
+			continue
+		}
+		seen[src] = true
+		same, ok := comparisons[src]
+		if !ok {
+			return nil, nil, fmt.Errorf("differential input %q missing from shared comparisons", src)
+		}
+		unique = append(unique, src)
+		if same {
+			verdicts = append(verdicts, nil)
+		} else {
+			verdicts = append(verdicts, []string{"different"})
+		}
+	}
+	return unique, verdicts, nil
 }
 
 // Text nodes whose literal is plain source text must cover exactly that

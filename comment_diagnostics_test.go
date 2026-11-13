@@ -11,7 +11,7 @@ func TestCommentMalformedDiagnosticsAndBudget(t *testing.T) {
 		work   int64
 		ranges [][2]int
 	}{
-		{"*a <!--> <a href=\" b*", 360, [][2]int{{9, 20}, {10, 11}}},
+		{"*a <!--> <a href=\" b*", 360, [][2]int{{8, 20}}},
 		{"*a <!--> [x]( b*", 0, [][2]int{{8, 16}}},
 	}
 	for _, c := range cases {

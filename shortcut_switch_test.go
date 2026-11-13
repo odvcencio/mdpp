@@ -44,6 +44,8 @@ var notShortcuts = map[string]string{
 	"parseLoweredDocumentCtx":    "the grammar path",
 	"parseBodyChunkCtx":          "re-enters the grammar path for a container body",
 	"parseContainerDocument":     "default-profile wrapper of parseContainerDocumentCtx",
+	"parseFastBlockChunkAttempt": "the attempt that parseFastBlockChunk makes after it has consulted the switch",
+	"noTreeDocument":             "a limit, not a reader: the source as text with a diagnostic",
 	"parseLongLineFallback":      "a limit, not a reader: a line over the complexity limit is kept as text with a diagnostic",
 	"deepListUncertainDocument":  "a limit, not a reader: the source as text with a diagnostic",
 	"budgetFallback":             "a limit, not a reader: the source as text with a diagnostic",
