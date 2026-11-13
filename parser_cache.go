@@ -347,9 +347,10 @@ func cloneAndShift(root *Node, delta int, source []byte) *Node {
 		return nil
 	}
 	n := &Node{
-		Type:    root.Type,
-		Literal: root.Literal,
-		raw:     root.raw,
+		Type:            root.Type,
+		Literal:         root.Literal,
+		raw:             root.raw,
+		referenceSuffix: root.referenceSuffix,
 	}
 	if root.Attrs != nil {
 		n.Attrs = make(map[string]string, len(root.Attrs))
@@ -400,9 +401,10 @@ func cloneAndShiftAnchored(root *Node, delta, oldRootLine, oldRootCol, newRootLi
 		return nil
 	}
 	n := &Node{
-		Type:    root.Type,
-		Literal: root.Literal,
-		raw:     root.raw,
+		Type:            root.Type,
+		Literal:         root.Literal,
+		raw:             root.raw,
+		referenceSuffix: root.referenceSuffix,
 		Range: shiftRangeAnchored(
 			root.Range,
 			delta,

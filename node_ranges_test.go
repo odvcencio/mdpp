@@ -68,14 +68,20 @@ func pointMatches(source []byte, offset, line, col int) bool {
 
 func TestNodeRangesPointIntoSource(t *testing.T) {
 	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
-	failures := map[string]string{}
-	for _, src := range inputs {
+	results, child := corpusShardMap(t, inputs, func(_ int, src string) ([]string, error) {
 		doc, err := Parse([]byte(src))
 		if err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
-		if problems := checkNodeRanges(doc); len(problems) > 0 {
-			failures[src] = problems[0]
+		return checkNodeRanges(doc), nil
+	})
+	if child {
+		return
+	}
+	failures := map[string]string{}
+	for i, problems := range results {
+		if len(problems) > 0 {
+			failures[inputs[i]] = problems[0]
 		}
 	}
 	if len(failures) == 0 {

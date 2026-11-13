@@ -228,7 +228,29 @@ func TestFastPathMatchesFullParser(t *testing.T) {
 	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
 	dumpWithoutRanges = os.Getenv("MDPP_FASTPATH_NORANGES") != ""
 	defer func() { dumpWithoutRanges = false }()
-	bad := fastPathDifferences(inputs)
+	seen := map[string]bool{}
+	unique := make([]string, 0, len(inputs))
+	for _, in := range inputs {
+		if !seen[in] {
+			seen[in] = true
+			unique = append(unique, in)
+		}
+	}
+	results, child := corpusShardMap(t, unique, func(_ int, in string) ([]string, error) {
+		if parseWithFastPath(in, true) != parseWithFastPath(in, false) {
+			return []string{"different"}, nil
+		}
+		return nil, nil
+	})
+	if child {
+		return
+	}
+	var bad []string
+	for i, problems := range results {
+		if len(problems) > 0 {
+			bad = append(bad, unique[i])
+		}
+	}
 	if path := os.Getenv("MDPP_FASTPATH_REPORT"); path != "" {
 		sort.Slice(bad, func(i, j int) bool {
 			if len(bad[i]) != len(bad[j]) {
