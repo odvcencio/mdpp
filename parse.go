@@ -26,6 +26,9 @@ var (
 type headingTextRepair struct {
 	ordinal int
 	text    string
+	// offset is the byte offset of text in the source, so that the re-parsed
+	// inline nodes keep their source ranges.
+	offset int
 }
 
 // Cached languages, initialised once.
@@ -1118,10 +1121,17 @@ func parseFastBlockChunk(source []byte, ctx *parseCtx) (*Document, bool) {
 	}
 	lines := sourceLines(source)
 	children := make([]*Node, 0, len(lines)/2)
+	last := -1
 	for i := 0; i < len(lines); {
 		if ctx != nil && ctx.budget != nil && !ctx.budget.check() {
 			break
 		}
+		// Every pass must consume a line. A builder that returns without
+		// advancing falls back to the full parser instead of looping forever.
+		if i <= last {
+			return nil, false
+		}
+		last = i
 		line := lines[i]
 		trimmed := strings.TrimSpace(line.text)
 		if trimmed == "" {
@@ -1921,7 +1931,8 @@ func protectSlowATXHeadingPunctuation(source []byte) ([]byte, []headingTextRepai
 			for _, off := range htmlOffsets {
 				protected[start+off] = '0'
 			}
-			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text})
+			textStart, _, _ := atxHeadingTextRange(line)
+			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text, offset: start + textStart})
 			headingOrdinal++
 			previousLineCanBeSetextHeading = false
 		} else if text, punctOffset, ok := slowATXHeadingPunctuation(line); ok {
@@ -1929,7 +1940,8 @@ func protectSlowATXHeadingPunctuation(source []byte) ([]byte, []headingTextRepai
 				protected = append([]byte(nil), source...)
 			}
 			protected[start+punctOffset] = '0'
-			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text})
+			textStart, _, _ := atxHeadingTextRange(line)
+			repairs = append(repairs, headingTextRepair{ordinal: headingOrdinal, text: text, offset: start + textStart})
 			headingOrdinal++
 			previousLineCanBeSetextHeading = false
 		} else if isATXHeadingLine(line) {
@@ -2367,7 +2379,11 @@ func advanceTextPosition(line int, col int, text string) (int, int) {
 }
 
 func textNodeRange(text string, r Range) *Node {
-	node := textNode(decodeMarkdownText(text))
+	decoded := decodeMarkdownText(text)
+	node := textNode(decoded)
+	if decoded != text {
+		node.raw = text
+	}
 	node.Range = r
 	return node
 }
@@ -2595,7 +2611,7 @@ func repairProtectedHeadings(root *Node, repairs []headingTextRepair, source []b
 			return true
 		}
 		if repairIndex < len(repairs) && repairs[repairIndex].ordinal == headingOrdinal {
-			n.Children = parseInlineAt(repairs[repairIndex].text, source, -1, ctx)
+			n.Children = parseInlineAt(repairs[repairIndex].text, source, repairs[repairIndex].offset, ctx)
 			repairIndex++
 		}
 		headingOrdinal++
@@ -5509,11 +5525,18 @@ func findChild(bt *gotreesitter.BoundTree, n *gotreesitter.Node, nodeType string
 func splitTextNewlines(nodes []*Node) []*Node {
 	var out []*Node
 	for _, n := range nodes {
-		if n.Type != NodeText || !strings.Contains(n.Literal, "\n") {
+		// Split at the line ends of the source, before escapes and entities
+		// are decoded: a decoded line feed ("&#10;") is not a line end of the
+		// source and stays in the text.
+		src := n.Literal
+		if n.raw != "" && decodeMarkdownText(n.raw) == n.Literal {
+			src = n.raw
+		}
+		if n.Type != NodeText || !strings.Contains(src, "\n") {
 			out = append(out, n)
 			continue
 		}
-		lines := strings.Split(n.Literal, "\n")
+		lines := strings.Split(src, "\n")
 		cursor := 0
 		// Track the line and column at cursor as it advances. Rescanning the
 		// prefix for every piece (textSliceRange) made long text nodes quadratic.

@@ -885,6 +885,7 @@ func FuzzParse(f *testing.F) {
 	f.Add([]byte(":::warning\n:::tip\nbody\n:::\n"))
 	f.Add([]byte(strings.Repeat(":::a\n", 200) + strings.Repeat(":::\n", 200)))
 	f.Add([]byte("[[toc]]\n\n## A\n\n:::warning [[toc]] :::\n"))
+	f.Add([]byte("# A\n\n" + strings.Repeat("segmented padding\n", 120) + "\n## B\n\ntext\n\n## C\n\n0. **zero** item\n1. next\n"))
 
 	f.Fuzz(func(t *testing.T, src []byte) {
 		if len(src) > 1<<14 {
