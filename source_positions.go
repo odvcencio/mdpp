@@ -130,3 +130,71 @@ func indexedSourceLineCol(source []byte, offset int) (int, int, bool) {
 	}
 	return line, column, true
 }
+
+// remapLoweredRanges moves every range in doc from the lowered text that the
+// grammar read back to original. The lowering only inserts two-byte "> "
+// prefixes at the start of lines; inserts holds the offset in the lowered text
+// of each one, in ascending order. An offset that falls inside an insertion
+// maps to the point where the insertion was made. A node that has no range
+// keeps none.
+func remapLoweredRanges(doc *Document, inserts []int, original []byte) {
+	if doc == nil || len(inserts) == 0 {
+		return
+	}
+	const insertLen = 2
+	lineStarts := []int{0}
+	for off, b := range original {
+		if b == '\n' {
+			lineStarts = append(lineStarts, off+1)
+		}
+	}
+	mapOffset := func(o int) int {
+		k := sort.Search(len(inserts), func(i int) bool { return inserts[i] >= o })
+		removed := k * insertLen
+		if k > 0 && inserts[k-1]+insertLen > o {
+			removed -= inserts[k-1] + insertLen - o
+		}
+		o -= removed
+		if o < 0 {
+			o = 0
+		}
+		if o > len(original) {
+			o = len(original)
+		}
+		return o
+	}
+	lineCol := func(o int) (int, int) {
+		line := sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i] > o })
+		return line, o - lineStarts[line-1] + 1
+	}
+	mapRange := func(r Range) Range {
+		if r.StartLine == 0 {
+			return r
+		}
+		start, end := mapOffset(r.StartByte), mapOffset(r.EndByte)
+		if end < start {
+			end = start
+		}
+		r.StartByte, r.EndByte = start, end
+		r.StartLine, r.StartCol = lineCol(start)
+		r.EndLine, r.EndCol = lineCol(end)
+		return r
+	}
+	seen := map[*Node]bool{}
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		if n == nil || seen[n] {
+			return
+		}
+		seen[n] = true
+		n.Range = mapRange(n.Range)
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(doc.Root)
+	for i := range doc.diagnostics {
+		doc.diagnostics[i].Range = mapRange(doc.diagnostics[i].Range)
+	}
+	doc.Source = original
+}

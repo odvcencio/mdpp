@@ -130,7 +130,7 @@ func foldComponentChildren(children []*Node) []*Node {
 			closeIdx := matchingCloseIndex(children, i, name)
 			if closeIdx > i {
 				comp := newComponentNode(name, strings.TrimSpace(m[2]))
-				comp.Range = child.Range
+				comp.Range = extendRangeTo(child.Range, children[closeIdx].Range)
 				// Recurse into the inner run so nested components fold too.
 				comp.Children = foldComponentChildren(children[i+1 : closeIdx])
 				out = append(out, comp)

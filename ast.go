@@ -76,6 +76,19 @@ type Node struct {
 
 // Range identifies a node's byte span in Document.Source.
 // Lines and columns are 1-indexed; columns are byte columns.
+//
+// Document.Source is the input with line endings normalised to LF and a
+// final newline added when the input had none. Every range indexes that text,
+// whatever rewriting a parse pass did on the way: no range refers to a lowered
+// or stripped copy of the input.
+//
+// A node that has no source text of its own (the table of contents that
+// "[[toc]]" produces, with its list, items and links) has the zero Range.
+// Because lines are 1-indexed, StartLine is never zero for a node that has
+// source text, so the zero value is a marker a caller can test with
+// Node.HasSourceRange. A zero-width node that does sit in the source (an empty
+// table cell) has a non-zero StartLine. The parser never gives a synthesized
+// node a guessed range.
 type Range struct {
 	StartByte int
 	EndByte   int
@@ -189,6 +202,14 @@ func textNode(text string) *Node {
 // newNode creates a node of the given type with optional children.
 func newNode(typ NodeType, children ...*Node) *Node {
 	return &Node{Type: typ, Children: children}
+}
+
+// HasSourceRange reports whether the node's Range points at bytes of
+// Document.Source. It is false for a node that the parser synthesized and that
+// has no source text of its own; such a node has the zero Range. Callers that
+// map a node to the source must test it first.
+func (n *Node) HasSourceRange() bool {
+	return n != nil && n.Range.StartLine > 0
 }
 
 // Attr returns an attribute value or "" if absent.

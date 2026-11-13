@@ -1,30 +1,24 @@
 package mdpp
 
 import (
+	"flag"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"testing"
 )
 
-// rangeExemptTypes are node kinds that are synthesized and have no source
-// text of their own: a table of contents is built from the headings, and
-// its list, items and links point at no bytes.
-//
-// Two more kinds are exempt for now because their post-parse passes rebuild
-// the nodes from lowered text without a mapping back to the source: the body
-// of an alert ("> [!NOTE]") and a definition list.
+// rangeExempt reports whether a node has no source text of its own: a table
+// of contents is built from the headings, and its list, items and links point
+// at no bytes. Such a node has the zero Range (HasSourceRange is false).
 func rangeExempt(n *Node, ancestors []*Node) bool {
-	if n.Type == NodeDefinitionList {
-		return true
-	}
-	// A padding cell that a merged table adds to short rows claims no source.
+	// A padding cell that a merged table adds to a short row claims no source.
 	if n.Type == NodeTableCell && n.Range == (Range{}) && len(n.Children) == 0 {
 		return true
 	}
 	for _, a := range ancestors {
-		switch a.Type {
-		case NodeTableOfContents, NodeAdmonition, NodeDefinitionList:
+		if a.Type == NodeTableOfContents {
 			return true
 		}
 	}
@@ -74,23 +68,79 @@ func pointMatches(source []byte, offset, line, col int) bool {
 	return line == wantLine && col == wantCol
 }
 
+// cachedDefaultRanges contains only assertion results, not parser trees. It is
+// populated in the ordinary single-count full suite when the earlier range
+// test parses the same sources, and is checked in source corpus order below.
+var cachedDefaultRanges map[string][]string
+
+const sourceRangeChecked = "\x00source-range-checked"
+
+func sharedDefaultRangeEnabled() bool {
+	return (flag.Lookup("test.run").Value.String() == "" && flag.Lookup("test.count").Value.String() == "1") || os.Getenv("MDPP_INTERNAL_COMBINED_RANGES") == "1"
+}
+
 func TestNodeRangesPointIntoSource(t *testing.T) {
 	inputs := append(specAndConformanceInputs(t), differentialInputs()...)
-	results, child := corpusShardMap(t, inputs, func(_ int, src string) ([]string, error) {
+	originalCount := len(inputs)
+	combine := sharedDefaultRangeEnabled()
+	var first map[string]int
+	if combine {
+		t.Setenv("MDPP_INTERNAL_COMBINED_RANGES", "1")
+		first = make(map[string]int, len(inputs))
+		for i, s := range inputs {
+			if _, ok := first[s]; !ok {
+				first[s] = i
+			}
+		}
+		for _, s := range rangeInputs(t) {
+			if _, ok := first[s]; !ok {
+				first[s] = len(inputs)
+				inputs = append(inputs, s)
+			}
+		}
+	}
+	results, child := corpusShardMap(t, inputs, func(i int, src string) ([]string, error) {
 		doc, err := Parse([]byte(src))
 		if err != nil {
 			return nil, err
 		}
-		return checkNodeRanges(doc), nil
+		var point string
+		if i < originalCount {
+			if problems := checkNodeRanges(doc); len(problems) > 0 {
+				point = problems[0]
+			}
+		}
+		out := []string{point}
+		if combine && first[src] == i {
+			problems := checkRangeConsistency(doc, src)
+			out = append(out, sourceRangeChecked)
+			out = append(out, problems...)
+		}
+		return out, nil
 	})
 	if child {
 		return
 	}
 	failures := map[string]string{}
+	if combine {
+		cachedDefaultRanges = make(map[string][]string, len(first))
+	}
 	for i, problems := range results {
-		if len(problems) > 0 {
+		if len(problems) == 0 {
+			t.Fatalf("missing range result for input %d", i)
+		}
+		if i < originalCount && problems[0] != "" {
 			failures[inputs[i]] = problems[0]
 		}
+		if combine && first[inputs[i]] == i {
+			if len(problems) < 2 || problems[1] != sourceRangeChecked {
+				t.Fatalf("source range assertion missing for input %d", i)
+			}
+			cachedDefaultRanges[inputs[i]] = problems[2:]
+		}
+	}
+	if combine {
+		t.Logf("verified %d shared source range assertion markers", len(cachedDefaultRanges))
 	}
 	if len(failures) == 0 {
 		return
@@ -107,7 +157,7 @@ func TestNodeRangesPointIntoSource(t *testing.T) {
 		}
 		fmt.Fprintf(&sb, "\n  %q: %s", k, failures[k])
 	}
-	t.Errorf("%d of %d inputs have a node with a bad range, for example:%s", len(failures), len(inputs), sb.String())
+	t.Errorf("%d of %d inputs have a node with a bad range, for example:%s", len(failures), originalCount, sb.String())
 }
 
 // Text nodes whose literal is plain source text must cover exactly that

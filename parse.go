@@ -280,17 +280,39 @@ func parseDocumentRetainTreeCtx(source []byte, prevTree *gotreesitter.Tree, ctx 
 	ctx.containerDepth++
 	defer func() { ctx.containerDepth-- }()
 	source = normalizeLineEndings(source)
+	// Every range in the result refers to this text (plus a final newline), not
+	// to the lowered copy that the grammar reads.
+	original := source
+	var inserts []int
 	if _, frontmatterEnd, ok := parseFrontmatter(source, nil); ok {
-		body := lowerMarkdownPlusSource(source[frontmatterEnd:])
-		preserved := append([]byte(nil), source[:frontmatterEnd]...)
-		source = append(preserved, body...)
+		body, bodyInserts := lowerMarkdownPlusSource(source[frontmatterEnd:])
+		if len(bodyInserts) > 0 {
+			preserved := append([]byte(nil), source[:frontmatterEnd]...)
+			source = append(preserved, body...)
+			for _, at := range bodyInserts {
+				inserts = append(inserts, at+frontmatterEnd)
+			}
+		}
 	} else {
-		source = lowerMarkdownPlusSource(source)
+		source, inserts = lowerMarkdownPlusSource(source)
 	}
 	// tree-sitter markdown requires a trailing newline for correct parsing.
 	if len(source) > 0 && source[len(source)-1] != '\n' {
 		source = append(source, '\n')
 	}
+	if len(inserts) > 0 && len(original) > 0 && original[len(original)-1] != '\n' {
+		original = append(original[:len(original):len(original)], '\n')
+	}
+	doc, tree := parseLoweredDocumentCtx(source, prevTree, ctx)
+	if len(inserts) > 0 {
+		remapLoweredRanges(doc, inserts, original)
+	}
+	return doc, tree
+}
+
+// parseLoweredDocumentCtx parses source after the alert lowering and the final
+// newline. Ranges in the result refer to source.
+func parseLoweredDocumentCtx(source []byte, prevTree *gotreesitter.Tree, ctx *parseCtx) (*Document, *gotreesitter.Tree) {
 	unregisterPositions := registerSourcePositions(source)
 	defer unregisterPositions()
 
@@ -585,48 +607,74 @@ func decodeMarkdownText(s string) string {
 	var out strings.Builder
 	out.Grow(len(s))
 	for i := 0; i < len(s); {
-		if s[i] == '\\' && i+1 < len(s) && strings.IndexByte(escapedPunctuation, s[i+1]) >= 0 {
-			out.WriteByte(s[i+1])
-			i += 2
+		if decoded, n, ok := decodeMarkdownToken(s, i); ok {
+			out.WriteString(decoded)
+			i += n
 			continue
-		}
-		if s[i] == '&' {
-			end := i + 1
-			if end < len(s) && s[end] == '#' {
-				end++
-				base, limit := byte(10), 7
-				if end < len(s) && (s[end] == 'x' || s[end] == 'X') {
-					end++
-					base, limit = 16, 6
-				}
-				start := end
-				for end < len(s) && end-start < limit && isEntityDigit(s[end], base) {
-					end++
-				}
-				if end > start && end < len(s) && s[end] == ';' {
-					out.WriteString(html.UnescapeString(s[i : end+1]))
-					i = end + 1
-					continue
-				}
-			} else {
-				start := end
-				for end < len(s) && end-start < 31 && isASCIIAlphaNumeric(s[end]) {
-					end++
-				}
-				if end > start && end < len(s) && s[end] == ';' {
-					entity := s[i : end+1]
-					if decoded := html.UnescapeString(entity); decoded != entity {
-						out.WriteString(decoded)
-						i = end + 1
-						continue
-					}
-				}
-			}
 		}
 		out.WriteByte(s[i])
 		i++
 	}
 	return out.String()
+}
+
+// decodeMarkdownToken decodes the escape or entity that starts at s[i]. It
+// returns the decoded text and the number of bytes of s that the token spans.
+func decodeMarkdownToken(s string, i int) (decoded string, n int, ok bool) {
+	if s[i] == '\\' && i+1 < len(s) && strings.IndexByte(escapedPunctuation, s[i+1]) >= 0 {
+		return s[i+1 : i+2], 2, true
+	}
+	if s[i] != '&' {
+		return "", 0, false
+	}
+	end := i + 1
+	if end < len(s) && s[end] == '#' {
+		end++
+		base, limit := byte(10), 7
+		if end < len(s) && (s[end] == 'x' || s[end] == 'X') {
+			end++
+			base, limit = 16, 6
+		}
+		start := end
+		for end < len(s) && end-start < limit && isEntityDigit(s[end], base) {
+			end++
+		}
+		if end > start && end < len(s) && s[end] == ';' {
+			return html.UnescapeString(s[i : end+1]), end + 1 - i, true
+		}
+		return "", 0, false
+	}
+	start := end
+	for end < len(s) && end-start < 31 && isASCIIAlphaNumeric(s[end]) {
+		end++
+	}
+	if end > start && end < len(s) && s[end] == ';' {
+		entity := s[i : end+1]
+		if decoded := html.UnescapeString(entity); decoded != entity {
+			return decoded, end + 1 - i, true
+		}
+	}
+	return "", 0, false
+}
+
+// literalRawOffsets maps byte offsets of decodeMarkdownText(raw) to byte
+// offsets of raw: element j is the raw offset where the j-th decoded byte
+// starts (a byte of a multi-byte decoded token maps to the token's start), and
+// the last element is len(raw).
+func literalRawOffsets(raw string) []int {
+	offsets := make([]int, 0, len(raw)+1)
+	for i := 0; i < len(raw); {
+		if decoded, n, ok := decodeMarkdownToken(raw, i); ok {
+			for range len(decoded) {
+				offsets = append(offsets, i)
+			}
+			i += n
+			continue
+		}
+		offsets = append(offsets, i)
+		i++
+	}
+	return append(offsets, len(raw))
 }
 
 func isEntityDigit(b, base byte) bool {
@@ -637,44 +685,67 @@ func isASCIIAlphaNumeric(b byte) bool {
 	return b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
-func lowerMarkdownPlusSource(source []byte) []byte {
+// lowerMarkdownPlusSource rewrites the continuation lines of an alert
+// ("> [!NOTE]" followed by unprefixed lines) so that the block grammar sees one
+// block quote. It only inserts "> " at the start of lines. It returns the
+// offsets, in the lowered text, of each insertion so that ranges can be mapped
+// back to the input.
+func lowerMarkdownPlusSource(source []byte) ([]byte, []int) {
 	if !bytes.Contains(source, []byte("[!")) {
-		return source
+		return source, nil
 	}
-	lines := strings.Split(string(source), "\n")
-	out := make([]string, 0, len(lines))
+	var out []byte
+	var inserts []int
 	inFence := false
 	inAdmonition := false
-	for _, line := range lines {
+	changed := false
+	for pos := 0; pos <= len(source); {
+		end := bytes.IndexByte(source[pos:], '\n')
+		last := end < 0
+		if last {
+			end = len(source)
+		} else {
+			end += pos
+		}
+		line := string(source[pos:end])
 		trimmed := strings.TrimSpace(line)
+		prefix := false
 		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
 			inFence = !inFence
 		}
-		if inFence {
-			out = append(out, line)
-			continue
-		}
-		if admonitionMarkerLineRe.MatchString(line) {
-			out = append(out, line)
-			inAdmonition = true
-			continue
-		}
-		if inAdmonition {
-			if trimmed == "" {
+		if !inFence {
+			switch {
+			case admonitionMarkerLineRe.MatchString(line):
+				inAdmonition = true
+			case inAdmonition && trimmed == "":
 				inAdmonition = false
-				out = append(out, line)
-				continue
+			case inAdmonition && !strings.HasPrefix(strings.TrimLeft(line, " \t"), ">"):
+				prefix = true
 			}
-			if strings.HasPrefix(strings.TrimLeft(line, " \t"), ">") {
-				out = append(out, line)
-				continue
-			}
-			out = append(out, "> "+line)
-			continue
 		}
-		out = append(out, line)
+		if prefix {
+			if !changed {
+				out = append(make([]byte, 0, len(source)+16), source[:pos]...)
+				changed = true
+			}
+			inserts = append(inserts, len(out))
+			out = append(out, '>', ' ')
+		}
+		if changed {
+			out = append(out, source[pos:end]...)
+			if !last {
+				out = append(out, '\n')
+			}
+		}
+		if last {
+			break
+		}
+		pos = end + 1
 	}
-	return []byte(strings.Join(out, "\n"))
+	if !changed {
+		return source, nil
+	}
+	return out, inserts
 }
 
 func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
@@ -735,7 +806,15 @@ func parseSimpleBlockquoteDocument(source []byte, ctx *parseCtx) *Document {
 	if quoteEnd < len(source) {
 		quoteEnd++
 	}
-	quote := &Node{Type: NodeBlockquote, Range: sourceRange(source, 0, quoteEnd)}
+	// Blank lines before the first marker are not part of the quote.
+	quoteStart := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			break
+		}
+		quoteStart += len(line) + 1
+	}
+	quote := &Node{Type: NodeBlockquote, Range: sourceRange(source, min(quoteStart, quoteEnd), quoteEnd)}
 	if inner != nil && inner.Root != nil {
 		quote.Children = inner.Root.Children
 		remapQuoteRanges(quote, source, lines, contentLines, offsets)
