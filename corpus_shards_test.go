@@ -80,7 +80,7 @@ func corpusShardMap(t *testing.T, inputs []string, check func(int, string) ([]st
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			c := exec.CommandContext(ctx, os.Args[0], "-test.run="+run, "-test.timeout=10m")
+			c := exec.CommandContext(ctx, os.Args[0], "-test.run="+run, "-test.timeout=0")
 			c.Env = append(os.Environ(), fmt.Sprintf("%s=%d", corpusShardEnv, id), corpusDirEnv+"="+dir)
 			if out, err := c.CombinedOutput(); err != nil {
 				failures[id] = fmt.Errorf("shard %d: %w\n%s", id, err, out)

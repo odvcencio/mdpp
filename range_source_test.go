@@ -248,12 +248,33 @@ func TestNodeRangesMatchOriginalSource(t *testing.T) {
 			kinds := map[string]string{}
 			counts := map[string]int{}
 			bad := 0
-			for _, in := range inputs {
-				doc, err := p.parse(in)
-				if err != nil {
-					t.Fatal(err)
+			var results [][]string
+			if p.name == "default" && cachedDefaultRanges != nil {
+				results = make([][]string, len(inputs))
+				for i, in := range inputs {
+					var ok bool
+					results[i], ok = cachedDefaultRanges[in]
+					if !ok {
+						t.Fatalf("source range input %d missing from cache", i)
+					}
 				}
-				problems := checkRangeConsistency(doc, in)
+				cachedDefaultRanges = nil
+				t.Logf("checked %d source range inputs using shared default-profile parses", len(inputs))
+			} else {
+				var child bool
+				results, child = corpusShardMap(t, inputs, func(_ int, in string) ([]string, error) {
+					doc, err := p.parse(in)
+					if err != nil {
+						return nil, err
+					}
+					return checkRangeConsistency(doc, in), nil
+				})
+				if child {
+					return
+				}
+			}
+			for i, problems := range results {
+				in := inputs[i]
 				if len(problems) > 0 {
 					bad++
 				}
