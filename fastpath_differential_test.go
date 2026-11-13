@@ -235,6 +235,8 @@ func conformanceInputs(t testing.TB) []string {
 // reading in the default profile. It does not run in the GFM profile: that
 // profile has no shortcut to compare (see TestGFMProfileTakesNoShortcut).
 func TestFastPathMatchesFullParser(t *testing.T) {
+	// Corpus workers run in subprocesses; overlap independent suites after serial tests finish.
+	t.Parallel()
 	differentialProfile = ProfileMarkdownPlus
 	checkFastPathMatchesFullParser(t)
 }

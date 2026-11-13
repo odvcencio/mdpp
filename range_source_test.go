@@ -243,6 +243,8 @@ func rangeInputs(t testing.TB) []string {
 }
 
 func TestNodeRangesMatchOriginalSource(t *testing.T) {
+	// Corpus workers run in subprocesses; overlap independent suites after serial tests finish.
+	t.Parallel()
 	inputs := rangeInputs(t)
 	for _, p := range rangeTestProfiles {
 		t.Run(p.name, func(t *testing.T) {
