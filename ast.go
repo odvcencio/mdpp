@@ -63,6 +63,11 @@ type Node struct {
 	Literal  string
 	Attrs    map[string]string
 	Range    Range
+
+	// raw is the source text of a Text node whose Literal was decoded from it
+	// (escapes and entities), so that splitting at line ends uses source
+	// positions. It is empty when Literal is the source text.
+	raw string
 }
 
 // Range identifies a node's byte span in Document.Source.
